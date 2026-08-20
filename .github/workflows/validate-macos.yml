@@ -1,0 +1,75 @@
+name: Validate macOS install
+
+on:
+  push:
+    branches: [bootstrap-v0]
+    paths:
+      - '.validate-macos-trigger'
+      - '.github/workflows/validate-macos.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap-v0
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run macOS checks and record results
+        shell: bash
+        run: |
+          set +e
+          mkdir -p /tmp/clonegrown-macos-validation
+          report="$GITHUB_WORKSPACE/.github/validation-macos.txt"
+          : > "$report"
+          failed=0
+          check() {
+            name="$1"; shift
+            log="/tmp/clonegrown-macos-validation/${name}.log"
+            "$@" >"$log" 2>&1
+            rc=$?
+            if [ "$rc" -eq 0 ]; then
+              printf 'PASS %s\n' "$name" >> "$report"
+            else
+              failed=1
+              printf 'FAIL %s rc=%s\n' "$name" "$rc" >> "$report"
+              tail -n 80 "$log" >> "$report"
+              printf '\n' >> "$report"
+            fi
+          }
+          check compile python3 -m py_compile clonegrown.py clonegrown_cli.py clonegrown_core.py clonegrown_state.py clonegrown_repo.py clonegrown_worker.py clonegrown_ops.py
+          check cli-tests python3 -m unittest tests.test_cli -v
+          check installer-syntax sh -n install.sh
+          python3 -m venv /tmp/clonegrown-macos-validation/venv
+          check package-install /tmp/clonegrown-macos-validation/venv/bin/pip install .
+          check installed-help /tmp/clonegrown-macos-validation/venv/bin/clonegrown --help
+          mkdir -p /tmp/clonegrown-macos-validation/home
+          env HOME=/tmp/clonegrown-macos-validation/home \
+              CLONEGROWN_REF=bootstrap-v0 \
+              CLONEGROWN_HOME=/tmp/clonegrown-macos-validation/home/share/clonegrown \
+              CLONEGROWN_BIN_DIR=/tmp/clonegrown-macos-validation/home/bin \
+              sh install.sh >/tmp/clonegrown-macos-validation/installer.log 2>&1
+          rc=$?
+          if [ "$rc" -eq 0 ] \
+             && /tmp/clonegrown-macos-validation/home/bin/clonegrown --help >/dev/null 2>&1 \
+             && [ -f /tmp/clonegrown-macos-validation/home/.claude/skills/clonegrown/SKILL.md ] \
+             && [ -f /tmp/clonegrown-macos-validation/home/.agents/skills/clonegrown/SKILL.md ]; then
+            printf 'PASS installer-e2e\n' >> "$report"
+          else
+            failed=1
+            printf 'FAIL installer-e2e rc=%s\n' "$rc" >> "$report"
+            tail -n 80 /tmp/clonegrown-macos-validation/installer.log >> "$report"
+          fi
+          printf 'OVERALL %s\n' "$([ "$failed" -eq 0 ] && printf PASS || printf FAIL)" >> "$report"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- .github/validation-macos.txt
+          git commit -m 'Record macOS validation diagnostics [skip ci]'
+          git push origin HEAD:bootstrap-v0
+          exit "$failed"
