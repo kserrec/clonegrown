@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clonegrown"
+version = "0.1.0a0"
+description = "Isolated Git clone workspaces for coding agents"
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Version Control :: Git",
+]
+
+[project.scripts]
+clonegrown = "clonegrown:main"
+
+[tool.setuptools]
+py-modules = ["clonegrown", "clonegrown_core", "clonegrown_state", "clonegrown_repo", "clonegrown_worker", "clonegrown_ops"]
