@@ -48,6 +48,23 @@ class ClonegrownCliTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         return rc, payload
 
+    def assert_no_private_fields(self, value) -> None:
+        private = {
+            "canonical_token",
+            "worker_token",
+            "params_hash",
+            "owner_pid",
+            "owner_start",
+            "stage_root",
+        }
+        if isinstance(value, dict):
+            self.assertTrue(private.isdisjoint(value.keys()))
+            for item in value.values():
+                self.assert_no_private_fields(item)
+        elif isinstance(value, list):
+            for item in value:
+                self.assert_no_private_fields(item)
+
     def test_zero_config_lifecycle_from_canonical_and_worker(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -55,12 +72,14 @@ class ClonegrownCliTests(unittest.TestCase):
 
             rc, initialized = self.cli(repo, "init")
             self.assertEqual(rc, 0)
+            self.assert_no_private_fields(initialized)
             workspace = root / "demo-dev"
             self.assertTrue((workspace / ".cws" / "state.json").is_file())
             self.assertEqual(Path(initialized["workspace"]), workspace)
 
             rc, worker = self.cli(repo, "spawn", "change greeting")
             self.assertEqual(rc, 0)
+            self.assert_no_private_fields(worker)
             worker_repo = Path(worker["path"])
             self.assertTrue(worker_repo.is_dir())
 
@@ -70,6 +89,7 @@ class ClonegrownCliTests(unittest.TestCase):
             # Auto-discovery must also work from inside the worker itself.
             rc, state = self.cli(worker_repo, "status")
             self.assertEqual(rc, 0)
+            self.assert_no_private_fields(state)
             self.assertEqual(Path(state["workspace"]), workspace)
 
             run_git(worker_repo, "config", "user.name", "Clonegrown Test")
@@ -80,10 +100,12 @@ class ClonegrownCliTests(unittest.TestCase):
 
             rc, collected = self.cli(worker_repo, "collect", str(worker["id"]))
             self.assertEqual(rc, 0)
+            self.assert_no_private_fields(collected)
             self.assertEqual(collected["status"], "collected")
 
             rc, discarded = self.cli(repo, "discard", str(worker["id"]))
             self.assertEqual(rc, 0)
+            self.assert_no_private_fields(discarded)
             self.assertEqual(discarded["status"], "discarded")
             self.assertFalse(worker_repo.exists())
 
