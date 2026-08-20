@@ -1,0 +1,8 @@
+PASS compile
+PASS cli-tests
+PASS installer-syntax
+PASS hardening
+PASS package-install
+PASS installed-help
+PASS installer-e2e
+OVERALL PASS
