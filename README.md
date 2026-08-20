@@ -19,7 +19,7 @@ Prefer to inspect it first?
 ```bash
 git clone https://github.com/kserrec/clonegrown.git
 cd clonegrown
-./install.sh
+sh install.sh
 ```
 
 The installer does four things:
@@ -64,14 +64,7 @@ From a Git repository:
 clonegrown init
 ```
 
-For a repo named `my-project`, Clonegrown creates a sibling workspace:
-
-```text
-parent/
-  my-project/
-  my-project-dev/
-    .cws/
-```
+For a repo named `my-project`, Clonegrown creates a sibling workspace named `my-project-dev` and manages numbered worker clones underneath it.
 
 Spawn an isolated worker:
 
