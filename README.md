@@ -2,101 +2,193 @@
 
 **Isolated Git clone workspaces for coding agents.**
 
-Clonegrown is an experimental workspace manager for running parallel coding agents in independent Git clones instead of linked Git worktrees. The goal is simple: give each autonomous worker an ordinary repository of its own, while making creation, collection, recovery, and cleanup deterministic and safe.
+Clonegrown gives autonomous coding agents ordinary, independent Git clones instead of linked worktrees, while keeping creation, collection, recovery, and cleanup deterministic.
 
-> **Status:** hardened research prototype / pre-release alpha. The Git mechanics have been heavily adversarially tested on Linux; real Claude/Codex behavioral A/B testing and cross-platform productization are still in progress.
+> **Status:** alpha. The Git mechanics have been heavily adversarially tested on Linux. Broader real-agent and cross-platform validation is still ongoing.
 
-## Why
+## Install
 
-Git worktrees are extremely efficient, but they deliberately share repository state. That means worktrees can share or contend over things such as repo-local config, remotes, refs, stashes, and object maintenance.
-
-Clonegrown trades some workspace-creation speed and potentially some disk usage for stronger worker isolation. This can be attractive for coding agents, where reducing shared mutable state is often more valuable than saving a second or two of setup time.
-
-The project does **not** claim clones are always better. Worktrees remain a strong choice for huge Git histories, very high workspace churn, and large numbers of very short-lived workers.
-
-## Current workflow
+Recommended one-line install:
 
 ```bash
-# Install from a checkout
-python3 -m pip install -e .
-
-# Initialize a Clonegrown workspace around a canonical repository
-clonegrown init /path/to/repo /path/to/repo-dev
-
-# Spawn an isolated worker from an explicit base
-clonegrown spawn /path/to/repo-dev \
-  --base main \
-  --task "fix auth race" \
-  --request-id task-123 \
-  --fast
-
-# The agent works normally inside the returned repository and commits its work.
-
-# Preserve the worker result back into the canonical repository
-clonegrown collect /path/to/repo-dev 1
-
-# Delete only after successful collection (or explicit abandonment)
-clonegrown discard /path/to/repo-dev 1
-
-# Inspect or recover workspace state
-clonegrown status /path/to/repo-dev
-clonegrown recover /path/to/repo-dev
+curl -fsSL https://raw.githubusercontent.com/kserrec/clonegrown/main/install.sh | sh
 ```
 
-Strong object isolation is currently the default. `--fast` accepts Git's normal local-clone object sharing for much lower disk cost.
+Prefer to inspect it first?
 
-## Safety model
+```bash
+git clone https://github.com/kserrec/clonegrown.git
+cd clonegrown
+./install.sh
+```
 
-Clonegrown's core invariants are deliberately stricter than ad-hoc local cloning:
+The installer does four things:
 
-- every worker starts from an explicit base commit, not the canonical checkout's accidental current branch;
-- worker allocation is atomic under concurrency;
-- the real upstream is preserved as `origin` while the local canonical source gets a separate, non-pushable remote;
-- worker repositories carry identity metadata so replacement/tampering can be detected;
-- collection preserves and verifies the exact worker result before cleanup;
-- deletion is blocked until work is collected or explicitly abandoned;
-- lifecycle operations are designed to be idempotent and crash-recoverable;
-- hostile `GIT_*` process-environment overrides are stripped from helper Git calls.
+```text
+Clonegrown source
+  -> ~/.local/share/clonegrown
 
-Clonegrown provides **Git-state isolation, not an OS sandbox**. An unrestricted agent that can traverse the filesystem can still intentionally access sibling directories.
+Command
+  -> ~/.local/bin/clonegrown
 
-## What the experiments found
+Claude Code skill
+  -> ~/.claude/skills/clonegrown/SKILL.md
 
-The included [`research/REPORT.md`](research/REPORT.md), [`research/REPRODUCE.md`](research/REPRODUCE.md), and test harnesses preserve the reproducible evidence from the adversarial prototype campaign. The bulky raw result bundle is retained separately from this first public bootstrap.
+Codex skill
+  -> ~/.agents/skills/clonegrown/SKILL.md
+```
 
-Highlights from the frozen candidate:
+It does not edit your shell profile. If `~/.local/bin` is not already on `PATH`, it prints the one line you need to add.
 
-- 56/56 named deterministic/adversarial tests passed;
-- 11/11 explicit collection/deletion crash points recovered;
-- 24/24 randomized lifecycle seeds passed across 1,000 generated operations;
-- random process-kill campaigns during spawn, collection, and deletion recovered successfully;
-- eight simultaneous `git gc --prune=now` operations produced 8/8 successes in independent clones versus 1/8 in linked worktrees in the stress fixture;
-- worktrees were dramatically faster to create;
-- fast local clones stayed close to worktree disk usage in working-tree-heavy fixtures;
-- fully independent clones became expensive when Git history dominated repository size.
+The installer needs Git and Python 3.11+. Rerun the same command to update Clonegrown.
 
-Those results establish mechanical viability and the tradeoff. They do **not** yet prove coding agents behave better with Clonegrown than with worktrees.
+You can also install the Python package directly:
 
-## Clonegrown vs worktrees
+```bash
+pipx install git+https://github.com/kserrec/clonegrown.git
+```
 
-Clonegrown is most promising when:
+or:
+
+```bash
+uv tool install git+https://github.com/kserrec/clonegrown.git
+```
+
+Those package-manager forms install the CLI only; the recommended `install.sh` also installs the agent skill.
+
+## Use
+
+From a Git repository:
+
+```bash
+clonegrown init
+```
+
+For a repo named `my-project`, Clonegrown creates a sibling workspace:
+
+```text
+parent/
+  my-project/
+  my-project-dev/
+    .cws/
+```
+
+Spawn an isolated worker:
+
+```bash
+clonegrown spawn "fix the authentication race"
+```
+
+Clonegrown prints JSON containing the worker ID, path, branch, and exact base commit. The agent works normally in that returned repository and commits the result.
+
+Preserve the finished result back into the canonical repository:
+
+```bash
+clonegrown collect 1
+```
+
+Then remove the worker:
+
+```bash
+clonegrown discard 1
+```
+
+To intentionally throw away uncollected work:
+
+```bash
+clonegrown discard 1 --abandon
+```
+
+Inspect or recover state:
+
+```bash
+clonegrown status
+clonegrown recover
+```
+
+Clonegrown discovers the workspace automatically when run from the canonical checkout, the workspace, or one of its worker repositories. Explicit `--workspace` paths are available for unusual layouts but should rarely be needed.
+
+Workers start from canonical `HEAD` by default, so Clonegrown does not assume your default branch is named `main`. Override the base when needed:
+
+```bash
+clonegrown spawn "compare parser approach" --base feature/parser
+```
+
+## Fast vs strong clones
+
+Normal workers use Git's efficient local clone behavior:
+
+```bash
+clonegrown spawn "add tests"
+```
+
+For physical independence of Git object files:
+
+```bash
+clonegrown spawn "risky Git experiment" --strong
+```
+
+The default fast mode still isolates Git config, refs, remotes, stashes, indexes, reflogs, and ordinary repository state. `--strong` additionally avoids local object sharing, which can cost substantial disk space when Git history is large.
+
+## Why clones?
+
+Worktrees are extremely efficient, but they deliberately share repository state. That can include repo-local config, remotes, refs, stashes, and object maintenance.
+
+For autonomous agents, reducing shared mutable Git state can be worth a small workspace-creation cost. Clonegrown is therefore most promising when:
 
 - you run a small or moderate number of autonomous agents;
-- tasks last long enough that a few seconds of provisioning do not matter;
+- tasks last minutes or longer rather than seconds;
 - the repository's Git history is not enormous;
-- isolating each agent's Git state is valuable.
+- isolation between workers matters more than absolute spawn speed.
 
-Worktrees are likely preferable when:
+Worktrees are usually the better fit when:
 
 - `.git` history is very large;
 - you create and destroy many workers rapidly;
 - tasks are extremely short;
 - minimizing disk and spawn overhead dominates isolation concerns.
 
+Clonegrown does **not** claim clones are always better.
+
+## Safety model
+
+Clonegrown's lifecycle is deliberately stricter than ad-hoc local cloning:
+
+- workers start from an explicit resolved commit;
+- worker allocation is serialized under concurrency;
+- the local canonical source is configured as non-pushable;
+- collection preserves and verifies a worker result before cleanup;
+- deletion is blocked until work is collected or explicitly abandoned;
+- interrupted lifecycle operations can be recovered;
+- helper Git calls strip hostile process-level `GIT_*` overrides.
+
+Clonegrown provides **Git-state isolation, not an OS sandbox**. An unrestricted process can still deliberately traverse into sibling directories.
+
 ## Agent skill
 
-[`SKILL.md`](SKILL.md) contains an initial agent-facing workflow. The intended architecture is that the skill decides **when and how** to use Clonegrown, while the CLI—not the language model—owns filesystem allocation, Git plumbing, result preservation, and recovery.
+The recommended installer copies [`SKILL.md`](SKILL.md) into the current personal skill locations for both Claude Code and Codex, so agents can learn when Clonegrown is preferable to worktrees and use the CLI without reproducing its Git plumbing themselves.
+
+Claude Code currently discovers personal skills from `~/.claude/skills/`. Codex's current user-scope Agent Skills location is `~/.agents/skills/`.
+
+After first installation, starting a fresh agent session is the safest way to ensure the new skill is discovered.
+
+## Evidence
+
+The included [`research/REPORT.md`](research/REPORT.md), [`research/REPRODUCE.md`](research/REPRODUCE.md), and test harnesses preserve the adversarial prototype campaign.
+
+Highlights from the frozen candidate include:
+
+- 56/56 named deterministic/adversarial tests passed;
+- 11/11 explicit collection/deletion crash points recovered;
+- 24/24 randomized lifecycle seeds passed across 1,000 generated operations;
+- process-kill campaigns during spawn, collection, and deletion recovered successfully;
+- eight simultaneous `git gc --prune=now` operations produced 8/8 successes in independent clones versus 1/8 in linked worktrees in the stress fixture;
+- worktrees were dramatically faster to create;
+- fast local clones stayed close to worktree disk usage in working-tree-heavy fixtures;
+- fully independent clones became expensive when Git history dominated repository size.
+
+Those results establish mechanical viability and the tradeoff. They do not yet prove that every coding agent behaves better with Clonegrown than with worktrees.
 
 ## Requirements and limitations
 
-The current prototype was hardened primarily on Linux with Git and Python 3. It uses POSIX `fcntl` locking, so native Windows support is not ready yet. Git LFS and broader cross-platform behavior still need dedicated product-level validation.
+Clonegrown currently targets POSIX environments with Git and Python 3.11+. The implementation uses `fcntl`, so native Windows support is not ready yet. Git LFS and broader cross-platform behavior still deserve dedicated validation.
