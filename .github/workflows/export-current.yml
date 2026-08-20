@@ -1,0 +1,31 @@
+name: Export current branch
+
+on:
+  push:
+    branches: [bootstrap-v0]
+    paths:
+      - '.github/workflows/export-current.yml'
+      - '.export-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bootstrap-v0
+          fetch-depth: 0
+      - name: Export repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --exclude=.git --exclude=.export-trigger -czf /tmp/clonegrown-bootstrap-v0.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clonegrown-bootstrap-v0
+          path: /tmp/clonegrown-bootstrap-v0.tar.gz
+          if-no-files-found: error
+          retention-days: 1
