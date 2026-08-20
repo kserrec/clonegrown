@@ -4,7 +4,7 @@
 
 Clonegrown gives autonomous coding agents ordinary, independent Git clones instead of linked worktrees, while keeping creation, collection, recovery, and cleanup deterministic.
 
-> **Status:** alpha. The Git mechanics have been heavily adversarially tested on Linux. Broader real-agent and cross-platform validation is still ongoing.
+> **Status:** alpha. The Git mechanics have been heavily adversarially tested on Linux. The CLI and installer are also exercised on macOS in CI.
 
 ## Install
 
@@ -184,4 +184,4 @@ Those results establish mechanical viability and the tradeoff. They do not yet p
 
 ## Requirements and limitations
 
-Clonegrown currently targets POSIX environments with Git and Python 3.11+. The implementation uses `fcntl`, so native Windows support is not ready yet. Git LFS and broader cross-platform behavior still deserve dedicated validation.
+Clonegrown currently targets POSIX environments with Git and Python 3.11+. Native Windows support is not ready yet. Git LFS and broader cross-platform behavior still deserve dedicated validation.
