@@ -75,7 +75,7 @@ class ClonegrownCliTests(unittest.TestCase):
             self.assert_no_private_fields(initialized)
             workspace = root / "demo-dev"
             self.assertTrue((workspace / ".cws" / "state.json").is_file())
-            self.assertEqual(Path(initialized["workspace"]), workspace)
+            self.assertEqual(Path(initialized["workspace"]).resolve(), workspace.resolve())
 
             rc, worker = self.cli(repo, "spawn", "change greeting")
             self.assertEqual(rc, 0)
@@ -90,7 +90,7 @@ class ClonegrownCliTests(unittest.TestCase):
             rc, state = self.cli(worker_repo, "status")
             self.assertEqual(rc, 0)
             self.assert_no_private_fields(state)
-            self.assertEqual(Path(state["workspace"]), workspace)
+            self.assertEqual(Path(state["workspace"]).resolve(), workspace.resolve())
 
             run_git(worker_repo, "config", "user.name", "Clonegrown Test")
             run_git(worker_repo, "config", "user.email", "clonegrown@example.test")
@@ -118,7 +118,7 @@ class ClonegrownCliTests(unittest.TestCase):
                 repo, "init", str(repo), "--workspace", str(custom)
             )
             self.assertEqual(rc, 0)
-            self.assertEqual(Path(initialized["workspace"]), custom)
+            self.assertEqual(Path(initialized["workspace"]).resolve(), custom.resolve())
 
     def test_spawn_requires_task(self) -> None:
         parser = clonegrown_cli.build_parser()
