@@ -5,10 +5,32 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from clonegrown import CWSError, collect, discard, init_workspace, recover, spawn, status
 from clonegrown_core import validate_primary_repo
+
+_PRIVATE_KEYS = {
+    "canonical_token",
+    "worker_token",
+    "params_hash",
+    "owner_pid",
+    "owner_start",
+    "stage_root",
+}
+
+
+def public_result(value: Any) -> Any:
+    """Remove internal transaction/identity fields from CLI output."""
+    if isinstance(value, dict):
+        return {
+            key: public_result(item)
+            for key, item in value.items()
+            if key not in _PRIVATE_KEYS
+        }
+    if isinstance(value, list):
+        return [public_result(item) for item in value]
+    return value
 
 
 def default_workspace(canonical: Path) -> Path:
@@ -125,7 +147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             result = status(resolve_workspace(args.workspace))
 
-        print(json.dumps(result, indent=2, sort_keys=True))
+        print(json.dumps(public_result(result), indent=2, sort_keys=True))
         return 0
     except CWSError as exc:
         print(f"clonegrown: {exc}", file=sys.stderr)
