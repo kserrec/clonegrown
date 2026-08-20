@@ -3,12 +3,10 @@ name: CI
 on:
   push:
     branches: [main, bootstrap-v0]
-    paths-ignore:
-      - '.github/ci-verified'
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -42,23 +40,3 @@ jobs:
           python-version: '3.11'
       - name: Existing adversarial suite
         run: python tests/hardening_suite.py
-
-  record-bootstrap-success:
-    if: github.ref == 'refs/heads/bootstrap-v0'
-    needs: [test, hardening]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: bootstrap-v0
-      - name: Record verified source SHA
-        env:
-          VERIFIED_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' "$VERIFIED_SHA" > .github/ci-verified
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- .github/ci-verified
-          git commit -m 'Record verified bootstrap SHA [skip ci]'
-          git push origin HEAD:bootstrap-v0
