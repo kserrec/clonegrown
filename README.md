@@ -62,7 +62,7 @@ Clonegrown provides **Git-state isolation, not an OS sandbox**. An unrestricted 
 
 ## What the experiments found
 
-The included [`research/REPORT.md`](research/REPORT.md) and [`research/RESULTS.json`](research/RESULTS.json) preserve the evidence from the adversarial prototype campaign.
+The included [`research/REPORT.md`](research/REPORT.md), [`research/REPRODUCE.md`](research/REPRODUCE.md), and test harnesses preserve the reproducible evidence from the adversarial prototype campaign. The bulky raw result bundle is retained separately from this first public bootstrap.
 
 Highlights from the frozen candidate:
 
