@@ -18,7 +18,31 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
-GIT_BIN = Path("/usr/bin/git") if Path("/usr/bin/git").exists() else Path(shutil.which("git") or "git")
+# The on-disk protocol name. Workspace control dirs (.cws/), canonical refs
+# (refs/cws/...), marker files (cws-worker.json), the reserved remote name and
+# the CWS_* test variables all carry it. It predates the product name and is
+# kept on purpose: renaming it would break every existing workspace.
+PROTOCOL_NAME = "cws"
+
+
+def _find_git() -> Path:
+    """Pick the Git binary. CLONEGROWN_GIT wins; otherwise /usr/bin/git if present, else PATH.
+
+    Preferring the system binary over PATH is deliberate: an agent's shell
+    can put a fake ``git`` first on PATH, and this tool runs Git with
+    authority over the user's repositories. Homebrew or other non-system Git
+    installs set CLONEGROWN_GIT explicitly.
+    """
+    override = os.environ.get("CLONEGROWN_GIT")
+    if override:
+        return Path(override)
+    system = Path("/usr/bin/git")
+    if system.exists():
+        return system
+    return Path(shutil.which("git") or "git")
+
+
+GIT_BIN = _find_git()
 
 # Environment variables that can retarget Git, inject config, or replace its helpers.
 # User/system/global config files still apply; only per-process injection is stripped.
@@ -36,8 +60,11 @@ GIT_ENV_EXACT = {
 GIT_ENV_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TRACE")
 
 
-class CWSError(RuntimeError):
-    """Any failure Clonegrown reports to its caller; the CLIs print it and exit 2."""
+class ClonegrownError(RuntimeError):
+    """Any failure Clonegrown reports to its caller; the CLI prints it and exits 2."""
+
+
+CWSError = ClonegrownError  # name used by the original prototype; kept as an alias
 
 
 # --- processes ---------------------------------------------------------------
@@ -62,10 +89,10 @@ def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
         p = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, env=actual_env, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        raise CWSError(f"command timed out: {argv[0]} {argv[1] if len(argv) > 1 else ''}") from exc
+        raise ClonegrownError(f"command timed out: {argv[0]} {argv[1] if len(argv) > 1 else ''}") from exc
     if check and p.returncode:
         # Git stderr is kept for diagnosis; config values and the environment are not dumped.
-        raise CWSError(f"command failed ({p.returncode}): {' '.join(argv)}\nstdout: {p.stdout}\nstderr: {p.stderr}")
+        raise ClonegrownError(f"command failed ({p.returncode}): {' '.join(argv)}\nstdout: {p.stdout}\nstderr: {p.stderr}")
     return p
 
 
@@ -101,12 +128,12 @@ def load_json(path: Path) -> dict[str, Any]:
     try:
         mode = os.lstat(path).st_mode
         if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-            raise CWSError(f"metadata is not a regular non-symlink file: {path}")
+            raise ClonegrownError(f"metadata is not a regular non-symlink file: {path}")
         value = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        raise CWSError(f"cannot read metadata {path}: {exc}") from exc
+        raise ClonegrownError(f"cannot read metadata {path}: {exc}") from exc
     if not isinstance(value, dict):
-        raise CWSError(f"metadata is not an object: {path}")
+        raise ClonegrownError(f"metadata is not an object: {path}")
     return value
 
 
@@ -124,7 +151,7 @@ def failpoint(name: str) -> None:
     if os.environ.get("CWS_FAILPOINT") == name:
         os._exit(88)
     if os.environ.get("CWS_ERRORPOINT") == name:
-        raise CWSError(f"injected ordinary failure at {name}")
+        raise ClonegrownError(f"injected ordinary failure at {name}")
 
 
 # --- repository paths --------------------------------------------------------
@@ -138,7 +165,7 @@ def _rev_parse_path(repo: Path, flag: str, *args: str) -> Path:
 def repo_root(path: Path) -> Path:
     p = git(path, "rev-parse", "--show-toplevel", check=False)
     if p.returncode:
-        raise CWSError(f"not a non-bare Git working tree: {path}")
+        raise ClonegrownError(f"not a non-bare Git working tree: {path}")
     return Path(p.stdout.strip()).resolve()
 
 
@@ -166,9 +193,9 @@ def validate_primary_repo(path: Path) -> Path:
     """Resolve ``path`` to the root of a non-bare, non-linked-worktree checkout."""
     root = repo_root(path)
     if git(root, "rev-parse", "--is-bare-repository").stdout.strip() == "true":
-        raise CWSError("bare repositories are not supported as canonical working copies")
+        raise ClonegrownError("bare repositories are not supported as canonical working copies")
     if git_dir(root) != git_common_dir(root):
-        raise CWSError("canonical path is a linked worktree; use the primary checkout")
+        raise ClonegrownError("canonical path is a linked worktree; use the primary checkout")
     return root
 
 
@@ -199,10 +226,10 @@ def file_lock(path: Path, blocking: bool = True) -> Iterator[bool]:
     try:
         fd = os.open(path, flags_open, 0o600)
     except OSError as exc:
-        raise CWSError(f"cannot safely open lock file {path}: {exc}") from exc
+        raise ClonegrownError(f"cannot safely open lock file {path}: {exc}") from exc
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
-        raise CWSError(f"lock path is not a regular file: {path}")
+        raise ClonegrownError(f"lock path is not a regular file: {path}")
     f = os.fdopen(fd, "a+")
     flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
     acquired = False

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .core import CWSError, atomic_json, git, git_common_dir, git_dir, git_path, lexical_abs, load_json, object_format, repo_root
+from .core import ClonegrownError, atomic_json, git, git_common_dir, git_dir, git_path, lexical_abs, load_json, object_format, repo_root
 from .state import (
     SCHEMA, TERMINAL_SPAWN_FAILURE, base_ref, final_worker_root, owner_fields, params_hash, read_state, request_path, staging_root, validate_worker_meta,
     verify_canonical, worker_branch, worker_marker_path, worker_meta_path, worker_mode, workspace_lock, write_state,
@@ -38,33 +38,33 @@ def verify_worker(state: dict[str, Any], meta: dict[str, Any], require_exists: b
     repo = Path(meta["path"])
     if not repo.exists():
         if require_exists:
-            raise CWSError("worker repository is missing")
+            raise ClonegrownError("worker repository is missing")
         return repo
     for boundary, label in ((repo.parent, "worker slot"), (repo, "worker repository")):
         try:
             mode = os.lstat(boundary).st_mode
         except FileNotFoundError:
-            raise CWSError(f"{label} is missing")
+            raise ClonegrownError(f"{label} is missing")
         if stat.S_ISLNK(mode):
-            raise CWSError(f"{label} was replaced by a symlink")
+            raise ClonegrownError(f"{label} was replaced by a symlink")
         if not stat.S_ISDIR(mode):
-            raise CWSError(f"{label} is not a directory")
+            raise ClonegrownError(f"{label} is not a directory")
     if repo_root(repo) != repo.resolve():
-        raise CWSError("worker repository root changed")
+        raise ClonegrownError("worker repository root changed")
     private, common = git_dir(repo), git_common_dir(repo)
     if worker_mode(meta) == "clone":
         if private != common:
-            raise CWSError("worker was replaced with a linked worktree")
+            raise ClonegrownError("worker was replaced with a linked worktree")
     else:
         if private == common:
-            raise CWSError("worktree worker was replaced with an independent repository")
+            raise ClonegrownError("worktree worker was replaced with an independent repository")
         if common != Path(state["canonical_git_dir"]).resolve():
-            raise CWSError("worktree worker is not linked to the canonical repository")
+            raise ClonegrownError("worktree worker is not linked to the canonical repository")
         if private.parent != common / "worktrees":
-            raise CWSError("worktree worker admin directory is not where Git keeps it")
+            raise ClonegrownError("worktree worker admin directory is not where Git keeps it")
         admin = meta.get("worktree_admin")
         if admin is not None and lexical_abs(admin) != private:
-            raise CWSError("worktree worker admin directory changed")
+            raise ClonegrownError("worktree worker admin directory changed")
     marker = load_json(worker_marker_path(repo))
     checks = {
         "workspace_id": state["workspace_id"],
@@ -76,9 +76,9 @@ def verify_worker(state: dict[str, Any], meta: dict[str, Any], require_exists: b
     }
     for key, expected in checks.items():
         if marker.get(key) != expected:
-            raise CWSError(f"worker identity marker mismatch: {key}")
+            raise ClonegrownError(f"worker identity marker mismatch: {key}")
     if object_format(repo) != state["object_format"]:
-        raise CWSError("worker object format differs from canonical")
+        raise ClonegrownError("worker object format differs from canonical")
     return repo
 
 
@@ -91,21 +91,21 @@ def worker_snapshot(state: dict[str, Any], meta: dict[str, Any], require_ancestr
     repo = verify_worker(state, meta)
     dirty = git(repo, "status", "--porcelain=v1", "--untracked-files=all").stdout
     if dirty.strip():
-        raise CWSError("worker has uncommitted or untracked changes")
+        raise ClonegrownError("worker has uncommitted or untracked changes")
     operations = op_in_progress(repo)
     if operations:
-        raise CWSError("worker has an in-progress Git operation: " + ", ".join(operations))
+        raise ClonegrownError("worker has an in-progress Git operation: " + ", ".join(operations))
     sym = git(repo, "symbolic-ref", "-q", "HEAD", check=False)
     expected_ref = f"refs/heads/{meta['branch']}"
     if sym.returncode or sym.stdout.strip() != expected_ref:
-        raise CWSError("worker HEAD is detached or not on its assigned task branch")
+        raise ClonegrownError("worker HEAD is detached or not on its assigned task branch")
     head = git(repo, "rev-parse", "HEAD").stdout.strip()
     if head != git(repo, "rev-parse", expected_ref).stdout.strip():
-        raise CWSError("worker HEAD and assigned branch disagree")
+        raise ClonegrownError("worker HEAD and assigned branch disagree")
     if require_ancestry:
         anc = git(repo, "merge-base", "--is-ancestor", meta["base_sha"], head, check=False)
         if anc.returncode != 0:
-            raise CWSError("worker result does not descend from its assigned base")
+            raise ClonegrownError("worker result does not descend from its assigned base")
     return {"head": head, "branch_ref": expected_ref, "status": dirty, "operations": operations}
 
 
@@ -115,7 +115,7 @@ def load_worker_state(ws: Path, worker_id: int) -> tuple[dict[str, Any], dict[st
     canonical = verify_canonical(state)
     mp = worker_meta_path(ws, worker_id)
     if not mp.exists():
-        raise CWSError(f"unknown worker: {worker_id}")
+        raise ClonegrownError(f"unknown worker: {worker_id}")
     meta = load_json(mp)
     validate_worker_meta(ws, state, worker_id, meta)
     return state, meta, canonical
@@ -137,16 +137,16 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool,
             if rp.exists():
                 req = load_json(rp)
                 if req.get("request_id") != request_id:
-                    raise CWSError("request index hash collision or corruption")
+                    raise ClonegrownError("request index hash collision or corruption")
                 if req.get("params_hash") != ph:
-                    raise CWSError("request ID was reused with different base/task/isolation/mode parameters")
+                    raise ClonegrownError("request ID was reused with different base/task/isolation/mode parameters")
                 old = load_json(worker_meta_path(ws, int(req["worker_id"])))
                 if old.get("status") not in TERMINAL_SPAWN_FAILURE:
                     return old, False
                 # A failed incomplete spawn may be retried under the same idempotency key.
         resolved = git(canonical, "rev-parse", "--verify", f"{base}^{{commit}}", check=False)
         if resolved.returncode:
-            raise CWSError(f"base does not resolve to a commit: {base}")
+            raise ClonegrownError(f"base does not resolve to a commit: {base}")
         base_sha = resolved.stdout.strip()
         worker_id = int(state["next_id"])
         state["next_id"] = worker_id + 1

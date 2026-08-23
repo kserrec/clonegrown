@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .core import CWSError, git, git_common_dir, git_dir, git_path, lexical_abs
+from .core import ClonegrownError, git, git_common_dir, git_dir, git_path, lexical_abs
 from .state import RESERVED_SOURCE_PREFIX
 
 # Local config that describes *this* repository's shape rather than user intent;
@@ -94,7 +94,7 @@ def copy_remote_config(canonical: Path, worker: Path) -> str:
         source = f"{RESERVED_SOURCE_PREFIX}-{n}"
         n += 1
     if "origin" not in set(git(worker, "remote").stdout.split()):
-        raise CWSError("local clone did not create its source remote")
+        raise ClonegrownError("local clone did not create its source remote")
     git(worker, "remote", "rename", "origin", source)
     git(worker, "remote", "set-url", "--push", source, "cws-disabled://canonical")
 
@@ -159,7 +159,7 @@ def copy_sparse_policy(canonical: Path, worker: Path) -> bool:
             git(worker, "config", key, value.stdout.strip())
     src = git_path(canonical, "info/sparse-checkout")
     if not src.exists():
-        raise CWSError("sparse checkout is enabled but its pattern file is missing")
+        raise ClonegrownError("sparse checkout is enabled but its pattern file is missing")
     dst = git_path(worker, "info/sparse-checkout")
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
@@ -252,13 +252,13 @@ def remove_worktree_admin(canonical: Path, admin: Path, meta: dict[str, Any]) ->
     """
     admin = lexical_abs(admin)
     if admin.parent != git_common_dir(canonical) / "worktrees":
-        raise CWSError("refusing to delete a path outside the worktrees directory")
+        raise ClonegrownError("refusing to delete a path outside the worktrees directory")
     try:
         mode = os.lstat(admin).st_mode
     except FileNotFoundError:
         return True
     if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-        raise CWSError("worktree admin path is not a directory")
+        raise ClonegrownError("worktree admin path is not a directory")
     if not admin_belongs_to(admin, meta):
         return False
     shutil.rmtree(admin, ignore_errors=True)

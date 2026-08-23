@@ -101,7 +101,7 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
                     cws.collect(w,wid)
                     assert not dirty
                     record('collect',wid)
-                except cws.CWSError:
+                except cws.ClonegrownError:
                     assert dirty
                     clean(repo); record('collect_refused_dirty',wid)
             elif op=='discard' and collected:
@@ -114,7 +114,7 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
                     cws.discard(w,wid)
                     assert not changed
                     record('discard',wid)
-                except cws.CWSError:
+                except cws.ClonegrownError:
                     assert changed
                     record('discard_refused_changed',wid)
             elif op=='abandon' and (ready or collected):
@@ -125,7 +125,7 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
                     changed=changed or bp.returncode!=0 or bp.stdout.strip()!=m['result_sha']
                 try:
                     cws.discard(w,wid,abandon=True); assert not changed; record('abandon',wid)
-                except cws.CWSError:
+                except cws.ClonegrownError:
                     assert changed; record('abandon_refused_changed',wid)
                     if rng.random()<0.5:
                         cws.discard(w,wid,abandon=True,force=True); record('abandon_forced',wid)
@@ -137,14 +137,14 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
                         assert got['id']!=m['id'] and got['id']>m['id']; record('retry_reallocated',m['id'],got['id'])
                     else:
                         assert got['id']==m['id']; record('retry',m['id'])
-                except cws.CWSError:
+                except cws.ClonegrownError:
                     # Broken/partial states are allowed to require recovery; no silent aliasing is allowed.
                     assert m['status'] in ('broken','collecting','discarding'); record('retry_refused',m['id'])
             elif op=='mismatch' and ms:
                 m=rng.choice([x for x in ms.values() if x.get('request_id')] or list(ms.values()))
                 if m.get('request_id'):
                     try: cws.spawn(w,m['base'],m['task']+'-different',strong=bool(m['strong']),request_id=m['request_id'],mode=MODE); raise AssertionError('mismatched request accepted')
-                    except cws.CWSError: record('mismatch_refused',m['id'])
+                    except cws.ClonegrownError: record('mismatch_refused',m['id'])
             elif op=='advance':
                 p=c/f'canon-{step}.txt'; p.write_text(str(step)); git(c,'add',p.name); git(c,'commit','-m',f'canon {step}'); record('advance')
             elif op=='mutate' and ready:
@@ -164,7 +164,7 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
                 if repo.exists():
                     clean(repo); commit(repo,f'post-collected-{seed}-{step}',step)
                     try: cws.discard(w,wid); raise AssertionError('discard accepted post-collection commit')
-                    except cws.CWSError: record('post_collect_guard',wid)
+                    except cws.ClonegrownError: record('post_collect_guard',wid)
             else:
                 cws.recover(w); record('recover_fallback')
             if step%10==0: invariant(c,w,origin,full=True)

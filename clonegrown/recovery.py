@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .core import CWSError, atomic_json, file_lock, git
+from .core import ClonegrownError, atomic_json, file_lock, git
 from .state import (
     ACTIVE_SPAWN, base_ref, clear_owner, final_worker_root, process_alive, read_state,
     summary_ref, verify_canonical, worker_lock_path, worker_mode, workspace_lock, ws_paths,
@@ -182,7 +182,7 @@ class _Recovery:
             repo = verify_worker(self.state, self.meta)
             branch = git(repo, "rev-parse", "--verify", f"refs/heads/{self.meta['branch']}^{{commit}}", check=False)
             if branch.returncode:
-                raise CWSError("assigned task branch is missing")
+                raise ClonegrownError("assigned task branch is missing")
         except Exception as exc:
             self.mark_broken(str(exc), "ready-marked-broken")
 
@@ -231,7 +231,7 @@ def recover(ws_path: Path) -> list[Report]:
             with workspace_lock(ws):
                 try:
                     state, meta, canonical = load_worker_state(ws, worker_id)
-                except CWSError as exc:
+                except ClonegrownError as exc:
                     reports.append({"id": worker_id, "path": str(mp), "action": "corrupt-or-unreadable-metadata",
                                     "error": str(exc)[:1000]})
                     continue
@@ -254,7 +254,7 @@ def status(ws_path: Path) -> dict[str, Any]:
             worker_id = int(mp.stem)
             try:
                 _, meta, _ = load_worker_state(ws, worker_id)
-            except CWSError as exc:
+            except ClonegrownError as exc:
                 issues.append({"id": worker_id, "path": str(mp), "issue": "invalid-worker-metadata", "error": str(exc)})
                 continue
             item = dict(meta)

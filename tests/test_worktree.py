@@ -11,7 +11,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from clonegrown import CWSError, cli, collect, discard, recover, spawn, status
+from clonegrown import ClonegrownError, cli, collect, discard, recover, spawn, status
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -111,7 +111,7 @@ class WorktreeWorkerTests(unittest.TestCase):
     def test_uncollected_needs_abandon(self) -> None:
         worker = spawn(self.ws, "HEAD", "throwaway", strong=False, mode="worktree")
         commit(Path(worker["path"]), "lost.txt")
-        with self.assertRaises(CWSError):
+        with self.assertRaises(ClonegrownError):
             discard(self.ws, worker["id"])
         abandoned = discard(self.ws, worker["id"], abandon=True)
         self.assertEqual(abandoned["status"], "abandoned")
@@ -121,11 +121,11 @@ class WorktreeWorkerTests(unittest.TestCase):
         first = spawn(self.ws, "HEAD", "same", strong=False, request_id="r1", mode="worktree")
         again = spawn(self.ws, "HEAD", "same", strong=False, request_id="r1", mode="worktree")
         self.assertEqual(first["id"], again["id"])
-        with self.assertRaisesRegex(CWSError, "reused with different"):
+        with self.assertRaisesRegex(ClonegrownError, "reused with different"):
             spawn(self.ws, "HEAD", "same", strong=False, request_id="r1", mode="clone")
 
     def test_strong_and_worktree_are_incompatible(self) -> None:
-        with self.assertRaisesRegex(CWSError, "strong"):
+        with self.assertRaisesRegex(ClonegrownError, "strong"):
             spawn(self.ws, "HEAD", "x", strong=True, mode="worktree")
         p = self.cli_process(self.repo, "spawn", "x", "--strong", "--worktree")
         self.assertEqual(p.returncode, 2)
@@ -152,12 +152,12 @@ class WorktreeWorkerTests(unittest.TestCase):
         data = json.loads(mp.read_text())
         data["worktree_admin"] = str(self.root / "elsewhere")
         mp.write_text(json.dumps(data))
-        with self.assertRaisesRegex(CWSError, "worktrees directory"):
+        with self.assertRaisesRegex(ClonegrownError, "worktrees directory"):
             collect(self.ws, worker["id"])
         data["worktree_admin"] = worker["worktree_admin"]
         data["mode"] = "clone"
         mp.write_text(json.dumps(data))
-        with self.assertRaisesRegex(CWSError, "digest mismatch"):
+        with self.assertRaisesRegex(ClonegrownError, "digest mismatch"):
             collect(self.ws, worker["id"])
 
     def test_records_without_mode_are_clones(self) -> None:

@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from .core import CWSError
+from .core import ClonegrownError
 from .lifecycle import collect, discard, init_workspace, spawn
 from .recovery import recover, status
 
@@ -64,7 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = status(Path(args.workspace))
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    except CWSError as exc:
+    except ClonegrownError as exc:
         print(f"clonegrown: {exc}", file=sys.stderr)
         return 2
 

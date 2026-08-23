@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .core import GIT_BIN, CWSError, atomic_json, failpoint, file_lock, git, git_common_dir, inside, load_json, object_format, run, validate_primary_repo
+from .core import GIT_BIN, ClonegrownError, atomic_json, failpoint, file_lock, git, git_common_dir, inside, load_json, object_format, run, validate_primary_repo
 from .recovery import recover
 from .repository import (
     WORKTREE_SHARING_WARNING, add_worktree, checkout_without_hooks, copy_auxiliary_refs, copy_info_files,
@@ -44,7 +44,7 @@ def init_workspace(canonical_path: Path, ws_path: Path) -> dict[str, Any]:
     canonical = validate_primary_repo(canonical_path)
     ws = ws_path.resolve()
     if ws == canonical or inside(ws, canonical):
-        raise CWSError("workspace cannot be the canonical repository or live inside its working tree")
+        raise ClonegrownError("workspace cannot be the canonical repository or live inside its working tree")
     paths = ws_paths(ws)
     for key in ("workers", "requests", "locks", "staging"):
         paths[key].mkdir(parents=True, exist_ok=True)
@@ -53,15 +53,15 @@ def init_workspace(canonical_path: Path, ws_path: Path) -> dict[str, Any]:
             state = load_json(paths["state"])
             validate_state(ws, state, require_ready=False)
             if Path(state.get("canonical", "")).resolve() != canonical:
-                raise CWSError("workspace is already initialized for a different canonical path")
+                raise ClonegrownError("workspace is already initialized for a different canonical path")
             if state.get("schema") != SCHEMA:
-                raise CWSError("unsupported workspace metadata schema")
+                raise ClonegrownError("unsupported workspace metadata schema")
             if state.get("status") == "initializing":
                 # Finish either crash window: after the state write or after the marker write.
                 marker_path = canonical_marker_path(canonical, state["workspace_id"])
                 if marker_path.exists():
                     if load_json(marker_path).get("token") != state.get("canonical_token"):
-                        raise CWSError("initializing workspace has a conflicting canonical marker")
+                        raise ClonegrownError("initializing workspace has a conflicting canonical marker")
                 else:
                     atomic_json(marker_path, _canonical_marker(state["workspace_id"], state["canonical_token"], canonical))
                 state["status"] = "ready"
@@ -110,9 +110,9 @@ def _wait_for_existing(ws: Path, worker_id: int, timeout_seconds: float) -> dict
         if status in _SETTLED:
             return meta
         if status in TERMINAL_SPAWN_FAILURE or status == "broken":
-            raise CWSError(f"existing request failed in worker {worker_id}: {meta.get('error', status)}")
+            raise ClonegrownError(f"existing request failed in worker {worker_id}: {meta.get('error', status)}")
         if time.monotonic() >= deadline:
-            raise CWSError(f"timed out waiting for existing request worker {worker_id}; run recover")
+            raise ClonegrownError(f"timed out waiting for existing request worker {worker_id}; run recover")
         if not process_alive(meta.get("owner_pid"), meta.get("owner_start")):
             recover(ws)
         time.sleep(0.05)
@@ -137,7 +137,7 @@ def _provision_worktree(canonical: Path, stage_repo: Path, meta: dict[str, Any])
     checkout_without_hooks(stage_repo, meta["branch"], meta["base_sha"])
     write_worker_marker(stage_repo, meta)
     if git(stage_repo, "rev-parse", "HEAD").stdout.strip() != meta["base_sha"]:
-        raise CWSError("worker checkout differs from immutable requested base")
+        raise ClonegrownError("worker checkout differs from immutable requested base")
     return {
         "source_remote": None,
         "alternates_detached": False,
@@ -160,7 +160,7 @@ def _provision_clone(canonical: Path, stage_repo: Path, meta: dict[str, Any], st
     checkout_without_hooks(stage_repo, meta["branch"], meta["base_sha"])
     write_worker_marker(stage_repo, meta)
     if git(stage_repo, "rev-parse", "HEAD").stdout.strip() != meta["base_sha"]:
-        raise CWSError("worker checkout differs from immutable requested base")
+        raise ClonegrownError("worker checkout differs from immutable requested base")
     git(stage_repo, "fsck", "--connectivity-only")
     return {
         "source_remote": source_remote,
@@ -203,9 +203,9 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
     always complete.
     """
     if mode not in WORKER_MODES:
-        raise CWSError(f"unknown worker mode: {mode!r}")
+        raise ClonegrownError(f"unknown worker mode: {mode!r}")
     if mode == "worktree" and strong:
-        raise CWSError("a worktree worker shares canonical's objects; --strong does not apply")
+        raise ClonegrownError("a worktree worker shares canonical's objects; --strong does not apply")
     ws = ws_path.resolve()
     meta, created = allocate_spawn(ws, base, task, strong, request_id, mode)
     if not created:
@@ -214,7 +214,7 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
     stage = Path(meta["stage_root"])
     with file_lock(worker_lock_path(ws, worker_id)) as acquired:
         if not acquired:
-            raise CWSError("worker operation lock unexpectedly unavailable")
+            raise ClonegrownError("worker operation lock unexpectedly unavailable")
         try:
             failpoint("spawn.after_allocated")
             meta, state, canonical = _advance_spawn(ws, worker_id, "cloning")
@@ -244,12 +244,12 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
                 verify_canonical(state)
                 current = load_json(worker_meta_path(ws, worker_id))
                 if current.get("worker_token") != meta["worker_token"] or current.get("status") not in ACTIVE_SPAWN:
-                    raise CWSError("spawn metadata ownership changed")
+                    raise ClonegrownError("spawn metadata ownership changed")
                 current.update({"status": "publishing", "pending_spawn_details": spawn_details, **owner_fields()})
                 atomic_json(worker_meta_path(ws, worker_id), current)
                 final = final_worker_root(ws, worker_id)
                 if final.exists():
-                    raise CWSError("worker final path already exists")
+                    raise ClonegrownError("worker final path already exists")
                 os.replace(stage, final)
                 failpoint("spawn.after_publish")
                 if mode == "worktree":
@@ -334,28 +334,28 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
     ws = ws_path.resolve()
     with file_lock(worker_lock_path(ws, worker_id)) as acquired:
         if not acquired:
-            raise CWSError("worker is busy")
+            raise ClonegrownError("worker is busy")
         with workspace_lock(ws):
             state, meta, canonical = load_worker_state(ws, worker_id)
             if meta["status"] == "collected":
                 snap = worker_snapshot(state, meta, require_ancestry=not allow_rewrite)
                 if snap["head"] != meta.get("result_sha"):
-                    raise CWSError("worker changed after collection; refusing to hide newer work")
+                    raise ClonegrownError("worker changed after collection; refusing to hide newer work")
                 ref = meta["result_ref"]
                 got = git(canonical, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False)
                 if got.returncode or got.stdout.strip() != meta["result_sha"]:
-                    raise CWSError("collected result ref is missing or changed")
+                    raise ClonegrownError("collected result ref is missing or changed")
                 git(canonical, "update-ref", summary_ref(state, worker_id), meta["result_sha"])
                 return meta
             if meta["status"] != "ready":
-                raise CWSError(f"worker is not collectable from state {meta['status']}")
+                raise ClonegrownError(f"worker is not collectable from state {meta['status']}")
         first = worker_snapshot(state, meta, require_ancestry=not allow_rewrite)
         candidate = first["head"]
         result_ref = immutable_result_ref(state, worker_id, candidate)
         with workspace_lock(ws):
             state, current, canonical = load_worker_state(ws, worker_id)
             if current["status"] != "ready" or current["worker_token"] != meta["worker_token"]:
-                raise CWSError("worker state changed before collection")
+                raise ClonegrownError("worker state changed before collection")
             current.update({
                 "status": "collecting", "candidate_sha": candidate, "candidate_ref": result_ref,
                 "allow_rewrite": bool(allow_rewrite), "collect_started": time.time(), **owner_fields(),
@@ -370,7 +370,7 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
             failpoint("collect.after_fetch")
             got = git(canonical, "rev-parse", "--verify", f"{result_ref}^{{commit}}").stdout.strip()
             if got != candidate:
-                raise CWSError("preserved result differs from candidate commit")
+                raise ClonegrownError("preserved result differs from candidate commit")
             git(canonical, "cat-file", "-e", f"{candidate}^{{commit}}")
             failpoint("collect.after_verify")
             second = worker_snapshot(state, meta, require_ancestry=not allow_rewrite)
@@ -381,12 +381,12 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
                         "candidate": candidate, "observed": second["head"], "time": time.time()}})
                     clear_owner(current, "candidate_sha", "candidate_ref")
                     atomic_json(worker_meta_path(ws, worker_id), current)
-                raise CWSError("worker changed during collection; candidate preserved but not accepted")
+                raise ClonegrownError("worker changed during collection; candidate preserved but not accepted")
             failpoint("collect.after_worker_recheck")
             with workspace_lock(ws):
                 state, current, canonical = load_worker_state(ws, worker_id)
                 if current.get("status") != "collecting" or current.get("candidate_sha") != candidate:
-                    raise CWSError("collection metadata changed")
+                    raise ClonegrownError("collection metadata changed")
                 git(canonical, "update-ref", summary_ref(state, worker_id), candidate)
                 failpoint("collect.after_summary")
                 current.update({
@@ -412,13 +412,13 @@ def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = 
     ws = ws_path.resolve()
     with file_lock(worker_lock_path(ws, worker_id)) as acquired:
         if not acquired:
-            raise CWSError("worker is busy")
+            raise ClonegrownError("worker is busy")
         with workspace_lock(ws):
             state, meta, canonical = load_worker_state(ws, worker_id)
             if meta["status"] in {"discarded", "abandoned"}:
                 return meta
             if meta["status"] in ACTIVE_SPAWN | ACTIVE_COLLECT | ACTIVE_DISCARD:
-                raise CWSError(f"worker has an active operation: {meta['status']}")
+                raise ClonegrownError(f"worker has an active operation: {meta['status']}")
             # Every destructive path authenticates the published worker first, so that
             # --abandon cannot turn metadata tampering into an accepted deletion.
             if final_worker_root(ws, worker_id).exists():
@@ -427,13 +427,13 @@ def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = 
                 ref = meta.get("result_ref")
                 got = git(canonical, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False)
                 if got.returncode or got.stdout.strip() != meta.get("result_sha"):
-                    raise CWSError("refusing deletion because collected result is not preserved")
+                    raise ClonegrownError("refusing deletion because collected result is not preserved")
                 if Path(meta["path"]).exists() and not force:
                     snap = worker_snapshot(state, meta, require_ancestry=not meta.get("allow_rewrite", False))
                     if snap["head"] != meta["result_sha"]:
-                        raise CWSError("worker changed after collection; use --force only to knowingly discard it")
+                        raise ClonegrownError("worker changed after collection; use --force only to knowingly discard it")
             elif not abandon:
-                raise CWSError("refusing to delete an uncollected worker; use explicit --abandon")
+                raise ClonegrownError("refusing to delete an uncollected worker; use explicit --abandon")
             meta.update({
                 "status": "discarding", "discard_intent": "abandoned" if abandon else "discarded",
                 "discard_previous": meta["status"], "discard_started": time.time(), **owner_fields(),

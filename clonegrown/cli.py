@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
-from .core import CWSError, validate_primary_repo
+from .core import ClonegrownError, validate_primary_repo
 from .lifecycle import collect, discard, init_workspace, spawn
 from .recovery import recover, status
 
@@ -45,7 +45,7 @@ def discover_workspace(start: Path | None = None) -> Path:
     workspace = default_workspace(canonical)
     if (workspace / ".cws" / "state.json").is_file():
         return workspace
-    raise CWSError(f"no Clonegrown workspace found for {canonical}; run `clonegrown init` first")
+    raise ClonegrownError(f"no Clonegrown workspace found for {canonical}; run `clonegrown init` first")
 
 
 def resolve_workspace(explicit: str | None) -> Path:
@@ -55,18 +55,22 @@ def resolve_workspace(explicit: str | None) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="clonegrown", description="Isolated Git clone workspaces for coding agents")
+    parser = argparse.ArgumentParser(
+        prog="clonegrown",
+        description="Per-task Git working directories for coding agents: spawn a worker, "
+                    "work in it, collect the result, discard the worker. Interrupted steps recover.",
+    )
     parser.add_argument("--version", action="version", version=f"clonegrown {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def workspace_option(p: argparse.ArgumentParser) -> None:
         p.add_argument("--workspace", help="workspace path (normally auto-discovered)")
 
-    p = sub.add_parser("init", help="initialize a sibling Clonegrown workspace")
+    p = sub.add_parser("init", help="create the workspace that will hold this repo's workers")
     p.add_argument("canonical", nargs="?", help="canonical checkout (default: current repo)")
     p.add_argument("--workspace", help="workspace path (default: <repo>-dev sibling)")
 
-    p = sub.add_parser("spawn", help="create an isolated worker clone")
+    p = sub.add_parser("spawn", help="create a worker (a clone by default, a worktree with --worktree)")
     p.add_argument("task", nargs="?", help="short description of the worker task")
     p.add_argument("--task", dest="task_flag", help="task description (alternate form)")
     workspace_option(p)
@@ -80,19 +84,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wait-seconds", type=float, default=120.0,
                    help="how long to wait for an in-flight spawn with the same request id")
 
-    p = sub.add_parser("collect", help="preserve a worker result in the canonical repo")
+    p = sub.add_parser("collect", help="save a worker's committed result into the canonical repo")
     p.add_argument("id", type=int, help="worker id")
     workspace_option(p)
     p.add_argument("--allow-rewrite", action="store_true",
                    help="accept a result that does not descend from the worker's base")
 
-    p = sub.add_parser("discard", help="remove a worker after collection or abandonment")
+    p = sub.add_parser("discard", help="delete a worker whose result is saved (or --abandon it)")
     p.add_argument("id", type=int, help="worker id")
     workspace_option(p)
     p.add_argument("--abandon", action="store_true", help="discard uncollected work intentionally")
     p.add_argument("--force", action="store_true", help="discard even if the worker changed after collection")
 
-    p = sub.add_parser("recover", help="recover interrupted lifecycle operations")
+    p = sub.add_parser("recover", help="finish or roll back operations interrupted by a crash")
     workspace_option(p)
 
     p = sub.add_parser("status", help="show workspace and worker state")
@@ -125,7 +129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = status(resolve_workspace(args.workspace))
         print(json.dumps(public_result(result), indent=2, sort_keys=True))
         return 0
-    except CWSError as exc:
+    except ClonegrownError as exc:
         print(f"clonegrown: {exc}", file=sys.stderr)
         return 2
 

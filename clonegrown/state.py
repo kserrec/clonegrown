@@ -19,12 +19,12 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .core import (
-    CWSError, atomic_json, file_lock, git_common_dir, git_dir, lexical_abs, load_json, object_format,
+    PROTOCOL_NAME, ClonegrownError, atomic_json, file_lock, git_common_dir, git_dir, lexical_abs, load_json, object_format,
     validate_primary_repo,
 )
 
 SCHEMA = 3
-RESERVED_SOURCE_PREFIX = "cws-source"
+RESERVED_SOURCE_PREFIX = f"{PROTOCOL_NAME}-source"
 WORKER_MODES = {"clone", "worktree"}
 
 ACTIVE_SPAWN = {"allocated", "cloning", "configuring", "publishing"}
@@ -43,7 +43,7 @@ _HEX = r"[0-9a-f]+"
 # --- workspace layout --------------------------------------------------------
 
 def ws_paths(ws: Path) -> dict[str, Path]:
-    ctl = ws / ".cws"
+    ctl = ws / f".{PROTOCOL_NAME}"
     return {
         "ctl": ctl,
         "state": ctl / "state.json",
@@ -81,13 +81,13 @@ def expected_worker_repo(ws: Path, state: dict[str, Any], worker_id: int) -> Pat
 
 
 def canonical_marker_path(canonical: Path, workspace_id: str) -> Path:
-    return git_common_dir(canonical) / "cws" / f"{workspace_id}.json"
+    return git_common_dir(canonical) / PROTOCOL_NAME / f"{workspace_id}.json"
 
 
 def worker_marker_path(repo: Path) -> Path:
     # The per-repository Git directory: for a clone that is .git itself; for a
     # linked worktree it is the private .git/worktrees/<name> admin directory.
-    return git_dir(repo) / "cws-worker.json"
+    return git_dir(repo) / f"{PROTOCOL_NAME}-worker.json"
 
 
 def validate_control_dir(ws: Path, require_state: bool = False) -> None:
@@ -96,24 +96,24 @@ def validate_control_dir(ws: Path, require_state: bool = False) -> None:
     try:
         mode = os.lstat(ctl).st_mode
     except FileNotFoundError:
-        raise CWSError(f"workspace control directory is missing: {ctl}")
+        raise ClonegrownError(f"workspace control directory is missing: {ctl}")
     if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-        raise CWSError("workspace control directory is not a real directory")
+        raise ClonegrownError("workspace control directory is not a real directory")
     for key in ("workers", "requests", "locks", "staging"):
         p = paths[key]
         try:
             mode = os.lstat(p).st_mode
         except FileNotFoundError:
-            raise CWSError(f"workspace control subdirectory is missing: {p.name}")
+            raise ClonegrownError(f"workspace control subdirectory is missing: {p.name}")
         if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-            raise CWSError(f"workspace control subdirectory is unsafe: {p.name}")
+            raise ClonegrownError(f"workspace control subdirectory is unsafe: {p.name}")
     if paths["state"].exists() or require_state:
         try:
             mode = os.lstat(paths["state"]).st_mode
         except FileNotFoundError:
-            raise CWSError("workspace state file is missing")
+            raise ClonegrownError("workspace state file is missing")
         if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-            raise CWSError("workspace state file is unsafe")
+            raise ClonegrownError("workspace state file is unsafe")
 
 
 @contextlib.contextmanager
@@ -121,14 +121,14 @@ def workspace_lock(ws: Path) -> Iterator[None]:
     validate_control_dir(ws)
     with file_lock(ws_paths(ws)["lock"]) as acquired:
         if not acquired:
-            raise CWSError("could not acquire workspace lock")
+            raise ClonegrownError("could not acquire workspace lock")
         yield
 
 
 # --- canonical ref names -----------------------------------------------------
 
 def canonical_ref_prefix(state: dict[str, Any]) -> str:
-    return f"refs/cws/{state['workspace_id']}"
+    return f"refs/{PROTOCOL_NAME}/{state['workspace_id']}"
 
 
 def base_ref(state: dict[str, Any], worker_id: int) -> str:
@@ -174,45 +174,45 @@ def params_hash(base: str, task: str, strong: bool, mode: str = "clone") -> str:
 def validate_worker_meta(ws: Path, state: dict[str, Any], worker_id: int, meta: dict[str, Any]) -> None:
     """Validate durable metadata before it selects a path or a Git ref."""
     if meta.get("schema") != SCHEMA:
-        raise CWSError("worker metadata schema mismatch")
+        raise ClonegrownError("worker metadata schema mismatch")
     if type(meta.get("id")) is not int or meta["id"] != worker_id:
-        raise CWSError("worker metadata ID does not match its filename")
+        raise ClonegrownError("worker metadata ID does not match its filename")
     if meta.get("workspace_id") != state.get("workspace_id"):
-        raise CWSError("worker metadata belongs to a different workspace")
+        raise ClonegrownError("worker metadata belongs to a different workspace")
     if meta.get("canonical_token") != state.get("canonical_token"):
-        raise CWSError("worker metadata canonical identity mismatch")
+        raise ClonegrownError("worker metadata canonical identity mismatch")
     token = meta.get("worker_token")
     if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
-        raise CWSError("worker metadata token is malformed")
+        raise ClonegrownError("worker metadata token is malformed")
     if meta.get("status") not in KNOWN_WORKER_STATUSES:
-        raise CWSError(f"unknown worker status: {meta.get('status')!r}")
+        raise ClonegrownError(f"unknown worker status: {meta.get('status')!r}")
     if not isinstance(meta.get("task"), str) or not isinstance(meta.get("base"), str):
-        raise CWSError("worker task/base metadata is malformed")
+        raise ClonegrownError("worker task/base metadata is malformed")
     if meta.get("branch") != worker_branch(state, worker_id, meta["task"]):
-        raise CWSError("worker branch does not match deterministic assignment")
+        raise ClonegrownError("worker branch does not match deterministic assignment")
     mode = worker_mode(meta)
     if mode not in WORKER_MODES:
-        raise CWSError(f"unknown worker mode: {mode!r}")
+        raise ClonegrownError(f"unknown worker mode: {mode!r}")
     if mode == "worktree" and meta.get("strong"):
-        raise CWSError("worktree worker cannot be strong")
+        raise ClonegrownError("worktree worker cannot be strong")
     if meta.get("params_hash") != params_hash(meta["base"], meta["task"], bool(meta.get("strong")), mode):
-        raise CWSError("worker parameter digest mismatch")
+        raise ClonegrownError("worker parameter digest mismatch")
     admin = meta.get("worktree_admin")
     if admin is not None:  # None once the directory has been removed; absent for clones and early spawn stages
         if mode != "worktree" or not isinstance(admin, str):
-            raise CWSError("worktree admin path is malformed")
+            raise ClonegrownError("worktree admin path is malformed")
         admin_path = lexical_abs(admin)
         worktrees = lexical_abs(state["canonical_git_dir"]) / "worktrees"
         if admin_path.parent != worktrees or admin_path.name in {"", ".", ".."}:
-            raise CWSError("worktree admin path is outside the canonical worktrees directory")
+            raise ClonegrownError("worktree admin path is outside the canonical worktrees directory")
     if lexical_abs(meta.get("path", "")) != expected_worker_repo(ws, state, worker_id):
-        raise CWSError("worker metadata path does not match its allocated slot")
+        raise ClonegrownError("worker metadata path does not match its allocated slot")
     if lexical_abs(meta.get("stage_root", "")) != lexical_abs(staging_root(ws, worker_id, token)):
-        raise CWSError("worker staging path does not match its allocation token")
+        raise ClonegrownError("worker staging path does not match its allocation token")
     sha = meta.get("base_sha")
     expected_len = 64 if state.get("object_format") == "sha256" else 40
     if not isinstance(sha, str) or len(sha) != expected_len or not re.fullmatch(_HEX, sha):
-        raise CWSError("worker base commit ID is malformed")
+        raise ClonegrownError("worker base commit ID is malformed")
 
 
 # --- process ownership -------------------------------------------------------
@@ -252,37 +252,37 @@ def clear_owner(meta: dict[str, Any], *extra: str) -> None:
 
 def validate_state(ws: Path, state: dict[str, Any], require_ready: bool = True) -> None:
     if state.get("schema") != SCHEMA:
-        raise CWSError("unsupported workspace metadata schema")
+        raise ClonegrownError("unsupported workspace metadata schema")
     if require_ready and state.get("status") != "ready":
-        raise CWSError(f"workspace is not ready: {state.get('status')}")
+        raise ClonegrownError(f"workspace is not ready: {state.get('status')}")
     if state.get("status") not in {"initializing", "ready"}:
-        raise CWSError(f"unknown workspace state: {state.get('status')!r}")
+        raise ClonegrownError(f"unknown workspace state: {state.get('status')!r}")
     workspace_id = state.get("workspace_id")
     token = state.get("canonical_token")
     if not isinstance(workspace_id, str) or not re.fullmatch(r"[0-9a-f]{16}", workspace_id):
-        raise CWSError("workspace ID is malformed")
+        raise ClonegrownError("workspace ID is malformed")
     if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{48}", token):
-        raise CWSError("canonical identity token is malformed")
+        raise ClonegrownError("canonical identity token is malformed")
     if lexical_abs(state.get("workspace", "")) != lexical_abs(ws):
-        raise CWSError("workspace path identity changed")
+        raise ClonegrownError("workspace path identity changed")
     repo_name = state.get("repo_name")
     if (not isinstance(repo_name, str) or not repo_name or repo_name in {".", ".."}
             or Path(repo_name).is_absolute() or Path(repo_name).name != repo_name
             or "/" in repo_name or "\\" in repo_name):
-        raise CWSError("repository name in workspace state is unsafe")
+        raise ClonegrownError("repository name in workspace state is unsafe")
     if state.get("object_format") not in {"sha1", "sha256"}:
-        raise CWSError("unsupported object format in workspace state")
+        raise ClonegrownError("unsupported object format in workspace state")
     if type(state.get("next_id")) is not int or state["next_id"] < 1:
-        raise CWSError("workspace next worker ID is malformed")
+        raise ClonegrownError("workspace next worker ID is malformed")
     canonical = state.get("canonical")
     canonical_git = state.get("canonical_git_dir")
     if not isinstance(canonical, str) or lexical_abs(canonical) != Path(canonical):
-        raise CWSError("canonical path in workspace state is not normalized")
+        raise ClonegrownError("canonical path in workspace state is not normalized")
     if not isinstance(canonical_git, str) or lexical_abs(canonical_git) != Path(canonical_git):
-        raise CWSError("canonical Git path in workspace state is not normalized")
+        raise ClonegrownError("canonical Git path in workspace state is not normalized")
     slot = state.get("canonical_slot")
     if slot is not None and (type(slot) is not int or slot < 1):
-        raise CWSError("canonical slot metadata is malformed")
+        raise ClonegrownError("canonical slot metadata is malformed")
 
 
 def read_state(ws: Path) -> dict[str, Any]:
@@ -300,14 +300,14 @@ def verify_canonical(state: dict[str, Any]) -> Path:
     """Confirm the canonical repository is still the one this workspace was bound to."""
     canonical = validate_primary_repo(Path(state["canonical"]))
     if str(canonical) != str(Path(state["canonical"]).resolve()):
-        raise CWSError("canonical root changed")
+        raise ClonegrownError("canonical root changed")
     if git_common_dir(canonical) != Path(state["canonical_git_dir"]).resolve():
-        raise CWSError("canonical Git directory identity changed")
+        raise ClonegrownError("canonical Git directory identity changed")
     if object_format(canonical) != state.get("object_format"):
-        raise CWSError("canonical object format changed")
+        raise ClonegrownError("canonical object format changed")
     marker = load_json(canonical_marker_path(canonical, state["workspace_id"]))
     if (marker.get("token") != state.get("canonical_token")
             or marker.get("workspace_id") != state.get("workspace_id")
             or lexical_abs(marker.get("canonical", "")) != lexical_abs(canonical)):
-        raise CWSError("canonical repository identity marker mismatch")
+        raise ClonegrownError("canonical repository identity marker mismatch")
     return canonical
