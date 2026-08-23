@@ -1,20 +1,16 @@
-"""Turning a fresh local clone into a faithful, private copy of the canonical repo.
+"""Git operations on repositories: provisioning a clone, creating and repairing worktrees.
 
-Each function copies or adjusts one class of repository state: remotes, local
-config, auxiliary refs, info files, sparse policy, object alternates. They are
-called in a fixed order by the spawn transaction.
+Each function does one thing to one repository and knows nothing about
+workers or records. The spawn transaction calls them in a fixed order.
 """
 from __future__ import annotations
 
-import json
 import os
 import shutil
-import stat
 import tempfile
 from pathlib import Path
-from typing import Any
 
-from .core import ClonegrownError, git, git_common_dir, git_dir, git_path, lexical_abs
+from .core import ClonegrownError, git, git_common_dir, git_dir, git_path
 from .state import RESERVED_SOURCE_PREFIX
 
 # Local config that describes *this* repository's shape rather than user intent;
@@ -214,55 +210,6 @@ def add_worktree(canonical: Path, path: Path, base_sha: str) -> Path:
 def repair_worktree(canonical: Path, path: Path) -> None:
     """Fix Git's back-pointer after a worktree directory has been renamed."""
     git(canonical, "worktree", "repair", path)
-
-
-def admin_belongs_to(admin: Path, meta: dict[str, Any]) -> bool:
-    """Does this admin directory identify as the worker ``meta`` describes?
-
-    Git recycles admin names (``app``, ``app1``, ...) as soon as one is freed,
-    so a path recorded in metadata may later belong to a different worker.
-    The marker written at provisioning is authoritative; before the marker
-    exists, Git's own ``gitdir`` back-pointer must point into this worker.
-    """
-    marker = admin / "cws-worker.json"
-    if marker.is_file():
-        try:
-            data = json.loads(marker.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        return (data.get("worker_id") == meta.get("id")
-                and data.get("worker_token") == meta.get("worker_token"))
-    pointer = admin / "gitdir"
-    try:
-        target = lexical_abs(pointer.read_text(encoding="utf-8").strip())
-    except Exception:
-        return False
-    owned = {lexical_abs(Path(meta["path"]) / ".git")}
-    if meta.get("stage_root"):
-        owned.add(lexical_abs(Path(meta["stage_root"]) / Path(meta["path"]).name / ".git"))
-    return target in owned
-
-
-def remove_worktree_admin(canonical: Path, admin: Path, meta: dict[str, Any]) -> bool:
-    """Delete one worktree's admin directory so Git forgets it; True if it was ours.
-
-    Deliberately not ``git worktree prune``: that would also drop any of the
-    user's own worktrees whose directories happen to be unreachable. And
-    never by path alone: the directory must identify as this worker.
-    """
-    admin = lexical_abs(admin)
-    if admin.parent != git_common_dir(canonical) / "worktrees":
-        raise ClonegrownError("refusing to delete a path outside the worktrees directory")
-    try:
-        mode = os.lstat(admin).st_mode
-    except FileNotFoundError:
-        return True
-    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-        raise ClonegrownError("worktree admin path is not a directory")
-    if not admin_belongs_to(admin, meta):
-        return False
-    shutil.rmtree(admin, ignore_errors=True)
-    return True
 
 
 def delete_branch(canonical: Path, branch: str) -> bool:

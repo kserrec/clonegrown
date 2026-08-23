@@ -182,16 +182,17 @@ class WorktreeWorkerTests(unittest.TestCase):
         sha = commit(Path(second["path"]), "still-mine.txt")
         self.assertEqual(collect(self.ws, second["id"])["result_sha"], sha)
         tombstone = json.loads((self.ws / ".cws" / "workers" / f"{first['id']}.json").read_text())
-        self.assertIsNone(tombstone["worktree_admin"])
+        self.assertFalse(tombstone.get("worktree_admin"))
 
     def test_admin_dir_of_another_worker_is_refused(self) -> None:
-        from clonegrown.repository import remove_worktree_admin
+        from clonegrown.worker import remove_worktree_admin
+        from clonegrown.state import WorkerRecord
         a = spawn(self.ws, "HEAD", "a", strong=False, mode="worktree")
         b = spawn(self.ws, "HEAD", "b", strong=False, mode="worktree")
         # Ask to delete b's admin dir while claiming to be a: must refuse and leave it.
-        self.assertFalse(remove_worktree_admin(self.repo, Path(b["worktree_admin"]), a))
+        self.assertFalse(remove_worktree_admin(self.repo, Path(b["worktree_admin"]), WorkerRecord.from_json(a)))
         self.assertTrue(Path(b["worktree_admin"]).is_dir())
-        self.assertTrue(remove_worktree_admin(self.repo, Path(b["worktree_admin"]), b))
+        self.assertTrue(remove_worktree_admin(self.repo, Path(b["worktree_admin"]), WorkerRecord.from_json(b)))
         self.assertFalse(Path(b["worktree_admin"]).exists())
 
     # --- crash recovery --------------------------------------------------------

@@ -7,6 +7,7 @@ path discovery, and the advisory file lock.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import json
 import os
@@ -214,6 +215,31 @@ def lexical_abs(path: str | Path) -> Path:
     symlink here would let a substituted path compare equal to its victim.
     """
     return Path(os.path.abspath(os.path.normpath(os.fspath(path))))
+
+
+# --- process ownership -------------------------------------------------------
+
+def pid_fingerprint(pid: int) -> str | None:
+    """A value that changes if ``pid`` is reused by a new process (Linux start tick).
+
+    Other platforms return None and fall back to PID-only liveness.
+    """
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split()[21]
+    except Exception:
+        return None
+
+
+def process_alive(pid: Any, fingerprint: Any = None) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError as exc:
+        return exc.errno == errno.EPERM
+    if fingerprint is not None:
+        return pid_fingerprint(pid) == str(fingerprint)
+    return True
 
 
 # --- locking -----------------------------------------------------------------

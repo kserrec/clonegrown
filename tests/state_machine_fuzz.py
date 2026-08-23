@@ -6,7 +6,8 @@ from pathlib import Path
 HERE=Path(__file__).resolve().parent
 sys.path.insert(0,str(HERE.parent))
 import clonegrown as cws
-from clonegrown.state import summary_ref
+from clonegrown.state import WorkspaceState
+def summary_ref(st,wid): return WorkspaceState.from_json(st).summary_ref(wid)
 
 ROOT=Path(os.environ.get('CWS_FUZZ_ROOT','/tmp/cws-final-state-machine-fuzz'))
 WORKTREE=os.environ.get('CWS_SUITE_MODE')=='worktree'; MODE='worktree' if WORKTREE else 'clone'
