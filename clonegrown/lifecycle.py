@@ -23,8 +23,8 @@ from .core import (
 from .recovery import recover
 from .repository import (
     WORKTREE_SHARING_WARNING, add_worktree, checkout_without_hooks, copy_auxiliary_refs, copy_info_files,
-    copy_local_config, copy_remote_config, copy_sparse_policy, detach_alternates_if_needed, private_hook_warnings,
-    repair_worktree,
+    copy_local_config, copy_remote_config, copy_sparse_patterns, copy_sparse_policy, detach_alternates_if_needed,
+    private_hook_warnings, repair_worktree, sparse_checkout_enabled,
 )
 from .state import (
     SCHEMA, WORKER_MODES, WorkerRecord, WorkerStatus, WorkspaceState, canonical_marker_path, worker_lock_path,
@@ -164,7 +164,9 @@ def _advance_spawn(ws: Path, worker_id: int, status: str,
 
 def _provision_worktree(canonical: Path, stage_repo: Path, worker: WorkerRecord) -> SpawnDetails:
     """Check out the base in a staged worktree; everything else is shared with canonical."""
-    sparse = copy_sparse_policy(canonical, stage_repo)
+    sparse = sparse_checkout_enabled(canonical)  # the config is shared; only the pattern file is per-worktree
+    if sparse:
+        copy_sparse_patterns(canonical, stage_repo)
     checkout_without_hooks(stage_repo, str(worker.branch), str(worker.base_sha))
     write_worker_marker(stage_repo, worker)
     if git(stage_repo, "rev-parse", "HEAD").stdout.strip() != worker.base_sha:

@@ -31,9 +31,10 @@ Run commands from the repository root on a POSIX system with Git and Python
 3.11 or newer. The current implementation uses `fcntl`, so it does not run
 natively on Windows.
 
-The harnesses invoke the current package through `tests/legacy_cli.py` (the
-positional research interface, `clonegrown.legacy_cli`); they do **not**
-invoke the absent frozen `cws.py` candidate.
+The harnesses write the original prototype's positional command form;
+`tests/legacy_cli.py` translates it onto the installed `clonegrown` CLI, so
+they exercise the code users run. They do **not** invoke the absent frozen
+`cws.py` candidate.
 
 ## Current deterministic checks
 

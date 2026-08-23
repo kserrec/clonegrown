@@ -144,21 +144,31 @@ def copy_info_files(canonical: Path, worker: Path) -> None:
             shutil.copy2(src, dst)
 
 
-def copy_sparse_policy(canonical: Path, worker: Path) -> bool:
+def sparse_checkout_enabled(canonical: Path) -> bool:
     enabled = git(canonical, "config", "--bool", "core.sparseCheckout", check=False)
-    if enabled.returncode or enabled.stdout.strip().lower() != "true":
-        return False
-    git(worker, "config", "core.sparseCheckout", "true")
-    for key in ("core.sparseCheckoutCone", "index.sparse"):
-        value = git(canonical, "config", "--get", key, check=False)
-        if value.returncode == 0 and value.stdout.strip():
-            git(worker, "config", key, value.stdout.strip())
+    return enabled.returncode == 0 and enabled.stdout.strip().lower() == "true"
+
+
+def copy_sparse_patterns(canonical: Path, worker: Path) -> None:
+    """Copy the per-repository sparse-checkout pattern file (per-worktree for linked worktrees)."""
     src = git_path(canonical, "info/sparse-checkout")
     if not src.exists():
         raise ClonegrownError("sparse checkout is enabled but its pattern file is missing")
     dst = git_path(worker, "info/sparse-checkout")
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
+
+
+def copy_sparse_policy(canonical: Path, worker: Path) -> bool:
+    """For a clone: replicate canonical's sparse-checkout config and patterns. False if not sparse."""
+    if not sparse_checkout_enabled(canonical):
+        return False
+    git(worker, "config", "core.sparseCheckout", "true")
+    for key in ("core.sparseCheckoutCone", "index.sparse"):
+        value = git(canonical, "config", "--get", key, check=False)
+        if value.returncode == 0 and value.stdout.strip():
+            git(worker, "config", key, value.stdout.strip())
+    copy_sparse_patterns(canonical, worker)
     return True
 
 
