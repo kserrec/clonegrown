@@ -222,6 +222,14 @@ def repair_worktree(canonical: Path, path: Path) -> None:
     git(canonical, "worktree", "repair", path)
 
 
+def ref_points_at(repo: Path, ref: str | None, sha: str | None) -> bool:
+    """Does ``ref`` exist in ``repo`` and resolve to commit ``sha``?"""
+    if not ref:
+        return False
+    got = git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False)
+    return got.returncode == 0 and got.stdout.strip() == sha
+
+
 def delete_branch(canonical: Path, branch: str) -> bool:
     """Remove a worker's task branch from the shared refs; False if it was already gone."""
     return git(canonical, "branch", "-D", branch, check=False).returncode == 0

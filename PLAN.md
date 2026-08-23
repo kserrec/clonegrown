@@ -16,10 +16,10 @@ and their wildcard import chain are gone.
 Verified against the package on 2026-08-22, all with generated output kept
 outside the checkout:
 
-- 56/56 hardening cases (`tests/hardening_suite.py`);
-- 11/11 collect/discard crash failpoints (`tests/run_crash_case.py`);
-- 3/3 SIGKILL seeds, one per lifecycle mode (`tests/random_kill.py`);
-- 2/2 state-machine fuzz seeds × 40 steps (`tests/state_machine_fuzz.py`,
+- 56/56 hardening cases (`tests/campaign/hardening_suite.py`);
+- 11/11 collect/discard crash failpoints (`tests/campaign/run_crash_case.py`);
+- 3/3 SIGKILL seeds, one per lifecycle mode (`tests/campaign/random_kill.py`);
+- 2/2 state-machine fuzz seeds × 40 steps (`tests/campaign/state_machine_fuzz.py`,
   runnable again — it now drives the package API instead of the lost `cws`);
 - 3/3 unit tests; wheel build + isolated install; `clonegrown --version`,
   `python -m clonegrown`; installer run into a throwaway `HOME`.
@@ -35,7 +35,7 @@ Deliberate, small departures from "move only", each checked by the suite:
 - Root-level `clonegrown_*.py` compatibility shims were **not** kept. Nothing
   outside this repository imported them, and shims would have recreated the
   coupling the refactor removes. The research harnesses go through
-  `tests/legacy_cli.py` → `clonegrown.legacy_cli`.
+  `tests/campaign/legacy_cli.py` → `clonegrown.legacy_cli`.
 - `copy_replace_refs` was removed: it was never called (`copy_auxiliary_refs`
   already covers `refs/replace/`).
 - `recover` is now one small class with one method per worker status, instead
@@ -44,7 +44,7 @@ Deliberate, small departures from "move only", each checked by the suite:
   behind, harmlessly.
 - The installed CLI gained `--version` and help text on every flag.
 - `run_crash_case.py` honours `CWS_CRASH_RESULTS_PATH`; default harness output
-  paths under `tests/` are git-ignored.
+  paths under `tests/campaign/` are git-ignored.
 
 ### Still true
 
@@ -143,7 +143,7 @@ each verified by the full campaign in both modes:
    state machine.
 3. Each piece in its home: liveness in core, worktree removal in worker,
    repository.py pure Git; one rollback guard; no lazy imports.
-4. `clonegrown/legacy_cli.py` deleted; `tests/legacy_cli.py` translates the
+4. `clonegrown/legacy_cli.py` deleted; `tests/campaign/legacy_cli.py` translates the
    harnesses' positional form onto the real CLI. Worktree provisioning no
    longer rewrites shared sparse config.
 5. A documented CLI output contract (ARCHITECTURE.md "Command output"),
@@ -152,7 +152,7 @@ each verified by the full campaign in both modes:
 Deliberately kept: `params_hash` includes `mode` only for non-clone
 workers. Removing that needs a schema bump plus a migration of every v3
 record and request-index entry — more machinery than the one-line
-conditional it would replace. Also kept: `tests/hardening_suite.py`'s
+conditional it would replace. Also kept: `tests/campaign/hardening_suite.py`'s
 one-liner style; it is the evidence base and rewriting it risks changing
 what it tests.
 

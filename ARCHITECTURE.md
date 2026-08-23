@@ -141,21 +141,24 @@ is an operating-system sandbox.
 
 ## Testing
 
+`tests/` holds the unit tests; `tests/campaign/` holds the adversarial
+harnesses and comparative probes that produced the evidence in `research/`.
+
 - `tests/test_cli.py` — unit tests for the installed command.
 - `tests/test_worktree.py` — worktree-mode lifecycle, guards, tampering, and
   crash recovery.
-- `tests/hardening_suite.py` — 56 deterministic and adversarial cases, including
+- `tests/campaign/hardening_suite.py` — 56 deterministic and adversarial cases, including
   every crash failpoint. The harnesses write the original prototype's positional
-  command form; `tests/legacy_cli.py` translates it onto the real CLI. `CWS_SUITE_MODE=worktree`
+  command form; `tests/campaign/legacy_cli.py` translates it onto the real CLI. `CWS_SUITE_MODE=worktree`
   runs the same cases with worktree workers; the ten cases that assert clone
   isolation assert the documented sharing instead (and that the spawn warned
   about it). CI runs both modes.
-- `tests/run_crash_case.py`, `tests/random_kill.py` — single failpoint and
+- `tests/campaign/run_crash_case.py`, `tests/campaign/random_kill.py` — single failpoint and
   SIGKILL campaigns (`CWS_SUITE_MODE=worktree` for worktree workers).
-- `tests/state_machine_fuzz.py` — randomized lifecycle sequences against the
+- `tests/campaign/state_machine_fuzz.py` — randomized lifecycle sequences against the
   Python API (`CWS_SUITE_MODE=worktree` switches the invariants to the
   worktree contract, including "no task branch outlives its worktree").
-- The remaining `tests/*.py` files are comparative probes (scaling, concurrency,
+- The remaining `tests/campaign/*.py` files are comparative probes (scaling, concurrency,
   GC, shared state, I/O faults).
 
 `research/REPRODUCE.md` lists the exact commands.

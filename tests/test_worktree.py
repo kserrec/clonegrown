@@ -1,47 +1,25 @@
 """Worktree-mode workers: same custody lifecycle, linked worktree underneath."""
 from __future__ import annotations
 
-import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
 
-from clonegrown import ClonegrownError, cli, collect, discard, recover, spawn, status
+from clonegrown import ClonegrownError, collect, discard, recover, spawn, status
+from support import commit, git_out, make_repo, run_cli, run_git
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=repo, check=check, text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-
-def git_out(repo: Path, *args: str) -> str:
-    return run_git(repo, *args).stdout.strip()
-
-
-def commit(repo: Path, name: str) -> str:
-    run_git(repo, "config", "user.name", "T")
-    run_git(repo, "config", "user.email", "t@example.test")
-    (repo / name).write_text(name + "\n", encoding="utf-8")
-    run_git(repo, "add", name)
-    run_git(repo, "commit", "-q", "-m", name)
-    return git_out(repo, "rev-parse", "HEAD")
 
 
 class WorktreeWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.td = tempfile.TemporaryDirectory()
         self.root = Path(self.td.name)
-        self.repo = self.root / "demo"
-        self.repo.mkdir()
-        run_git(self.repo, "init", "-q", "-b", "trunk")
-        commit(self.repo, "README.md")
+        self.repo = make_repo(self.root)
         self.ws = self.root / "demo-dev"
         self.cli(self.repo, "init")
 
@@ -49,16 +27,9 @@ class WorktreeWorkerTests(unittest.TestCase):
         self.td.cleanup()
 
     def cli(self, cwd: Path, *args: str) -> dict | list:
-        old = Path.cwd()
-        out = io.StringIO()
-        try:
-            os.chdir(cwd)
-            with redirect_stdout(out):
-                rc = cli.main(list(args))
-        finally:
-            os.chdir(old)
-        self.assertEqual(rc, 0, out.getvalue())
-        return json.loads(out.getvalue())
+        rc, payload = run_cli(cwd, *args)
+        self.assertEqual(rc, 0, payload)
+        return payload
 
     def cli_process(self, cwd: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         full_env = {**os.environ, "PYTHONPATH": str(ROOT), **(env or {})}
@@ -70,10 +41,13 @@ class WorktreeWorkerTests(unittest.TestCase):
         return {line.split(" ", 1)[1] for line in lines if line.startswith("worktree ")}
 
     def assert_forgotten(self, worker: dict) -> None:
+        """The worker's directory, worktree registration, task branch, and every admin dir are gone."""
         self.assertFalse(Path(worker["path"]).exists())
         self.assertNotIn(str(Path(worker["path"]).resolve()), self.worktree_paths())
         self.assertNotEqual(run_git(self.repo, "rev-parse", "--verify", f"refs/heads/{worker['branch']}", check=False).returncode, 0)
-        self.assertFalse(list((self.repo / ".git" / "worktrees").glob("*")) if (self.repo / ".git" / "worktrees").exists() else [])
+        admin_root = self.repo / ".git" / "worktrees"
+        remaining = sorted(p.name for p in admin_root.iterdir()) if admin_root.exists() else []
+        self.assertEqual(remaining, [])
 
     # --- lifecycle -----------------------------------------------------------
 

@@ -24,7 +24,7 @@ from .recovery import recover
 from .repository import (
     WORKTREE_SHARING_WARNING, add_worktree, checkout_without_hooks, copy_auxiliary_refs, copy_info_files,
     copy_local_config, copy_remote_config, copy_sparse_patterns, copy_sparse_policy, detach_alternates_if_needed,
-    private_hook_warnings, repair_worktree, sparse_checkout_enabled,
+    private_hook_warnings, ref_points_at, repair_worktree, sparse_checkout_enabled,
 )
 from .state import (
     SCHEMA, WORKER_MODES, WorkerRecord, WorkerStatus, WorkspaceState, canonical_marker_path, worker_lock_path,
@@ -162,15 +162,20 @@ def _advance_spawn(ws: Path, worker_id: int, status: str,
         return worker, state, state.verify_canonical()
 
 
+def _check_out_base(stage_repo: Path, worker: WorkerRecord) -> None:
+    """Put the staged repository on its task branch at the pinned base and stamp its identity."""
+    checkout_without_hooks(stage_repo, str(worker.branch), str(worker.base_sha))
+    write_worker_marker(stage_repo, worker)
+    if git(stage_repo, "rev-parse", "HEAD").stdout.strip() != worker.base_sha:
+        raise ClonegrownError("worker checkout differs from immutable requested base")
+
+
 def _provision_worktree(canonical: Path, stage_repo: Path, worker: WorkerRecord) -> SpawnDetails:
     """Check out the base in a staged worktree; everything else is shared with canonical."""
     sparse = sparse_checkout_enabled(canonical)  # the config is shared; only the pattern file is per-worktree
     if sparse:
         copy_sparse_patterns(canonical, stage_repo)
-    checkout_without_hooks(stage_repo, str(worker.branch), str(worker.base_sha))
-    write_worker_marker(stage_repo, worker)
-    if git(stage_repo, "rev-parse", "HEAD").stdout.strip() != worker.base_sha:
-        raise ClonegrownError("worker checkout differs from immutable requested base")
+    _check_out_base(stage_repo, worker)
     return SpawnDetails(
         source_remote=None,
         alternates_detached=False,
@@ -190,10 +195,7 @@ def _provision_clone(canonical: Path, stage_repo: Path, worker: WorkerRecord, st
     copy_info_files(canonical, stage_repo)
     sparse = copy_sparse_policy(canonical, stage_repo)
     warnings += config_warnings + private_hook_warnings(canonical)
-    checkout_without_hooks(stage_repo, str(worker.branch), str(worker.base_sha))
-    write_worker_marker(stage_repo, worker)
-    if git(stage_repo, "rev-parse", "HEAD").stdout.strip() != worker.base_sha:
-        raise ClonegrownError("worker checkout differs from immutable requested base")
+    _check_out_base(stage_repo, worker)
     git(stage_repo, "fsck", "--connectivity-only")
     return SpawnDetails(
         source_remote=source_remote,
@@ -359,8 +361,7 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
                 snap = snapshot_worker(state, worker, require_ancestry=not allow_rewrite)
                 if snap.head != worker.result_sha:
                     raise ClonegrownError("worker changed after collection; refusing to hide newer work")
-                got = git(canonical, "rev-parse", "--verify", f"{worker.result_ref}^{{commit}}", check=False)
-                if got.returncode or got.stdout.strip() != worker.result_sha:
+                if not ref_points_at(canonical, worker.result_ref, worker.result_sha):
                     raise ClonegrownError("collected result ref is missing or changed")
                 git(canonical, "update-ref", state.summary_ref(worker_id), str(worker.result_sha))
                 return worker.to_json()
@@ -443,8 +444,7 @@ def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = 
             if worker_slot(ws, worker_id).exists():
                 verify_worker(state, worker)
             if worker.status == WorkerStatus.COLLECTED:
-                got = git(canonical, "rev-parse", "--verify", f"{worker.result_ref}^{{commit}}", check=False)
-                if got.returncode or got.stdout.strip() != worker.result_sha:
+                if not ref_points_at(canonical, worker.result_ref, worker.result_sha):
                     raise ClonegrownError("refusing deletion because collected result is not preserved")
                 if worker.repo.exists() and not force:
                     snap = snapshot_worker(state, worker, require_ancestry=not worker.allow_rewrite)

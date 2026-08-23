@@ -4,7 +4,7 @@ import argparse, contextlib, json, os, random, shutil, subprocess, sys, time, tr
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
-sys.path.insert(0,str(HERE.parent))
+sys.path.insert(0,str(HERE.parents[1]))
 import clonegrown as cws
 from clonegrown.state import WorkspaceState
 def summary_ref(st,wid): return WorkspaceState.from_json(st).summary_ref(wid)

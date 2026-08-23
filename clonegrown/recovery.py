@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .core import ClonegrownError, file_lock, git, process_alive
+from .repository import ref_points_at
 from .state import WorkerRecord, WorkerStatus, WorkspaceState, worker_lock_path, worker_slot, workspace_lock, ws_paths
 from .worker import forget_worktree, load_worker, snapshot_worker, verify_worker
 
@@ -32,13 +33,6 @@ def _orphan_slots(ws: Path, state: WorkspaceState, known_ids: set[int]) -> list[
     return [(int(child.name), child) for child in ws.iterdir()
             if child.is_dir() and child.name.isdigit()
             and int(child.name) != state.canonical_slot and int(child.name) not in known_ids]
-
-
-def _ref_points_at(canonical: Path, ref: str | None, sha: str | None) -> bool:
-    if not ref:
-        return False
-    got = git(canonical, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False)
-    return got.returncode == 0 and got.stdout.strip() == sha
 
 
 class _Recovery:
@@ -149,7 +143,7 @@ class _Recovery:
     def _recover_collecting(self) -> None:
         worker = self.worker
         candidate, ref = worker.candidate_sha, worker.candidate_ref
-        can_finish = bool(candidate) and _ref_points_at(self.canonical, ref, candidate)
+        can_finish = bool(candidate) and ref_points_at(self.canonical, ref, candidate)
         if can_finish:
             try:
                 snap = snapshot_worker(self.state, worker, require_ancestry=not worker.allow_rewrite)
@@ -212,7 +206,7 @@ class _Recovery:
 
     def _recover_collected(self) -> None:
         worker = self.worker
-        if _ref_points_at(self.canonical, worker.result_ref, worker.result_sha):
+        if ref_points_at(self.canonical, worker.result_ref, worker.result_sha):
             git(self.canonical, "update-ref", self.state.summary_ref(self.worker_id), str(worker.result_sha))
         else:
             self.mark_broken("preserved result ref missing", "collected-marked-broken")
