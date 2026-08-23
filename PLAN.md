@@ -162,5 +162,41 @@ times per spawn under the workspace lock. That is what makes eight parallel
 spawns ~4× (clone) to ~6× (worktree) one spawn. Caching the verification
 within one transaction is the obvious follow-up.
 
-The next work is one of the open product decisions above; none is in
-progress.
+### Cold refactor and one fix (2026-08-23)
+
+A `/refactor` pass after the five phases (zero behavior change, verified
+56/56 both modes): `ref_points_at` and `_check_out_base` shared,
+`tests/support.py` for the unit tests, and the ten harnesses and probes
+moved to `tests/campaign/` so `tests/` reads as unit tests + campaign. It
+surfaced one bug, fixed in its own commit (`6798a5a`): a worktree's admin
+directory was recorded one stage after Git created it, so a crash in the
+`spawn.after_clone` window left a stale worktree entry recovery could not
+see. Now persisted immediately; `test_crash_right_after_worktree_add_leaves_no_admin_dir`
+pins it.
+
+`main` at `6798a5a` is pushed; CI run 32617584688 passed all four jobs
+(Linux, macOS, hardening clone, hardening worktree). Working tree clean.
+
+## Where this stands and what next (2026-08-23)
+
+Kyle's situation, stated plainly: he does not run multi-agent workflows and
+has no tasks that need several workers, so he cannot dogfood this tool in
+the sense of feeling its pain. He also does not want to experiment on this
+repository (reasonable, though the blast radius is small: one marker under
+`.git/cws/`, refs under `refs/cws/`, a sibling workspace folder).
+
+Three honest options, none chosen yet:
+
+A. **One-afternoon simulation** on a scratch clone of any project: ask
+   Claude Code or Codex to act as orchestrator — split a job into three
+   tasks, `clonegrown spawn --worktree` each, work, `collect`, `discard` —
+   and watch whether the *agent* uses the CLI correctly from SKILL.md alone.
+   Cheap, and the last thing that can still find a real flaw without users.
+B. **Find the people who have the workflow** (multi-agent orchestrator
+   users) and put the README in front of them. Outreach, not engineering.
+C. **Call it finished as a research artifact.** Legitimate; nothing is
+   wasted.
+
+Recommendation on record: do A once, then choose B or C by whether Kyle
+wants to find users. No engineering item should start before that, except
+the measured throughput follow-up above if it ever matters.
