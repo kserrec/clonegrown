@@ -50,6 +50,13 @@ current suite while keeping its consolidated output outside the checkout:
 CWS_RESULTS_PATH=/tmp/clonegrown-hardening-results.json python3 tests/hardening_suite.py
 ```
 
+The same suite runs against worktree workers (every harness below accepts the
+same variable):
+
+```bash
+CWS_SUITE_MODE=worktree CWS_RESULTS_PATH=/tmp/clonegrown-hardening-worktree.json python3 tests/hardening_suite.py
+```
+
 Run the current unit tests:
 
 ```bash

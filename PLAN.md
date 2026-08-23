@@ -74,10 +74,27 @@ kind of worker:
 - Documented in `ARCHITECTURE.md` ("Worker modes") and the README's
   "Three kinds of worker" table.
 
-Not yet done for worktree mode: the adversarial campaign (symlink/tamper
-matrix, SIGKILL runs, fuzzer) has only been run against clone workers.
-Extending `tests/hardening_suite.py` to parametrize over mode is the next
-testing step.
+### Worktree adversarial campaign (2026-08-22)
+
+Every harness takes `CWS_SUITE_MODE=worktree`. Results on the current code:
+
+- hardening suite: 56/56 worktree, 56/56 clone (CI runs both);
+- state-machine fuzzer: 6/6 worktree seeds × 50 steps, 3/3 clone seeds;
+- SIGKILL campaign: 6/6 worktree seeds (two per lifecycle mode);
+- the concurrent-`gc` fixture reproduced the historical 1/8 in worktrees
+  versus 8/8 in clones, now a current measurement.
+
+The campaign found one real defect before it shipped: Git recycles worktree
+admin-directory names, and tombstone cleanup deleted the recorded admin path
+on every later `recover`, destroying a newer worker that had inherited the
+name. Fixed by proving ownership (marker id+token, or Git's `gitdir` pointer)
+before any admin-dir deletion and clearing the path from the record once
+handled; `tests/test_worktree.py` pins the scenario.
+
+Known, measured, not fixed: eight parallel worktree spawns run ~6.6× one
+spawn (clones: well under 5.5×) because the lock-held metadata phases
+dominate when creation itself is near-free. Shortening those critical
+sections is a possible follow-up, not a correctness problem.
 
 ## Product decisions still open
 
@@ -87,9 +104,8 @@ Each requires an explicit decision and its own plan before code changes.
    current package. Then choose which remote-tracking refs workers truly need
    and whether to narrow the fetch, compact refs, or combine both. This can
    change offline worker semantics and cannot be smuggled into cleanup work.
-2. **Clone tool or workspace manager.** Resolved: workspace manager; see
-   "Worktree mode" above. Remaining follow-up is test parity for worktree
-   workers.
+2. **Clone tool or workspace manager.** Resolved and hardened: workspace
+   manager; see "Worktree mode" above.
 3. **Preflight recommendations.** Decide whether the CLI merely reports
    repository facts or recommends a mode. Any thresholds need new measurements
    across real repositories; the historical results from one machine are not a
@@ -112,6 +128,5 @@ Each requires an explicit decision and its own plan before code changes.
    campaign artifacts. A current-only replacement harness must be named and
    reported as a new experiment.
 
-The next executable work is **worktree test parity**: parametrize the
-hardening suite over worker mode and run the SIGKILL and fuzz campaigns with
-worktree workers. After that, the open product decisions above.
+Worktree test parity is done. The next work is one of the open product
+decisions above; none is in progress.

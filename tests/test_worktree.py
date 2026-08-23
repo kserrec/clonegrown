@@ -169,6 +169,31 @@ class WorktreeWorkerTests(unittest.TestCase):
         sha = commit(Path(worker["path"]), "w.txt")
         self.assertEqual(collect(self.ws, worker["id"])["result_sha"], sha)
 
+    def test_recycled_admin_name_is_never_deleted_from_a_newer_worker(self) -> None:
+        # Git reuses admin-dir names (app, app1, ...) once freed. A tombstone must never
+        # delete, on a later recover, an admin dir that now belongs to a newer worker.
+        first = spawn(self.ws, "HEAD", "first", strong=False, mode="worktree")
+        discard(self.ws, first["id"], abandon=True)
+        second = spawn(self.ws, "HEAD", "second", strong=False, mode="worktree")
+        self.assertEqual(Path(second["worktree_admin"]).name, Path(first["worktree_admin"]).name)
+        for _ in range(2):
+            recover(self.ws)
+        self.assertTrue(Path(second["worktree_admin"]).is_dir())
+        sha = commit(Path(second["path"]), "still-mine.txt")
+        self.assertEqual(collect(self.ws, second["id"])["result_sha"], sha)
+        tombstone = json.loads((self.ws / ".cws" / "workers" / f"{first['id']}.json").read_text())
+        self.assertIsNone(tombstone["worktree_admin"])
+
+    def test_admin_dir_of_another_worker_is_refused(self) -> None:
+        from clonegrown.repository import remove_worktree_admin
+        a = spawn(self.ws, "HEAD", "a", strong=False, mode="worktree")
+        b = spawn(self.ws, "HEAD", "b", strong=False, mode="worktree")
+        # Ask to delete b's admin dir while claiming to be a: must refuse and leave it.
+        self.assertFalse(remove_worktree_admin(self.repo, Path(b["worktree_admin"]), a))
+        self.assertTrue(Path(b["worktree_admin"]).is_dir())
+        self.assertTrue(remove_worktree_admin(self.repo, Path(b["worktree_admin"]), b))
+        self.assertFalse(Path(b["worktree_admin"]).exists())
+
     # --- crash recovery --------------------------------------------------------
 
     def test_crash_after_publish_before_repair_is_recovered(self) -> None:

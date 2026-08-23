@@ -34,11 +34,17 @@ jobs:
           python -m clonegrown --help
 
   hardening:
+    strategy:
+      matrix:
+        mode: [clone, worktree]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Existing adversarial suite
+      - name: Adversarial suite (${{ matrix.mode }} workers)
         run: python tests/hardening_suite.py
+        env:
+          CWS_SUITE_MODE: ${{ matrix.mode }}
+          CWS_RESULTS_PATH: ${{ runner.temp }}/hardening-${{ matrix.mode }}.json

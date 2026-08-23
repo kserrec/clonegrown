@@ -17,8 +17,12 @@ from .state import (
     ACTIVE_SPAWN, base_ref, clear_owner, final_worker_root, process_alive, read_state,
     summary_ref, verify_canonical, worker_lock_path, worker_mode, workspace_lock, ws_paths,
 )
-from .repository import delete_branch, remove_worktree_admin
 from .worker import load_worker_state, verify_worker, worker_snapshot
+
+
+def _forget(canonical: Path, meta: dict[str, Any]) -> None:
+    from .lifecycle import forget_worktree  # lifecycle imports recovery; keep the cycle lazy
+    forget_worktree(canonical, meta)
 
 Report = dict[str, Any]
 
@@ -73,11 +77,7 @@ class _Recovery:
 
     def forget_worktree(self) -> None:
         """After a worktree worker's directory is gone, drop its admin dir and task branch."""
-        if worker_mode(self.meta) != "worktree":
-            return
-        if self.meta.get("worktree_admin"):
-            remove_worktree_admin(self.canonical, Path(self.meta["worktree_admin"]))
-        delete_branch(self.canonical, self.meta["branch"])
+        _forget(self.canonical, self.meta)
 
     def run(self) -> None:
         status = self.meta["status"]
@@ -206,8 +206,9 @@ class _Recovery:
                 self.report("tombstone-path-cleaned")
             except Exception:
                 self.report("tombstone-unverified-path-left")
-        if not final_root.exists():
+        if not final_root.exists() and self.meta.get("worktree_admin"):
             self.forget_worktree()
+            atomic_json(self.mp, self.meta)
         self.drop_base_pin()
 
 

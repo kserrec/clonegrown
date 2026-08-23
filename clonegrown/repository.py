@@ -6,11 +6,13 @@ called in a fixed order by the spawn transaction.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from .core import CWSError, git, git_common_dir, git_dir, git_path, lexical_abs
 from .state import RESERVED_SOURCE_PREFIX
@@ -214,11 +216,39 @@ def repair_worktree(canonical: Path, path: Path) -> None:
     git(canonical, "worktree", "repair", path)
 
 
-def remove_worktree_admin(canonical: Path, admin: Path) -> None:
-    """Delete one worktree's admin directory so Git forgets it.
+def admin_belongs_to(admin: Path, meta: dict[str, Any]) -> bool:
+    """Does this admin directory identify as the worker ``meta`` describes?
+
+    Git recycles admin names (``app``, ``app1``, ...) as soon as one is freed,
+    so a path recorded in metadata may later belong to a different worker.
+    The marker written at provisioning is authoritative; before the marker
+    exists, Git's own ``gitdir`` back-pointer must point into this worker.
+    """
+    marker = admin / "cws-worker.json"
+    if marker.is_file():
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        return (data.get("worker_id") == meta.get("id")
+                and data.get("worker_token") == meta.get("worker_token"))
+    pointer = admin / "gitdir"
+    try:
+        target = lexical_abs(pointer.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+    owned = {lexical_abs(Path(meta["path"]) / ".git")}
+    if meta.get("stage_root"):
+        owned.add(lexical_abs(Path(meta["stage_root"]) / Path(meta["path"]).name / ".git"))
+    return target in owned
+
+
+def remove_worktree_admin(canonical: Path, admin: Path, meta: dict[str, Any]) -> bool:
+    """Delete one worktree's admin directory so Git forgets it; True if it was ours.
 
     Deliberately not ``git worktree prune``: that would also drop any of the
-    user's own worktrees whose directories happen to be unreachable.
+    user's own worktrees whose directories happen to be unreachable. And
+    never by path alone: the directory must identify as this worker.
     """
     admin = lexical_abs(admin)
     if admin.parent != git_common_dir(canonical) / "worktrees":
@@ -226,10 +256,13 @@ def remove_worktree_admin(canonical: Path, admin: Path) -> None:
     try:
         mode = os.lstat(admin).st_mode
     except FileNotFoundError:
-        return
+        return True
     if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
         raise CWSError("worktree admin path is not a directory")
+    if not admin_belongs_to(admin, meta):
+        return False
     shutil.rmtree(admin, ignore_errors=True)
+    return True
 
 
 def delete_branch(canonical: Path, branch: str) -> bool:

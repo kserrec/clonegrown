@@ -60,7 +60,14 @@ collection, deletion guards, and recovery are the same for both. What differs:
 
 The admin directory is removed by path, never by `git worktree prune`, which
 would also drop any of the user's own worktrees whose directories are
-currently unreachable.
+currently unreachable — and never by path *alone*. Git recycles admin names
+(`app`, `app1`, …) as soon as one is freed, so the path a tombstone recorded
+may later belong to a newer worker. Before deleting, the directory must
+identify as this worker (its `cws-worker.json` carries the worker's id and
+token; before the marker exists, Git's `gitdir` back-pointer must point into
+the worker's path), and once handled the recorded path is cleared from the
+record so no later recovery can act on it. The worktree-mode fuzzer found
+the original version of this deleting a live worker's admin directory.
 
 Inside the canonical repository Clonegrown owns refs under
 `refs/cws/<workspace_id>/`:
@@ -108,11 +115,15 @@ is an operating-system sandbox.
 - `tests/test_worktree.py` — worktree-mode lifecycle, guards, tampering, and
   crash recovery.
 - `tests/hardening_suite.py` — 56 deterministic and adversarial cases, including
-  every crash failpoint, run through `tests/legacy_cli.py`.
+  every crash failpoint, run through `tests/legacy_cli.py`. `CWS_SUITE_MODE=worktree`
+  runs the same cases with worktree workers; the ten cases that assert clone
+  isolation assert the documented sharing instead (and that the spawn warned
+  about it). CI runs both modes.
 - `tests/run_crash_case.py`, `tests/random_kill.py` — single failpoint and
-  SIGKILL campaigns.
+  SIGKILL campaigns (`CWS_SUITE_MODE=worktree` for worktree workers).
 - `tests/state_machine_fuzz.py` — randomized lifecycle sequences against the
-  Python API.
+  Python API (`CWS_SUITE_MODE=worktree` switches the invariants to the
+  worktree contract, including "no task branch outlives its worktree").
 - The remaining `tests/*.py` files are comparative probes (scaling, concurrency,
   GC, shared state, I/O faults).
 

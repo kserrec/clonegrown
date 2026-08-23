@@ -198,7 +198,7 @@ def validate_worker_meta(ws: Path, state: dict[str, Any], worker_id: int, meta: 
     if meta.get("params_hash") != params_hash(meta["base"], meta["task"], bool(meta.get("strong")), mode):
         raise CWSError("worker parameter digest mismatch")
     admin = meta.get("worktree_admin")
-    if admin is not None:
+    if admin is not None:  # None once the directory has been removed; absent for clones and early spawn stages
         if mode != "worktree" or not isinstance(admin, str):
             raise CWSError("worktree admin path is malformed")
         admin_path = lexical_abs(admin)

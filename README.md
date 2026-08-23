@@ -160,11 +160,11 @@ The included [`research/REPORT.md`](research/REPORT.md), [`research/REPRODUCE.md
 
 Highlights from the frozen candidate include:
 
-- 56/56 named deterministic/adversarial tests passed (clone workers); worktree workers are covered by `tests/test_worktree.py`, including crash recovery;
+- 56/56 named deterministic/adversarial tests passed with clone workers, and 56/56 with worktree workers (the ten isolation cases assert the documented sharing instead);
 - 11/11 explicit collection/deletion crash points recovered;
 - 24/24 randomized lifecycle seeds passed across 1,000 generated operations;
 - process-kill campaigns during spawn, collection, and deletion recovered successfully;
-- eight simultaneous `git gc --prune=now` operations produced 8/8 successes in independent clones versus 1/8 in linked worktrees in the stress fixture;
+- eight simultaneous `git gc --prune=now` operations produced 8/8 successes in independent clones versus 1/8 in linked worktrees — measured again on the current code on 2026-08-22 with the same result (the 7 failures are Git's gc lock refusing, not corruption);
 - worktrees were dramatically faster to create;
 - fast local clones stayed close to worktree disk usage in working-tree-heavy fixtures;
 - fully independent clones became expensive when Git history dominated repository size.

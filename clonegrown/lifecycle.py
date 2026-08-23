@@ -276,16 +276,30 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
             raise
 
 
+def forget_worktree(canonical: Path, meta: dict[str, Any]) -> None:
+    """Remove a worktree worker's admin directory and task branch from canonical.
+
+    Mutates ``meta``: the admin path is cleared once handled so that a later
+    recovery can never act on it again after Git has recycled the name.
+    """
+    if worker_mode(meta) != "worktree":
+        return
+    admin = meta.get("worktree_admin")
+    if admin:
+        if not remove_worktree_admin(canonical, Path(admin), meta):
+            meta["worktree_admin_left"] = "admin directory no longer identified as this worker; left in place"
+        meta["worktree_admin"] = None
+    delete_branch(canonical, meta["branch"])
+
+
 def _forget_worktree(ws: Path, worker_id: int) -> None:
-    """Remove a worktree worker's admin directory and task branch from canonical."""
     state = read_state(ws)
     canonical = verify_canonical(state)
     meta = load_json(worker_meta_path(ws, worker_id))
     if worker_mode(meta) != "worktree":
         return
-    if meta.get("worktree_admin"):
-        remove_worktree_admin(canonical, Path(meta["worktree_admin"]))
-    delete_branch(canonical, meta["branch"])
+    forget_worktree(canonical, meta)
+    atomic_json(worker_meta_path(ws, worker_id), meta)
 
 
 # --- collect -----------------------------------------------------------------
@@ -434,10 +448,7 @@ def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = 
         failpoint("discard.after_delete")
         with workspace_lock(ws):
             state, current, canonical = load_worker_state(ws, worker_id)
-            if worker_mode(current) == "worktree":
-                if current.get("worktree_admin"):
-                    remove_worktree_admin(canonical, Path(current["worktree_admin"]))
-                delete_branch(canonical, current["branch"])
+            forget_worktree(canonical, current)
             current["status"] = current.get("discard_intent", "discarded")
             current["discarded"] = time.time()
             clear_owner(current)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse,json,os,random,shutil,signal,subprocess,sys,tempfile,time
 from pathlib import Path
 HERE=Path(__file__).resolve().parent; CWS=HERE/'legacy_cli.py'
+WORKTREE=os.environ.get('CWS_SUITE_MODE')=='worktree'; ISO=['--worktree'] if WORKTREE else ['--fast']; STRONG=['--worktree'] if WORKTREE else []
 
 def run(cmd,cwd=None,check=True,timeout=120):
  p=subprocess.run([str(x) for x in cmd],cwd=cwd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout)
@@ -33,20 +34,20 @@ def start_and_kill(args,delay):
 
 def spawn_case(seed):
  rng=random.Random(seed); b,c,w=make_case(f'spawn-{seed}',large_mb=10); delay=rng.uniform(0.0,1.25); req=f'kill-{seed}'
- proc=start_and_kill(['spawn',w,'--task',req,'--base','main','--request-id',req],delay)
- reports=j(cw('recover',w)); ready=j(cw('spawn',w,'--task',req,'--base','main','--request-id',req))
+ proc=start_and_kill(['spawn',w,'--task',req,'--base','main','--request-id',req,*STRONG],delay)
+ reports=j(cw('recover',w)); ready=j(cw('spawn',w,'--task',req,'--base','main','--request-id',req,*STRONG))
  r=Path(ready['path']); assert ready['status']=='ready'; assert git(r,'rev-parse','HEAD').stdout.strip()==ready['base_sha']; git(c,'fsck','--full')
  cw('discard',w,str(ready['id']),'--abandon'); row={'mode':'spawn','seed':seed,'delay':delay,'process':proc,'reports':reports,'ready_id':ready['id'],'ok':True}; shutil.rmtree(b,ignore_errors=True); return row
 
 def collect_case(seed):
- rng=random.Random(seed); b,c,w=make_case(f'collect-{seed}',large_mb=4); m=j(cw('spawn',w,'--task','collect','--request-id',f'c-{seed}','--fast')); r=Path(m['path']); (r/f'new-{seed}.bin').write_bytes(os.urandom(8*1024*1024)); git(r,'add','.'); git(r,'commit','-m','large result'); sha=git(r,'rev-parse','HEAD').stdout.strip(); delay=rng.uniform(0.0,.22)
+ rng=random.Random(seed); b,c,w=make_case(f'collect-{seed}',large_mb=4); m=j(cw('spawn',w,'--task','collect','--request-id',f'c-{seed}',*ISO)); r=Path(m['path']); (r/f'new-{seed}.bin').write_bytes(os.urandom(8*1024*1024)); git(r,'add','.'); git(r,'commit','-m','large result'); sha=git(r,'rev-parse','HEAD').stdout.strip(); delay=rng.uniform(0.0,.22)
  proc=start_and_kill(['collect',w,str(m['id'])],delay); reports=j(cw('recover',w)); mm=meta(w,m['id'])
  if mm['status']=='ready': mm=j(cw('collect',w,str(m['id'])))
  assert mm['status']=='collected' and mm['result_sha']==sha; st=state(w); ref=f"refs/cws/{st['workspace_id']}/workers/{m['id']}/result"; assert git(c,'rev-parse',ref).stdout.strip()==sha; git(c,'fsck','--full')
  cw('discard',w,str(m['id'])); row={'mode':'collect','seed':seed,'delay':delay,'process':proc,'reports':reports,'sha':sha,'ok':True}; shutil.rmtree(b,ignore_errors=True); return row
 
 def discard_case(seed):
- rng=random.Random(seed); b,c,w=make_case(f'discard-{seed}',large_mb=2); m=j(cw('spawn',w,'--task','discard','--request-id',f'd-{seed}','--fast')); r=Path(m['path']); (r/'x').write_text('x'); git(r,'add','x'); git(r,'commit','-m','result'); sha=git(r,'rev-parse','HEAD').stdout.strip(); mm=j(cw('collect',w,str(m['id'])))
+ rng=random.Random(seed); b,c,w=make_case(f'discard-{seed}',large_mb=2); m=j(cw('spawn',w,'--task','discard','--request-id',f'd-{seed}',*ISO)); r=Path(m['path']); (r/'x').write_text('x'); git(r,'add','x'); git(r,'commit','-m','result'); sha=git(r,'rev-parse','HEAD').stdout.strip(); mm=j(cw('collect',w,str(m['id'])))
  build=r/'build'; build.mkdir();
  for i in range(3500): (build/f'{i:05d}.tmp').write_text('x'*256)
  delay=rng.uniform(0.0,.08); proc=start_and_kill(['discard',w,str(m['id'])],delay); reports=j(cw('recover',w)); mm=meta(w,m['id'])
@@ -63,6 +64,6 @@ def main():
   except Exception as e: row={'mode':a.mode,'seed':seed,'ok':False,'error':repr(e),'seconds':time.perf_counter()-t}
   rows.append(row); print(('PASS' if row['ok'] else 'FAIL'),json.dumps(row,sort_keys=True),flush=True)
   if not row['ok']: break
- Path(a.output).write_text(json.dumps({'mode':a.mode,'start':a.start,'count':a.count,'passed':sum(r['ok'] for r in rows),'failed':sum(not r['ok'] for r in rows),'results':rows},indent=2)+'\n')
+ Path(a.output).write_text(json.dumps({'mode':a.mode,'worker':'worktree' if WORKTREE else 'clone','start':a.start,'count':a.count,'passed':sum(r['ok'] for r in rows),'failed':sum(not r['ok'] for r in rows),'results':rows},indent=2)+'\n')
  return int(any(not r['ok'] for r in rows))
 if __name__=='__main__': raise SystemExit(main())

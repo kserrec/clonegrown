@@ -8,6 +8,8 @@ HERE=Path(__file__).resolve().parent
 CWS=HERE/'legacy_cli.py'
 ROOT=Path(os.environ.get('CWS_TEST_ROOT','/tmp/cws-v2-hardening-suite'))
 OUT=Path(os.environ.get('CWS_RESULTS_PATH',str(HERE/'hardening-results.json')))
+# CWS_SUITE_MODE selects the kind of worker every non-strong spawn creates: 'clone' (default) or 'worktree'.
+MODE=os.environ.get('CWS_SUITE_MODE','clone'); WORKTREE=(MODE=='worktree'); ISOLATION_FLAG='--worktree' if WORKTREE else '--fast'
 
 
 def run(cmd,cwd=None,check=True,env=None,timeout=45):
@@ -21,6 +23,9 @@ def run(cmd,cwd=None,check=True,env=None,timeout=45):
 def git(repo,*args,check=True,env=None,timeout=30): return run(['/usr/bin/git',*args],cwd=repo,check=check,env=env,timeout=timeout)
 def cws(*args,check=True,env=None,timeout=90): return run(['python3',CWS,*args],check=check,env=env,timeout=timeout)
 def jload(p): return json.loads(p.stdout)
+def gitdir(repo):
+    p=Path(git(repo,'rev-parse','--git-dir').stdout.strip()); return p if p.is_absolute() else (repo/p).resolve()
+def has_sharing_warning(m): return any('shares canonical' in x for x in m['compatibility_warnings'])
 def meta(ws,wid): return json.loads((ws/'.cws'/'workers'/f'{wid}.json').read_text())
 def state(ws): return json.loads((ws/'.cws'/'state.json').read_text())
 
@@ -43,7 +48,7 @@ def mkcase(name,origin=False,object_format=None,ref_format=None):
 def spawn(ws,task='task',request=None,base='main',strong=False,env=None,check=True):
     args=['spawn',ws,'--task',task,'--base',base]
     if request is not None: args += ['--request-id',request]
-    if not strong: args += ['--fast']
+    if not strong: args += [ISOLATION_FLAG]
     p=cws(*args,env=env,check=check,timeout=120)
     return jload(p) if p.returncode==0 else p
 
@@ -65,13 +70,15 @@ def t_exact_base_dirty():
 
 def t_request_parameter_mismatch():
     b,c,w,_=mkcase('request-mismatch'); first=spawn(w,task='first',request='same'); commit(c,'advance','advance')
-    p=cws('spawn',w,'--task','different','--base','main','--request-id','same','--fast',check=False)
+    p=cws('spawn',w,'--task','different','--base','main','--request-id','same',ISOLATION_FLAG,check=False)
     assert_true(p.returncode!=0 and 'reused with different' in p.stderr); return result(worker=first['id'])
 
 def t_detached_head_refused():
     b,c,w,_=mkcase('detached'); m=spawn(w,request='r'); r=Path(m['path']); git(r,'checkout','--detach'); lost=commit(r,'detached')
     p=cws('collect',w,str(m['id']),check=False); assert_true(p.returncode!=0 and 'detached' in p.stderr)
-    assert_true(git(c,'cat-file','-e',lost,check=False).returncode!=0); return result(detached=lost)
+    if WORKTREE: assert_true('result' not in git(c,'for-each-ref','refs/cws/').stdout)  # objects are shared by design; no result ref may exist
+    else: assert_true(git(c,'cat-file','-e',lost,check=False).returncode!=0)
+    return result(detached=lost)
 
 def t_post_collect_drift_guard():
     b,c,w,_=mkcase('post-collect'); m=spawn(w,request='r'); r=Path(m['path']); a=commit(r,'A'); cws('collect',w,str(m['id'])); bsha=commit(r,'B')
@@ -85,7 +92,7 @@ def t_worker_replacement_guard():
 
 def t_canonical_replacement_guard():
     b,c,w,_=mkcase('canonical-replace'); c.rename(b/'old'); git(b,'init','-b','main',c); git(c,'config','user.name','X'); git(c,'config','user.email','x@e'); (c/'x').write_text('x'); git(c,'add','.'); git(c,'commit','-m','other')
-    p=cws('spawn',w,'--task','x','--base','main','--request-id','x','--fast',check=False); assert_true(p.returncode!=0); return result(rc=p.returncode,error=p.stderr.strip()[-200:])
+    p=cws('spawn',w,'--task','x','--base','main','--request-id','x',ISOLATION_FLAG,check=False); assert_true(p.returncode!=0); return result(rc=p.returncode,error=p.stderr.strip()[-200:])
 
 def t_unrelated_history_policy():
     b,c,w,_=mkcase('unrelated'); m=spawn(w,request='r'); r=Path(m['path']); git(r,'checkout','--orphan','tmp'); git(r,'rm','-rf','.'); (r/'new').write_text('new'); git(r,'add','.'); git(r,'commit','-m','orphan'); sha=git(r,'rev-parse','HEAD').stdout.strip(); git(r,'branch','-f',m['branch'],sha); git(r,'checkout',m['branch']); git(r,'branch','-D','tmp')
@@ -109,21 +116,30 @@ def t_hostile_task_and_unicode_paths():
 
 def t_remote_semantics_and_push_guard():
     b,c,w,origin=mkcase('remotes',origin=True); up=b/'up.git'; push=b/'push.git'; collision=b/'collision.git'; [git(b,'init','--bare',x) for x in (up,push,collision)]; git(c,'remote','add','upstream',up); git(c,'remote','set-url','--add','--push','upstream',push); git(c,'remote','add','cws-source',collision)
-    m=spawn(w,request='r'); r=Path(m['path']); assert_true(m['source_remote']=='cws-source-2');
+    m=spawn(w,request='r'); r=Path(m['path'])
+    if WORKTREE: assert_true(m['source_remote'] is None and has_sharing_warning(m))  # remotes are canonical's own, not copies
+    else: assert_true(m['source_remote']=='cws-source-2')
     for name in ('origin','upstream','cws-source'): assert_true(git(r,'remote','get-url',name).stdout.strip()==git(c,'remote','get-url',name).stdout.strip())
-    p=git(r,'push',m['source_remote'],'HEAD:refs/heads/nope',check=False); assert_true(p.returncode!=0 and git(c,'show-ref','--verify','refs/heads/nope',check=False).returncode!=0)
+    if not WORKTREE:
+        p=git(r,'push',m['source_remote'],'HEAD:refs/heads/nope',check=False); assert_true(p.returncode!=0 and git(c,'show-ref','--verify','refs/heads/nope',check=False).returncode!=0)
     commit(r,'push-real'); git(r,'push','origin','HEAD:refs/heads/worker'); assert_true(git(origin,'show-ref','--verify','refs/heads/worker').returncode==0)
     return result(source_remote=m['source_remote'])
 
 def t_config_and_stash_isolation():
     b,c,w,_=mkcase('config'); git(c,'config','agent.sentinel','canonical'); (c/'stash').write_text('s'); git(c,'add','stash'); git(c,'stash','push','-m','canon'); before=git(c,'stash','list').stdout
-    m=spawn(w,request='r'); r=Path(m['path']); assert_true(git(r,'config','agent.sentinel').stdout.strip()=='canonical'); git(r,'config','agent.sentinel','worker'); git(r,'stash','clear'); assert_true(git(c,'config','agent.sentinel').stdout.strip()=='canonical' and git(c,'stash','list').stdout==before); return result(stash_lines=len(before.splitlines()))
+    m=spawn(w,request='r'); r=Path(m['path']); assert_true(git(r,'config','agent.sentinel').stdout.strip()=='canonical'); git(r,'config','agent.sentinel','worker'); git(r,'stash','clear')
+    if WORKTREE:  # sharing is the documented tradeoff: the worker's changes reach canonical, and the spawn said so
+        assert_true(git(c,'config','agent.sentinel').stdout.strip()=='worker' and git(c,'stash','list').stdout=='' and has_sharing_warning(m)); return result(stash_lines=len(before.splitlines()),shared=True)
+    assert_true(git(c,'config','agent.sentinel').stdout.strip()=='canonical' and git(c,'stash','list').stdout==before); return result(stash_lines=len(before.splitlines()))
 
 def t_private_hook_boundary():
-    b,c,w,_=mkcase('hooks'); hp=c/'.git'/'hooks'/'pre-commit'; hp.write_text('#!/bin/sh\nexit 31\n'); hp.chmod(0o755); m=spawn(w,request='r'); r=Path(m['path']); wh=r/'.git'/'hooks'/'pre-commit'; assert_true(not wh.exists()); assert_true(any('private .git hooks' in x for x in m['compatibility_warnings'])); return result(warnings=m['compatibility_warnings'])
+    b,c,w,_=mkcase('hooks'); hp=c/'.git'/'hooks'/'pre-commit'; hp.write_text('#!/bin/sh\nexit 31\n'); hp.chmod(0o755); m=spawn(w,request='r'); r=Path(m['path'])
+    if WORKTREE:  # the hook is shared and therefore active in the worker (git reports hook failure as rc 1); the warning names hooks
+        p=git(r,'commit','--allow-empty','-m','x',check=False); assert_true(p.returncode!=0 and git(r,'rev-parse','HEAD').stdout.strip()==m['base_sha'] and any('hooks' in x for x in m['compatibility_warnings'])); return result(warnings=m['compatibility_warnings'],shared=True)
+    wh=r/'.git'/'hooks'/'pre-commit'; assert_true(not wh.exists()); assert_true(any('private .git hooks' in x for x in m['compatibility_warnings'])); return result(warnings=m['compatibility_warnings'])
 
 def t_dirty_and_operation_collect_refusal():
-    b,c,w,_=mkcase('dirty-op'); m=spawn(w,request='r'); r=Path(m['path']); (r/'dirty').write_text('x'); p=cws('collect',w,str(m['id']),check=False); assert_true(p.returncode!=0); (r/'dirty').unlink(); (r/'.git'/'MERGE_HEAD').write_text(m['base_sha']+'\n'); p=cws('collect',w,str(m['id']),check=False); assert_true(p.returncode!=0 and 'in-progress' in p.stderr); (r/'.git'/'MERGE_HEAD').unlink(); return result()
+    b,c,w,_=mkcase('dirty-op'); m=spawn(w,request='r'); r=Path(m['path']); (r/'dirty').write_text('x'); p=cws('collect',w,str(m['id']),check=False); assert_true(p.returncode!=0); (r/'dirty').unlink(); (gitdir(r)/'MERGE_HEAD').write_text(m['base_sha']+'\n'); p=cws('collect',w,str(m['id']),check=False); assert_true(p.returncode!=0 and 'in-progress' in p.stderr); (gitdir(r)/'MERGE_HEAD').unlink(); return result()
 
 def t_collect_idempotent():
     b,c,w,_=mkcase('collect-idem'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r); a=jload(cws('collect',w,str(m['id']))); b2=jload(cws('collect',w,str(m['id']))); assert_true(a['result_sha']==sha==b2['result_sha']); return result(sha=sha)
@@ -143,7 +159,9 @@ def t_parallel_spawns_unique():
     def f(i): return spawn(w,task=f't{i}',request=f'r{i}')
     t=time.perf_counter();
     with cf.ThreadPoolExecutor(max_workers=8) as ex: ms=list(ex.map(f,range(8)))
-    elapsed=time.perf_counter()-t; ids=[m['id'] for m in ms]; assert_true(len(set(ids))==8); ratio=elapsed/max(single,0.001); assert_true(ratio<5.5,f'too serialized ratio={ratio}')
+    elapsed=time.perf_counter()-t; ids=[m['id'] for m in ms]; assert_true(len(set(ids))==8); ratio=elapsed/max(single,0.001)
+    # Clone spawns parallelize (the clone dominates); worktree spawns are so cheap that the lock-held metadata phases dominate, so only full serialization is a failure there.
+    assert_true(ratio<(8.0 if WORKTREE else 5.5),f'too serialized ratio={ratio}')
     return result(single_seconds=single,eight_seconds=elapsed,ratio=ratio,ids=ids)
 
 def t_same_request_concurrent():
@@ -154,7 +172,7 @@ def t_same_request_concurrent():
 
 def t_base_pin_survives_gc():
     b,c,w,_=mkcase('base-pin'); git(c,'checkout','-b','temp'); sha=commit(c,'unique','unique'); git(c,'checkout','main'); marker=b/'pause'; env={**os.environ,'CWS_PAUSEPOINT':'spawn.after_allocated','CWS_PAUSE_SECONDS':'1.0','CWS_PAUSE_MARKER':str(marker)}
-    p=subprocess.Popen(['python3',str(CWS),'spawn',str(w),'--task','gc','--base','temp','--request-id','gc','--fast'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env); deadline=time.time()+10
+    p=subprocess.Popen(['python3',str(CWS),'spawn',str(w),'--task','gc','--base','temp','--request-id','gc',ISOLATION_FLAG],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env); deadline=time.time()+10
     while time.time()<deadline and not marker.exists(): time.sleep(.01)
     assert_true(marker.exists()); git(c,'branch','-D','temp'); git(c,'reflog','expire','--expire=now','--all'); git(c,'gc','--prune=now'); out,err=p.communicate(timeout=30); assert_true(p.returncode==0,err); m=json.loads(out); assert_true(m['base_sha']==sha and git(Path(m['path']),'rev-parse','HEAD').stdout.strip()==sha); return result(base=sha)
 
@@ -177,7 +195,9 @@ def t_worker_gc_concurrency():
     b,c,w,_=mkcase('worker-gc'); ms=[spawn(w,request=f'r{i}') for i in range(8)]
     def gc(m): return git(Path(m['path']),'gc','--prune=now',check=False)
     with cf.ThreadPoolExecutor(max_workers=8) as ex: ps=list(ex.map(gc,ms))
-    assert_true(all(p.returncode==0 for p in ps)); assert_true(git(c,'fsck','--full').returncode==0); return result(success=sum(p.returncode==0 for p in ps))
+    ok=sum(p.returncode==0 for p in ps); assert_true(git(c,'fsck','--full').returncode==0); assert_true(all(git(Path(m['path']),'rev-parse','HEAD',check=False).returncode==0 for m in ms))
+    if WORKTREE: assert_true(ok>=1); return result(success=ok,note='worktrees share one gc lock; failures are refusals, not corruption')  # the measured isolation tradeoff
+    assert_true(ok==8); return result(success=ok)
 
 # ----- Crash recovery -----
 def t_init_crash_matrix():
@@ -188,10 +208,10 @@ def t_init_crash_matrix():
     return result(failpoints=out)
 
 def t_spawn_crash_matrix():
-    fps=('spawn.after_allocated','spawn.after_clone','spawn.after_checkout','spawn.after_publish','spawn.after_ready'); actions=[]
+    fps=('spawn.after_allocated','spawn.after_clone','spawn.after_checkout','spawn.after_publish')+(('spawn.after_repair',) if WORKTREE else ())+('spawn.after_ready',); actions=[]
     for i,fp in enumerate(fps):
-        b,c,w,_=mkcase(f'spawn-crash-{i}'); p=cws('spawn',w,'--task','x','--base','main','--request-id','r','--fast',env={'CWS_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,1)
-        if fp in ('spawn.after_publish','spawn.after_ready'): assert_true(mm['status']=='ready')
+        b,c,w,_=mkcase(f'spawn-crash-{i}'); p=cws('spawn',w,'--task','x','--base','main','--request-id','r',ISOLATION_FLAG,env={'CWS_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,1)
+        if fp in ('spawn.after_publish','spawn.after_repair','spawn.after_ready'): assert_true(mm['status']=='ready')
         else:
             assert_true(mm['status']=='spawn_failed'); m2=spawn(w,task='x',request='r'); assert_true(m2['status']=='ready' and m2['id']>1)
         assert_true(git(c,'fsck','--full').returncode==0); actions.append([fp,mm['status'],rep])
@@ -224,7 +244,9 @@ def t_strong_object_isolation():
     b,c,w,_=mkcase('strong'); m=spawn(w,request='r',strong=True); r=Path(m['path']); shared=set(object_inodes(c))&set(object_inodes(r)); assert_true(not shared); return result(shared_inodes=len(shared))
 
 def t_fast_object_sharing_is_explicit():
-    b,c,w,_=mkcase('fast-sharing'); m=spawn(w,request='r',strong=False); r=Path(m['path']); shared=set(object_inodes(c))&set(object_inodes(r)); assert_true(len(shared)>0); return result(shared_inodes=len(shared),mode='known tradeoff')
+    b,c,w,_=mkcase('fast-sharing'); m=spawn(w,request='r',strong=False); r=Path(m['path'])
+    if WORKTREE: assert_true(Path(git(r,'rev-parse','--git-common-dir').stdout.strip()).resolve()==(c/'.git').resolve()); return result(shared='entire object store',mode='known tradeoff')
+    shared=set(object_inodes(c))&set(object_inodes(r)); assert_true(len(shared)>0); return result(shared_inodes=len(shared),mode='known tradeoff')
 
 def t_alternates_detached_strong():
     b=ROOT/'alternates'; shutil.rmtree(b,ignore_errors=True); b.mkdir(parents=True); source=b/'source'; git(b,'init','-b','main',source); git(source,'config','user.name','U'); git(source,'config','user.email','u@e'); (source/'a').write_text('a'); git(source,'add','.'); git(source,'commit','-m','i'); c=b/'canon'; run(['/usr/bin/git','clone','--shared',source,c]); git(c,'config','user.name','U'); git(c,'config','user.email','u@e'); w=b/'ws'; cws('init',c,w); m=spawn(w,request='r',strong=True); r=Path(m['path']); alt=r/'.git'/'objects'/'info'/'alternates'; assert_true(not alt.exists()); shutil.rmtree(source); assert_true(git(r,'fsck','--full').returncode==0); return result(detached=m['alternates_detached'])
@@ -254,16 +276,21 @@ def t_symlink_and_executable_bits():
     b,c,w,_=mkcase('symlink-exec'); script=c/'run.sh'; script.write_text('#!/bin/sh\n'); script.chmod(0o755); os.symlink('README.md',c/'link'); git(c,'add','.'); git(c,'commit','-m','modes'); m=spawn(w,request='r'); r=Path(m['path']); assert_true((r/'link').is_symlink() and os.readlink(r/'link')=='README.md'); assert_true(os.access(r/'run.sh',os.X_OK)); return result()
 
 def t_detached_canonical_and_no_remote():
-    b,c,w,_=mkcase('detached-canon'); sha=git(c,'rev-parse','main').stdout.strip(); git(c,'checkout','--detach',sha); m=spawn(w,request='r'); assert_true(m['base_sha']==sha); rem=git(Path(m['path']),'remote').stdout.split(); assert_true(m['source_remote'] in rem and 'origin' not in rem); return result(remotes=rem)
+    b,c,w,_=mkcase('detached-canon'); sha=git(c,'rev-parse','main').stdout.strip(); git(c,'checkout','--detach',sha); m=spawn(w,request='r'); assert_true(m['base_sha']==sha); rem=git(Path(m['path']),'remote').stdout.split()
+    if WORKTREE: assert_true(m['source_remote'] is None and rem==[])
+    else: assert_true(m['source_remote'] in rem and 'origin' not in rem)
+    return result(remotes=rem)
 
 def t_path_bound_config_warning():
-    b,c,w,_=mkcase('path-config'); git(c,'config','agent.path',str(c)+'/tool'); m=spawn(w,request='r'); r=Path(m['path']); assert_true(git(r,'config','agent.path',check=False).returncode!=0); assert_true(any('path-bound' in x for x in m['compatibility_warnings'])); return result(warnings=m['compatibility_warnings'])
+    b,c,w,_=mkcase('path-config'); git(c,'config','agent.path',str(c)+'/tool'); m=spawn(w,request='r'); r=Path(m['path'])
+    if WORKTREE: assert_true(git(r,'config','agent.path').stdout.strip()==str(c)+'/tool' and has_sharing_warning(m)); return result(warnings=m['compatibility_warnings'],shared=True)
+    assert_true(git(r,'config','agent.path',check=False).returncode!=0); assert_true(any('path-bound' in x for x in m['compatibility_warnings'])); return result(warnings=m['compatibility_warnings'])
 
 def t_info_exclude_copied():
     b,c,w,_=mkcase('info'); (c/'.git'/'info'/'exclude').write_text('local-secret\n'); m=spawn(w,request='r'); r=Path(m['path']); (r/'local-secret').write_text('x'); assert_true(git(r,'status','--porcelain').stdout.strip()==''); return result()
 
 def t_marker_tamper_detection():
-    b,c,w,_=mkcase('marker-tamper'); m=spawn(w,request='r'); r=Path(m['path']); wm=r/'.git'/'cws-worker.json'; data=json.loads(wm.read_text()); data['worker_token']='tampered'; wm.write_text(json.dumps(data)); p=cws('collect',w,str(m['id']),check=False); assert_true(p.returncode!=0 and 'marker mismatch' in p.stderr); return result()
+    b,c,w,_=mkcase('marker-tamper'); m=spawn(w,request='r'); r=Path(m['path']); wm=gitdir(r)/'cws-worker.json'; data=json.loads(wm.read_text()); data['worker_token']='tampered'; wm.write_text(json.dumps(data)); p=cws('collect',w,str(m['id']),check=False); assert_true(p.returncode!=0 and 'marker mismatch' in p.stderr); return result()
 
 def t_canonical_marker_loss_detection():
     b,c,w,_=mkcase('canon-marker-loss'); st=state(w); (c/'.git'/'cws'/f"{st['workspace_id']}.json").unlink(); p=cws('status',w,check=False); assert_true(p.returncode!=0 and 'cannot read metadata' in p.stderr); return result()
@@ -320,7 +347,7 @@ def t_remote_tracking_notes_and_replace_refs():
 
 def t_normal_failure_rollbacks():
     b,c,w,_=mkcase('ordinary-errors')
-    p=cws('spawn',w,'--task','spawn-error','--base','main','--request-id','spawn-error','--fast',env={'CWS_ERRORPOINT':'spawn.after_publish'},check=False)
+    p=cws('spawn',w,'--task','spawn-error','--base','main','--request-id','spawn-error',ISOLATION_FLAG,env={'CWS_ERRORPOINT':'spawn.after_publish'},check=False)
     assert_true(p.returncode!=0); rep=jload(cws('recover',w)); mm=meta(w,1); assert_true(mm['status']=='ready' and Path(mm['path']).exists())
     sha=commit(Path(mm['path']),'collectable'); p2=cws('collect',w,'1',env={'CWS_ERRORPOINT':'collect.after_fetch'},check=False)
     assert_true(p2.returncode!=0 and meta(w,1)['status']=='ready'); got=jload(cws('collect',w,'1')); assert_true(got['result_sha']==sha)
@@ -328,7 +355,7 @@ def t_normal_failure_rollbacks():
 
 def t_final_path_collision_is_never_deleted():
     b,c,w,_=mkcase('slot-collision'); victim=w/'1'; victim.mkdir(); (victim/'KEEP').write_text('keep')
-    p=cws('spawn',w,'--task','collision','--base','main','--request-id','collision','--fast',check=False); assert_true(p.returncode!=0)
+    p=cws('spawn',w,'--task','collision','--base','main','--request-id','collision',ISOLATION_FLAG,check=False); assert_true(p.returncode!=0)
     rep=jload(cws('recover',w)); assert_true((victim/'KEEP').exists()); assert_true(meta(w,1)['status']=='broken')
     return result(reports=rep)
 
@@ -354,7 +381,7 @@ def t_workspace_state_path_tamper_rejected():
 
 def t_control_and_lock_symlink_rejected():
     b,c,w,_=mkcase('control-symlink'); real=b/'control-real'; (w/'.cws').rename(real); os.symlink(real,w/'.cws')
-    p=cws('spawn',w,'--task','x','--base','main','--request-id','x','--fast',check=False); assert_true(p.returncode!=0)
+    p=cws('spawn',w,'--task','x','--base','main','--request-id','x',ISOLATION_FLAG,check=False); assert_true(p.returncode!=0)
     # Restore control directory, then attack the lock itself.
     (w/'.cws').unlink(); real.rename(w/'.cws'); victim=b/'LOCK_VICTIM'; victim.write_text('keep'); lock=w/'.cws'/'lock'; lock.unlink(missing_ok=True); os.symlink(victim,lock)
     p2=cws('status',w,check=False); assert_true(p2.returncode!=0 and victim.read_text()=='keep')
@@ -380,7 +407,7 @@ TESTS: dict[str, tuple[str, Callable[[],dict[str,Any]]]] = {
 def run_one(name):
     started=time.perf_counter()
     try:
-        details=TESTS[name][1](); return {'name':name,'group':TESTS[name][0],'ok':True,'seconds':time.perf_counter()-started,'details':details}
+        details=TESTS[name][1](); return {'name':name,'group':TESTS[name][0],'mode':MODE,'ok':True,'seconds':time.perf_counter()-started,'details':details}
     except Exception as e:
         return {'name':name,'group':TESTS[name][0],'ok':False,'seconds':time.perf_counter()-started,'error':repr(e)}
 

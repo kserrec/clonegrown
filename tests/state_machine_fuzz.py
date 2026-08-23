@@ -9,6 +9,7 @@ import clonegrown as cws
 from clonegrown.state import summary_ref
 
 ROOT=Path(os.environ.get('CWS_FUZZ_ROOT','/tmp/cws-final-state-machine-fuzz'))
+WORKTREE=os.environ.get('CWS_SUITE_MODE')=='worktree'; MODE='worktree' if WORKTREE else 'clone'
 
 def run(cmd,cwd=None,check=True):
     p=subprocess.run([str(x) for x in cmd],cwd=cwd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -44,18 +45,25 @@ def clean(repo:Path):
 
 def invariant(c:Path,w:Path,origin_url:str,full=False):
     if full: git(c,'fsck','--full')
-    assert git(c,'config','fuzz.sentinel').stdout.strip()=='canonical'
+    if not WORKTREE: assert git(c,'config','fuzz.sentinel').stdout.strip()=='canonical'  # worktrees share config by design
     assert git(c,'remote','get-url','origin').stdout.strip()==origin_url
-    assert 'refs/heads/agent/' not in git(c,'show-ref','--heads').stdout
-    st=json.loads((w/'.cws/state.json').read_text())
-    for wid,m in metas(w).items():
+    st=json.loads((w/'.cws/state.json').read_text()); ms=metas(w)
+    agent_heads=[l.split()[1] for l in git(c,'show-ref','--heads').stdout.splitlines() if '/agent/' in l]
+    if WORKTREE:
+        # Task branches live in canonical's shared refs; each must belong to a worker that still has a directory.
+        live={f"refs/heads/{m['branch']}" for m in ms.values() if (w/str(m['id'])).exists()}
+        leaked=[h for h in agent_heads if h not in live]; assert not leaked, f'branches outlived their worktree: {leaked}'
+    else:
+        assert not agent_heads
+    for wid,m in ms.items():
         assert m['id']==wid
         assert m['workspace_id']==st['workspace_id']
         expected=w/str(wid)/st['repo_name']; assert Path(m['path'])==expected
         status=m['status']; repo=expected
         if status=='ready':
-            assert repo.is_dir(); assert (repo/'.git').is_dir()
-            marker=json.loads((repo/'.git'/'cws-worker.json').read_text())
+            assert repo.is_dir(); assert (repo/'.git').is_file() if WORKTREE else (repo/'.git').is_dir()
+            gd=Path(git(repo,'rev-parse','--git-dir').stdout.strip()); gd=gd if gd.is_absolute() else (repo/gd).resolve()
+            marker=json.loads((gd/'cws-worker.json').read_text())
             assert marker['worker_id']==wid
             assert marker['workspace_id']==st['workspace_id']
             assert marker['worker_token']==m['worker_token']
@@ -82,7 +90,7 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
             )[0]
             if op=='spawn' or (not ready and not collected and op in ('commit','dirty','collect','discard','abandon','mutate','post_collect_change')):
                 req=f'{seed}-{step}-{rng.randrange(1<<40)}'; task=rng.choice(['normal','unicode Ω λ','../../escape;echo nope','x'*100]); strong=rng.random()<strong_rate
-                m=cws.spawn(w,'main',task,strong=strong,request_id=req); record('spawn',m['id'],strong)
+                m=cws.spawn(w,'main',task,strong=strong and not WORKTREE,request_id=req,mode=MODE); record('spawn',m['id'],strong)
             elif op=='commit' and ready:
                 wid=rng.choice(ready); repo=Path(ms[wid]['path']); clean(repo); sha=commit(repo,f'commit-{seed}-{step}',step); record('commit',wid,sha)
             elif op=='dirty' and ready:
@@ -124,7 +132,7 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
             elif op=='retry' and ms:
                 m=rng.choice(list(ms.values()))
                 try:
-                    got=cws.spawn(w,m['base'],m['task'],strong=bool(m['strong']),request_id=m.get('request_id'))
+                    got=cws.spawn(w,m['base'],m['task'],strong=bool(m['strong']),request_id=m.get('request_id'),mode=MODE)
                     if m['status'] in ('spawn_failed','abandoned'):
                         assert got['id']!=m['id'] and got['id']>m['id']; record('retry_reallocated',m['id'],got['id'])
                     else:
@@ -135,12 +143,12 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
             elif op=='mismatch' and ms:
                 m=rng.choice([x for x in ms.values() if x.get('request_id')] or list(ms.values()))
                 if m.get('request_id'):
-                    try: cws.spawn(w,m['base'],m['task']+'-different',strong=bool(m['strong']),request_id=m['request_id']); raise AssertionError('mismatched request accepted')
+                    try: cws.spawn(w,m['base'],m['task']+'-different',strong=bool(m['strong']),request_id=m['request_id'],mode=MODE); raise AssertionError('mismatched request accepted')
                     except cws.CWSError: record('mismatch_refused',m['id'])
             elif op=='advance':
                 p=c/f'canon-{step}.txt'; p.write_text(str(step)); git(c,'add',p.name); git(c,'commit','-m',f'canon {step}'); record('advance')
             elif op=='mutate' and ready:
-                wid=rng.choice(ready); repo=Path(ms[wid]['path']); choice=rng.choice(['config','remote','stash','reset'])
+                wid=rng.choice(ready); repo=Path(ms[wid]['path']); choice=rng.choice(['stash','reset'] if WORKTREE else ['config','remote','stash','reset'])  # config/remote probes test clone isolation; in a worktree they would edit canonical
                 if choice=='config': git(repo,'config','fuzz.sentinel','worker')
                 elif choice=='remote' and 'origin' in git(repo,'remote').stdout.split(): git(repo,'remote','remove','origin')
                 elif choice=='stash':
