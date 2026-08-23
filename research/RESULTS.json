@@ -1,0 +1,2780 @@
+{
+  "candidate": {
+    "bytes": 67430,
+    "last_change_commit": "be4391cffec1ce7c4d55b9526bdde06bfb438bc3",
+    "lines": 1389,
+    "path": "cws.py",
+    "sha256": "e7e9a8ef8cc17cbb590a73aeab4147b1c99d46c4ed503bfd18cdd1b5f736f852"
+  },
+  "deterministic": {
+    "by_group": {
+      "compat": {
+        "failed": 0,
+        "passed": 14,
+        "total": 14
+      },
+      "concurrency": {
+        "failed": 0,
+        "passed": 7,
+        "total": 7
+      },
+      "core": {
+        "failed": 0,
+        "passed": 17,
+        "total": 17
+      },
+      "crash": {
+        "failed": 0,
+        "passed": 5,
+        "total": 5
+      },
+      "redteam": {
+        "failed": 0,
+        "passed": 13,
+        "total": 13
+      }
+    },
+    "completed": 56,
+    "expected": 56,
+    "failed": 0,
+    "missing": [],
+    "passed": 56,
+    "results": [
+      {
+        "child_rc": 0,
+        "details": {
+          "base": "140693598cceb5c68c235579d6b3c32692a264ce"
+        },
+        "group": "core",
+        "name": "exact_base_dirty",
+        "ok": true,
+        "seconds": 5.660975730000246,
+        "wall_seconds": 7.420378148000054
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "worker": 1
+        },
+        "group": "core",
+        "name": "request_parameter_mismatch",
+        "ok": true,
+        "seconds": 8.232441688999643,
+        "wall_seconds": 10.02974782399997
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "detached": "72a933902ec8bfbb8cc14462bba15e7554eaf897"
+        },
+        "group": "core",
+        "name": "detached_head_refused",
+        "ok": true,
+        "seconds": 6.113208916000076,
+        "wall_seconds": 7.625762224000027
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "collected": "7d23c79ac77ed2da7e9a8db88b1ec30ae1848d6b",
+          "newer": "a3720338a63bec0f3ffcb23502a0dc8132edca82"
+        },
+        "group": "core",
+        "name": "post_collect_drift_guard",
+        "ok": true,
+        "seconds": 16.75623289699979,
+        "wall_seconds": 18.482368517000396
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "error": "-replace/ws/1/canon/.git/cws-worker.json: [Errno 2] No such file or directory: '/tmp/cws-final-worker_replacement_guard-e43837f975fa4f65bbbdcba1dc8964f4/worker-replace/ws/1/canon/.git/cws-worker.json'",
+          "rc": 2
+        },
+        "group": "core",
+        "name": "worker_replacement_guard",
+        "ok": true,
+        "seconds": 5.454564767000193,
+        "wall_seconds": 7.075615415999891
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "error": "git/cws/240dc07243c24aad.json: [Errno 2] No such file or directory: '/tmp/cws-final-canonical_replacement_guard-0ba8453b37d547a0899fd75bb2f014c5/canonical-replace/canon/.git/cws/240dc07243c24aad.json'",
+          "rc": 2
+        },
+        "group": "core",
+        "name": "canonical_replacement_guard",
+        "ok": true,
+        "seconds": 3.343602181999813,
+        "wall_seconds": 4.54508958399947
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "orphan": "5d0c86d45826650328052cd8dc9c3f7b5b9ab2f1"
+        },
+        "group": "core",
+        "name": "unrelated_history_policy",
+        "ok": true,
+        "seconds": 9.984002240999871,
+        "wall_seconds": 12.309304596999937
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "first_worker": 2
+        },
+        "group": "core",
+        "name": "workspace_nesting_rules",
+        "ok": true,
+        "seconds": 10.079677907000587,
+        "wall_seconds": 13.255420163000053
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "worker": 1
+        },
+        "group": "core",
+        "name": "git_environment_sanitized",
+        "ok": true,
+        "seconds": 3.8238496869998926,
+        "wall_seconds": 5.061720112999865
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "branch": "agent/58978782368e4982/1-x-touch-tmp-cws_v2_pwn-oops"
+        },
+        "group": "core",
+        "name": "hostile_task_unicode",
+        "ok": true,
+        "seconds": 3.9947709050011326,
+        "wall_seconds": 5.417465883999284
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "source_remote": "cws-source-2"
+        },
+        "group": "core",
+        "name": "remote_semantics_push_guard",
+        "ok": true,
+        "seconds": 4.965494736999972,
+        "wall_seconds": 6.350461068999721
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "stash_lines": 1
+        },
+        "group": "core",
+        "name": "config_stash_isolation",
+        "ok": true,
+        "seconds": 4.527788613999292,
+        "wall_seconds": 5.831134715999724
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "warnings": [
+            "private .git hooks are not copied: pre-commit"
+          ]
+        },
+        "group": "core",
+        "name": "private_hook_boundary",
+        "ok": true,
+        "seconds": 4.631920645000719,
+        "wall_seconds": 6.073218096000346
+      },
+      {
+        "child_rc": 0,
+        "details": {},
+        "group": "core",
+        "name": "dirty_operation_refusal",
+        "ok": true,
+        "seconds": 12.988921120999294,
+        "wall_seconds": 14.454917676999685
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "sha": "54e99ef827b8f5527c2bf1ed4d259f6a5d422699"
+        },
+        "group": "core",
+        "name": "collect_idempotent",
+        "ok": true,
+        "seconds": 7.977513195000938,
+        "wall_seconds": 9.362729505999596
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "candidate": "92d79c905e92e0a1252173c461e9e8d4e10ff2d8",
+          "new_head": "56ce547652a99332c420b6f3ce95cb46c14c0bd6",
+          "stderr": "cws: worker changed during collection; candidate preserved but not accepted"
+        },
+        "group": "core",
+        "name": "collect_concurrent_mutation",
+        "ok": true,
+        "seconds": 6.109869790998346,
+        "wall_seconds": 7.348571827998967
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "drift": "changed-after-collection"
+        },
+        "group": "core",
+        "name": "status_drift",
+        "ok": true,
+        "seconds": 6.863262484999723,
+        "wall_seconds": 8.0128704810013
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "eight_seconds": 8.751759826000125,
+          "ids": [
+            5,
+            6,
+            3,
+            9,
+            2,
+            4,
+            7,
+            8
+          ],
+          "ratio": 4.756366991086413,
+          "single_seconds": 1.8400093689997448
+        },
+        "group": "concurrency",
+        "name": "parallel_spawns_unique",
+        "ok": true,
+        "seconds": 11.806277129999216,
+        "wall_seconds": 12.956130890001077
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "ids": [
+            1
+          ]
+        },
+        "group": "concurrency",
+        "name": "same_request_concurrent",
+        "ok": true,
+        "seconds": 6.430158001001473,
+        "wall_seconds": 7.664729131000058
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "base": "37e90286c8f4af9a5ca2c330a551d7a65dc296b8"
+        },
+        "group": "concurrency",
+        "name": "base_pin_survives_gc",
+        "ok": true,
+        "seconds": 4.40938646900031,
+        "wall_seconds": 5.7119725110005675
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "collect_rc": 0,
+          "discard_rc": 0
+        },
+        "group": "concurrency",
+        "name": "collect_discard_race",
+        "ok": true,
+        "seconds": 6.028578856999957,
+        "wall_seconds": 7.089523669999835
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "new": "02e366534aa3f3c8bee5a3aa233e05bab2d2d303",
+          "old": "47282cc9232bc34b869b597f53bacc8e3f631317"
+        },
+        "group": "concurrency",
+        "name": "canonical_advance",
+        "ok": true,
+        "seconds": 5.902909999000258,
+        "wall_seconds": 7.120336597999994
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "workspaces": [
+            "671cd4eafec3434b",
+            "2f19d7c90dc54453"
+          ]
+        },
+        "group": "concurrency",
+        "name": "two_workspaces_refs",
+        "ok": true,
+        "seconds": 10.021166622000237,
+        "wall_seconds": 11.099009949999527
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "success": 8
+        },
+        "group": "concurrency",
+        "name": "worker_gc_concurrency",
+        "ok": true,
+        "seconds": 22.15830537400143,
+        "wall_seconds": 23.415213205000327
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "failpoints": [
+            "init.after_state",
+            "init.after_marker"
+          ]
+        },
+        "group": "crash",
+        "name": "init_crash_matrix",
+        "ok": true,
+        "seconds": 4.511090973999671,
+        "wall_seconds": 5.582717306000632
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "cases": [
+            [
+              "spawn.after_allocated",
+              "spawn_failed",
+              [
+                {
+                  "action": "spawn-cleaned",
+                  "id": 1
+                }
+              ]
+            ],
+            [
+              "spawn.after_clone",
+              "spawn_failed",
+              [
+                {
+                  "action": "spawn-cleaned",
+                  "id": 1
+                }
+              ]
+            ],
+            [
+              "spawn.after_checkout",
+              "spawn_failed",
+              [
+                {
+                  "action": "spawn-cleaned",
+                  "id": 1
+                }
+              ]
+            ],
+            [
+              "spawn.after_publish",
+              "ready",
+              [
+                {
+                  "action": "spawn-publish-finished",
+                  "id": 1
+                }
+              ]
+            ],
+            [
+              "spawn.after_ready",
+              "ready",
+              []
+            ]
+          ]
+        },
+        "group": "crash",
+        "name": "spawn_crash_matrix",
+        "ok": true,
+        "seconds": 31.594312720000744,
+        "wall_seconds": 32.725752583999565
+      },
+      {
+        "details": {
+          "failpoints": 7,
+          "rows": [
+            {
+              "failpoint": "collect.after_mark",
+              "mode": "collect",
+              "ok": true,
+              "reports": [
+                {
+                  "action": "collect-reset-ready",
+                  "id": 1
+                }
+              ],
+              "seconds": 9.874338490999435,
+              "sha": "ca3b74d50ea3bf153806fb523acb8a9679d2069f"
+            },
+            {
+              "failpoint": "collect.before_fetch",
+              "mode": "collect",
+              "ok": true,
+              "reports": [
+                {
+                  "action": "collect-reset-ready",
+                  "id": 1
+                }
+              ],
+              "seconds": 7.683157524001217,
+              "sha": "353e45480ccbf3d4527d38d7b89a622d5b62e18a"
+            },
+            {
+              "failpoint": "collect.after_fetch",
+              "mode": "collect",
+              "ok": true,
+              "reports": [
+                {
+                  "action": "collect-finished",
+                  "id": 1
+                }
+              ],
+              "seconds": 7.401180480999756,
+              "sha": "1bd402c74af715b026cfc58a946a2fa93ea10c09"
+            },
+            {
+              "failpoint": "collect.after_verify",
+              "mode": "collect",
+              "ok": true,
+              "reports": [
+                {
+                  "action": "collect-finished",
+                  "id": 1
+                }
+              ],
+              "seconds": 7.703067468999507,
+              "sha": "f4754687eb0dd77e5192af9a69a1ecf59f292634"
+            },
+            {
+              "failpoint": "collect.after_worker_recheck",
+              "mode": "collect",
+              "ok": true,
+              "reports": [
+                {
+                  "action": "collect-finished",
+                  "id": 1
+                }
+              ],
+              "seconds": 6.53734446999988,
+              "sha": "ed7d04b2aaac8400f974c1a5ef59f7fac97d3057"
+            },
+            {
+              "failpoint": "collect.after_summary",
+              "mode": "collect",
+              "ok": true,
+              "reports": [
+                {
+                  "action": "collect-finished",
+                  "id": 1
+                }
+              ],
+              "seconds": 6.208983287000592,
+              "sha": "36957fb1b512048630f118c455f3e3d530b5d1cd"
+            },
+            {
+              "failpoint": "collect.after_metadata",
+              "mode": "collect",
+              "ok": true,
+              "reports": [],
+              "seconds": 6.113853406999624,
+              "sha": "d57e3e24f06483f9758794974ae5bb0a29f6e2fd"
+            }
+          ]
+        },
+        "group": "crash",
+        "name": "collect_crash_matrix",
+        "ok": true
+      },
+      {
+        "details": {
+          "failpoints": 4,
+          "rows": [
+            {
+              "failpoint": "discard.after_mark",
+              "mode": "discard",
+              "ok": true,
+              "reports": [
+                {
+                  "action": "discard-reset",
+                  "id": 1
+                }
+              ],
+              "seconds": 9.853516340001079,
+              "sha": "0ffb4fceb2333c35cb6b7be8cd0738c0d2022b00"
+            },
+            {
+              "failpoint": "discard.before_delete",
+              "mode": "discard",
+              "ok": true,
+              "reports": [
+                {
+                  "action": "discard-reset",
+                  "id": 1
+                }
+              ],
+              "seconds": 9.072797332999471,
+              "sha": "c3fb48516875d5dd7ee97c044a1ad7e724fa80f3"
+            },
+            {
+              "failpoint": "discard.after_delete",
+              "mode": "discard",
+              "ok": true,
+              "reports": [
+                {
+                  "action": "discard-finished",
+                  "id": 1
+                }
+              ],
+              "seconds": 7.82492551499854,
+              "sha": "ce90a83656b9e87db663f43a98819637e9354aaa"
+            },
+            {
+              "failpoint": "discard.after_metadata",
+              "mode": "discard",
+              "ok": true,
+              "reports": [],
+              "seconds": 8.02310944400051,
+              "sha": "8c5156b7859cfc008951c91102adc7d6946394de"
+            }
+          ]
+        },
+        "group": "crash",
+        "name": "discard_crash_matrix",
+        "ok": true
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "recovery": []
+        },
+        "group": "crash",
+        "name": "recover_dirty_ready",
+        "ok": true,
+        "seconds": 4.409824076999939,
+        "wall_seconds": 5.621347792999586
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "shared_inodes": 0
+        },
+        "group": "compat",
+        "name": "strong_object_isolation",
+        "ok": true,
+        "seconds": 3.5162949449986627,
+        "wall_seconds": 4.680945974998394
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "mode": "known tradeoff",
+          "shared_inodes": 5
+        },
+        "group": "compat",
+        "name": "fast_object_sharing",
+        "ok": true,
+        "seconds": 3.365087008998671,
+        "wall_seconds": 4.5590088379994995
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "detached": true
+        },
+        "group": "compat",
+        "name": "alternates_detached",
+        "ok": true,
+        "seconds": 3.372551038999518,
+        "wall_seconds": 4.4721046360009495
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "sha_length": 64
+        },
+        "group": "compat",
+        "name": "sha256_repository",
+        "ok": true,
+        "seconds": 4.898513690000982,
+        "wall_seconds": 6.011025083998902
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "ref_format": "reftable"
+        },
+        "group": "compat",
+        "name": "reftable_repository",
+        "ok": true,
+        "seconds": 5.098808914000983,
+        "wall_seconds": 6.171068763000221
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "worker_shallow": true
+        },
+        "group": "compat",
+        "name": "shallow_repository",
+        "ok": true,
+        "seconds": 4.280263447000834,
+        "wall_seconds": 5.416808201000094
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "sparse": true
+        },
+        "group": "compat",
+        "name": "sparse_checkout",
+        "ok": true,
+        "seconds": 3.8710194179984683,
+        "wall_seconds": 5.247829870000714
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "note": "submodule intentionally uninitialized; bootstrap required"
+        },
+        "group": "compat",
+        "name": "submodule_baseline",
+        "ok": true,
+        "seconds": 4.346733950000271,
+        "wall_seconds": 5.808004214999528
+      },
+      {
+        "child_rc": 0,
+        "details": {},
+        "group": "compat",
+        "name": "symlink_executable",
+        "ok": true,
+        "seconds": 3.5191978590009967,
+        "wall_seconds": 4.741768400001092
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "remotes": [
+            "cws-source"
+          ]
+        },
+        "group": "compat",
+        "name": "detached_canonical_no_remote",
+        "ok": true,
+        "seconds": 3.35202242899868,
+        "wall_seconds": 4.462419327999669
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "warnings": [
+            "path-bound local config omitted: agent.path"
+          ]
+        },
+        "group": "compat",
+        "name": "path_bound_config_warning",
+        "ok": true,
+        "seconds": 3.3797440759990423,
+        "wall_seconds": 4.504727834999358
+      },
+      {
+        "child_rc": 0,
+        "details": {},
+        "group": "compat",
+        "name": "info_exclude",
+        "ok": true,
+        "seconds": 3.4847439429995575,
+        "wall_seconds": 4.652343210998879
+      },
+      {
+        "child_rc": 0,
+        "details": {},
+        "group": "compat",
+        "name": "worker_marker_tamper",
+        "ok": true,
+        "seconds": 4.77441274299963,
+        "wall_seconds": 5.955946755000696
+      },
+      {
+        "child_rc": 0,
+        "details": {},
+        "group": "compat",
+        "name": "canonical_marker_loss",
+        "ok": true,
+        "seconds": 2.5362582099987776,
+        "wall_seconds": 3.69627961399965
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "collect_error": "cws: worker metadata path does not match its allocated slot",
+          "discard_error": "cws: worker metadata path does not match its allocated slot"
+        },
+        "group": "redteam",
+        "name": "metadata_path_tamper",
+        "ok": true,
+        "seconds": 6.770179871999062,
+        "wall_seconds": 7.972351251000873
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "error": "cws: worker repository is missing"
+        },
+        "group": "redteam",
+        "name": "worker_slot_symlink",
+        "ok": true,
+        "seconds": 4.597950282999591,
+        "wall_seconds": 5.687641836000694
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "diagnosed": [
+            "branch",
+            "id",
+            "params_hash",
+            "stage_root",
+            "status"
+          ]
+        },
+        "group": "redteam",
+        "name": "metadata_identity",
+        "ok": true,
+        "seconds": 9.536655914000221,
+        "wall_seconds": 10.754240701000526
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "reports": [
+            {
+              "action": "unknown-metadata-file",
+              "path": "/tmp/cws-final-recovery_resilience-e517e12e9dc04a7381e9e1d15f4109f3/recover-resilience/ws/.cws/workers/unexpected.json"
+            },
+            {
+              "action": "orphan-worker-directory",
+              "id": 999,
+              "path": "/tmp/cws-final-recovery_resilience-e517e12e9dc04a7381e9e1d15f4109f3/recover-resilience/ws/999"
+            },
+            {
+              "action": "corrupt-or-unreadable-metadata",
+              "error": "cannot read metadata /tmp/cws-final-recovery_resilience-e517e12e9dc04a7381e9e1d15f4109f3/recover-resilience/ws/.cws/workers/1.json: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+              "id": 1,
+              "path": "/tmp/cws-final-recovery_resilience-e517e12e9dc04a7381e9e1d15f4109f3/recover-resilience/ws/.cws/workers/1.json"
+            }
+          ]
+        },
+        "group": "redteam",
+        "name": "recovery_resilience",
+        "ok": true,
+        "seconds": 7.817365418999543,
+        "wall_seconds": 8.885694109001633
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "warnings": [
+            "absolute core.hooksPath remains an external shared dependency"
+          ]
+        },
+        "group": "redteam",
+        "name": "provisioning_hooks",
+        "ok": true,
+        "seconds": 3.3588343060000625,
+        "wall_seconds": 4.487307649000286
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "aux": {
+            "notes": 1,
+            "remote_tracking": 1,
+            "replace": 1
+          }
+        },
+        "group": "redteam",
+        "name": "auxiliary_refs",
+        "ok": true,
+        "seconds": 3.455952038999385,
+        "wall_seconds": 4.609545960000105
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "recovery": [
+            {
+              "action": "spawn-publish-finished",
+              "id": 1
+            }
+          ],
+          "result": "93c1782e723c3c6e65e8e6f0856d1762395904cb"
+        },
+        "group": "redteam",
+        "name": "ordinary_failure_rollbacks",
+        "ok": true,
+        "seconds": 9.538670711999657,
+        "wall_seconds": 10.962225496999963
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "reports": [
+            {
+              "action": "spawn-broken-slot-collision",
+              "id": 1
+            }
+          ]
+        },
+        "group": "redteam",
+        "name": "final_path_collision",
+        "ok": true,
+        "seconds": 5.063357297000039,
+        "wall_seconds": 6.325156340999456
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "branch_error": "cws: worker HEAD is detached or not on its assigned task branch",
+          "gitdir_error": "re Git working tree: /tmp/cws-final-branch_gitdir_substitution-83cb3a1e90f844598731b101b59dff2c/branch-gitdir/ws/1/canon"
+        },
+        "group": "redteam",
+        "name": "branch_gitdir_substitution",
+        "ok": true,
+        "seconds": 6.775696925999,
+        "wall_seconds": 8.330903688000035
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "ref": "refs/cws/76043cfc9f0b46de/workers/1/results/b522cc5593483e2dc38cf414fd576350db10549a",
+          "sha": "b522cc5593483e2dc38cf414fd576350db10549a"
+        },
+        "group": "redteam",
+        "name": "result_survives_gc",
+        "ok": true,
+        "seconds": 6.889107138000327,
+        "wall_seconds": 8.118601447999026
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "error": "cws: repository name in workspace state is unsafe"
+        },
+        "group": "redteam",
+        "name": "state_path_tamper",
+        "ok": true,
+        "seconds": 4.110467468000934,
+        "wall_seconds": 5.197995378000996
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "control_error": "cws: workspace control directory is not a real directory",
+          "lock_error": "s of symbolic links: '/tmp/cws-final-control_lock_symlink-497363e78c9448118c35d93d5b5e2c88/control-symlink/ws/.cws/lock'"
+        },
+        "group": "redteam",
+        "name": "control_lock_symlink",
+        "ok": true,
+        "seconds": 3.397686923000947,
+        "wall_seconds": 4.428365071000371
+      },
+      {
+        "child_rc": 0,
+        "details": {
+          "first": "d16c18075f6ef0e812e7a483e2a3ce0ea84ca458",
+          "late": "8bfd3dbf0a3bfc675fced558f48fdf0264a42fdf",
+          "reports": [
+            {
+              "action": "discard-reset",
+              "id": 1
+            }
+          ]
+        },
+        "group": "redteam",
+        "name": "late_commit_crashed_discard",
+        "ok": true,
+        "seconds": 8.76997549600128,
+        "wall_seconds": 9.882829614000002
+      }
+    ]
+  },
+  "environment": {
+    "candidate_bytes": 67430,
+    "candidate_lines": 1389,
+    "candidate_sha256": "e7e9a8ef8cc17cbb590a73aeab4147b1c99d46c4ed503bfd18cdd1b5f736f852",
+    "claude_cli_available": false,
+    "codex_cli_available": false,
+    "fcntl_posix_locking": true,
+    "git": "git version 2.47.3",
+    "git_lfs_available": false,
+    "machine": "x86_64",
+    "platform": "Linux-6.18.35-x86_64-with-glibc2.41",
+    "python": "3.13.5",
+    "system": "Linux"
+  },
+  "explicit_crash_failpoints": {
+    "failed": 0,
+    "passed": 11,
+    "results": [
+      {
+        "failpoint": "collect.after_mark",
+        "mode": "collect",
+        "ok": true,
+        "reports": [
+          {
+            "action": "collect-reset-ready",
+            "id": 1
+          }
+        ],
+        "seconds": 9.874338490999435,
+        "sha": "ca3b74d50ea3bf153806fb523acb8a9679d2069f"
+      },
+      {
+        "failpoint": "collect.before_fetch",
+        "mode": "collect",
+        "ok": true,
+        "reports": [
+          {
+            "action": "collect-reset-ready",
+            "id": 1
+          }
+        ],
+        "seconds": 7.683157524001217,
+        "sha": "353e45480ccbf3d4527d38d7b89a622d5b62e18a"
+      },
+      {
+        "failpoint": "collect.after_fetch",
+        "mode": "collect",
+        "ok": true,
+        "reports": [
+          {
+            "action": "collect-finished",
+            "id": 1
+          }
+        ],
+        "seconds": 7.401180480999756,
+        "sha": "1bd402c74af715b026cfc58a946a2fa93ea10c09"
+      },
+      {
+        "failpoint": "collect.after_verify",
+        "mode": "collect",
+        "ok": true,
+        "reports": [
+          {
+            "action": "collect-finished",
+            "id": 1
+          }
+        ],
+        "seconds": 7.703067468999507,
+        "sha": "f4754687eb0dd77e5192af9a69a1ecf59f292634"
+      },
+      {
+        "failpoint": "collect.after_worker_recheck",
+        "mode": "collect",
+        "ok": true,
+        "reports": [
+          {
+            "action": "collect-finished",
+            "id": 1
+          }
+        ],
+        "seconds": 6.53734446999988,
+        "sha": "ed7d04b2aaac8400f974c1a5ef59f7fac97d3057"
+      },
+      {
+        "failpoint": "collect.after_summary",
+        "mode": "collect",
+        "ok": true,
+        "reports": [
+          {
+            "action": "collect-finished",
+            "id": 1
+          }
+        ],
+        "seconds": 6.208983287000592,
+        "sha": "36957fb1b512048630f118c455f3e3d530b5d1cd"
+      },
+      {
+        "failpoint": "collect.after_metadata",
+        "mode": "collect",
+        "ok": true,
+        "reports": [],
+        "seconds": 6.113853406999624,
+        "sha": "d57e3e24f06483f9758794974ae5bb0a29f6e2fd"
+      },
+      {
+        "failpoint": "discard.after_mark",
+        "mode": "discard",
+        "ok": true,
+        "reports": [
+          {
+            "action": "discard-reset",
+            "id": 1
+          }
+        ],
+        "seconds": 9.853516340001079,
+        "sha": "0ffb4fceb2333c35cb6b7be8cd0738c0d2022b00"
+      },
+      {
+        "failpoint": "discard.before_delete",
+        "mode": "discard",
+        "ok": true,
+        "reports": [
+          {
+            "action": "discard-reset",
+            "id": 1
+          }
+        ],
+        "seconds": 9.072797332999471,
+        "sha": "c3fb48516875d5dd7ee97c044a1ad7e724fa80f3"
+      },
+      {
+        "failpoint": "discard.after_delete",
+        "mode": "discard",
+        "ok": true,
+        "reports": [
+          {
+            "action": "discard-finished",
+            "id": 1
+          }
+        ],
+        "seconds": 7.82492551499854,
+        "sha": "ce90a83656b9e87db663f43a98819637e9354aaa"
+      },
+      {
+        "failpoint": "discard.after_metadata",
+        "mode": "discard",
+        "ok": true,
+        "reports": [],
+        "seconds": 8.02310944400051,
+        "sha": "8c5156b7859cfc008951c91102adc7d6946394de"
+      }
+    ],
+    "total": 11
+  },
+  "extra_probes": {
+    "failed": 0,
+    "passed": 5,
+    "results": {
+      "io_fault": {
+        "canonical_fsck_rc": 0,
+        "fault_returncode": 2,
+        "fault_stderr_tail": "cws: command failed (-25): /usr/bin/git clone --no-checkout --no-hardlinks /tmp/cws-io-fault-77zlc3in/canonical /tmp/cws-io-fault-77zlc3in/ws/.cws/staging/1-9f2ee774c2fa7b88f23a6f65bd47b52b/canonical\nstdout: \nstderr: Cloning into '/tmp/cws-io-fault-77zlc3in/ws/.cws/staging/1-9f2ee774c2fa7b88f23a6f65bd47b52b/canonical'...\n\n",
+        "ok": true,
+        "ready_count": 1,
+        "recover_reports": [],
+        "retry_worker": 2
+      },
+      "narrow_clone": {
+        "exact_sha_fetch_checkout_ok": true,
+        "ref_pairs": 5000,
+        "rows": [
+          {
+            "delta_bytes": 536576,
+            "git_bytes": 532480,
+            "logs_files": 3,
+            "refs_files": 2,
+            "remote_refs": 5002,
+            "seconds": 0.09749584299970593,
+            "strategy": "normal-local-clone"
+          },
+          {
+            "delta_bytes": 200704,
+            "git_bytes": 196608,
+            "logs_files": 3,
+            "refs_files": 2,
+            "remote_refs": 2,
+            "seconds": 0.053814556000361335,
+            "strategy": "narrow-fast"
+          },
+          {
+            "delta_bytes": 200704,
+            "git_bytes": 196608,
+            "logs_files": 3,
+            "refs_files": 2,
+            "remote_refs": 2,
+            "seconds": 0.04272160999971675,
+            "strategy": "narrow-strong"
+          }
+        ],
+        "source_refs": 10001
+      },
+      "partial_clone": {
+        "canonical_filter": "blob:none",
+        "canonical_missing_before": 10,
+        "canonical_promisor": "true",
+        "ok": true,
+        "outcomes": [
+          {
+            "collect_ok": true,
+            "lazy_old_blob_ok": true,
+            "lazy_old_blob_rc": 0,
+            "mode": "fast",
+            "result_ref": "refs/cws/5fbadce338334adf/workers/1/result",
+            "result_sha": "dcd35ddc9d46949ac57b2c75265261d11316e945",
+            "spawn_ok": true,
+            "warnings": [],
+            "worker_filter": "blob:none",
+            "worker_missing_before_lazy": 10,
+            "worker_promisor": "true"
+          },
+          {
+            "collect_ok": true,
+            "lazy_old_blob_ok": true,
+            "lazy_old_blob_rc": 0,
+            "mode": "strong",
+            "result_ref": "refs/cws/f81b2ed40bc4447d/workers/1/result",
+            "result_sha": "02f6530ce758ea1ac032d95ab054c574e7944ffd",
+            "spawn_ok": true,
+            "warnings": [],
+            "worker_filter": "blob:none",
+            "worker_missing_before_lazy": 10,
+            "worker_promisor": "true"
+          }
+        ]
+      },
+      "ref_compaction": {
+        "after": {
+          "git_bytes": 663552,
+          "logs_files": 5007,
+          "packed_refs_bytes": 339277,
+          "refs_files": 1
+        },
+        "before": {
+          "git_bytes": 41480192,
+          "logs_files": 5007,
+          "packed_refs_bytes": 46,
+          "refs_files": 5006
+        },
+        "compaction_seconds": 0.5589066259999527,
+        "ref_pairs": 5000,
+        "remote_ref_survives": true,
+        "saved_bytes": 40816640
+      },
+      "self_host": {
+        "compile_rc": 0,
+        "discarded": true,
+        "embedded_test_output": "RESULT_JSON={\"name\":\"exact_base_dirty\",\"group\":\"core\",\"ok\":true,\"seconds\":3.105405354999675,\"details\":{\"base\":\"b54b2b7c16ce32eeefc52465820ce3baf8b8267e\"}}\n",
+        "embedded_test_rc": 0,
+        "ok": true,
+        "result_ref": "refs/cws/5ede23d7c8274f57/workers/1/result",
+        "result_sha": "8bccc054e2d6df2d69c5e59212308e276976e584"
+      }
+    },
+    "status": {
+      "io_fault": true,
+      "narrow_clone": true,
+      "partial_clone": true,
+      "ref_compaction": true,
+      "self_host": true
+    }
+  },
+  "generated": 1787165422.223927,
+  "noncooperative_sigkill": {
+    "collect": {
+      "failed": 0,
+      "files": 6,
+      "passed": 10,
+      "rows": [
+        {
+          "delay": 0.18577280733551058,
+          "mode": "collect",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 9.958793826999681,
+          "seed": 0,
+          "sha": "9f5fe25a711456e9e3b91e69e0497c6039f8355b"
+        },
+        {
+          "delay": 0.029560133704728268,
+          "mode": "collect",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 9.933731277998959,
+          "seed": 1,
+          "sha": "c9661e97a203d4fbc4d9a8b0c8ae3dd638393383"
+        },
+        {
+          "delay": 0.21032753981563487,
+          "mode": "collect",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 9.456474128000991,
+          "seed": 2,
+          "sha": "80f85c6d738ba253a77129b06ce22d8d1ff653f3"
+        },
+        {
+          "delay": 0.0523522179602161,
+          "mode": "collect",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 9.541192067999873,
+          "seed": 3,
+          "sha": "2d9ab512f533fab1c0df1d19fc353baa03b121d0"
+        },
+        {
+          "delay": 0.0519305797422356,
+          "mode": "collect",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 9.664609651999854,
+          "seed": 4,
+          "sha": "229182545074ab932878d1c8f6d7f33e70dfa683"
+        },
+        {
+          "delay": 0.13703837287573442,
+          "mode": "collect",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 9.78410649199941,
+          "seed": 5,
+          "sha": "eea9f2fb411c7aa6070435e4c8b9d65a6bd7700d"
+        },
+        {
+          "delay": 0.17453481842756585,
+          "mode": "collect",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 9.214306593999936,
+          "seed": 6,
+          "sha": "ce0b11aeba4b72e102b9cdfa22f0b2818acb61d1"
+        },
+        {
+          "delay": 0.07124320826329572,
+          "mode": "collect",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 9.50233048500013,
+          "seed": 7,
+          "sha": "4013c8f492c5db14866d3f9089b51f016b62b052"
+        },
+        {
+          "delay": 0.04987528906383074,
+          "mode": "collect",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 10.963617682000404,
+          "seed": 8,
+          "sha": "a5a887e03a8566cf8e3dd1096d0fa935c3fbc6ce"
+        },
+        {
+          "delay": 0.10186161871930471,
+          "mode": "collect",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 10.439221553000607,
+          "seed": 9,
+          "sha": "fae44628890df412cb79f46738aef528eb67aa22"
+        }
+      ],
+      "runs": 10
+    },
+    "discard": {
+      "failed": 0,
+      "files": 3,
+      "passed": 5,
+      "rows": [
+        {
+          "delay": 0.06755374812200385,
+          "mode": "discard",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 8.654846524999812,
+          "seed": 0,
+          "sha": "3777c9507442edde6cb216bcf1a64f4cbbc941a4"
+        },
+        {
+          "delay": 0.010749139528992098,
+          "mode": "discard",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 9.31613780599946,
+          "seed": 1,
+          "sha": "e00380e01649119e2afd737f34e266c27cc8f64d"
+        },
+        {
+          "delay": 0.07648274175113995,
+          "mode": "discard",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 8.519127909999952,
+          "seed": 2,
+          "sha": "0b0250bba11fa0495a7f3f56a9ff3c50cc915ea6"
+        },
+        {
+          "delay": 0.01903717016735131,
+          "mode": "discard",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 8.05283135299942,
+          "seed": 3,
+          "sha": "a9d54fcea441b3b85ec696fe40c6a88df33dc83a"
+        },
+        {
+          "delay": 0.018883847178994762,
+          "mode": "discard",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "reports": [],
+          "seconds": 8.213421476999429,
+          "seed": 4,
+          "sha": "54538393d6edd752cdc9204160c1083f24ba6070"
+        }
+      ],
+      "runs": 5
+    },
+    "spawn": {
+      "failed": 0,
+      "files": 5,
+      "passed": 10,
+      "rows": [
+        {
+          "delay": 1.0555273144063102,
+          "mode": "spawn",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "ready_id": 2,
+          "reports": [
+            {
+              "action": "spawn-cleaned",
+              "id": 1
+            }
+          ],
+          "seconds": 8.864713910999853,
+          "seed": 0
+        },
+        {
+          "delay": 0.16795530514050153,
+          "mode": "spawn",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "ready_id": 1,
+          "reports": [],
+          "seconds": 7.975004550999074,
+          "seed": 1
+        },
+        {
+          "delay": 1.1950428398615618,
+          "mode": "spawn",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "ready_id": 2,
+          "reports": [
+            {
+              "action": "spawn-cleaned",
+              "id": 1
+            }
+          ],
+          "seconds": 9.08235960500133,
+          "seed": 2
+        },
+        {
+          "delay": 0.2974557838648642,
+          "mode": "spawn",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "ready_id": 1,
+          "reports": [],
+          "seconds": 7.668954718999885,
+          "seed": 3
+        },
+        {
+          "delay": 0.2950601121717932,
+          "mode": "spawn",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "ready_id": 1,
+          "reports": [],
+          "seconds": 8.113720541001385,
+          "seed": 4
+        },
+        {
+          "delay": 0.7786271186121274,
+          "mode": "spawn",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "ready_id": 1,
+          "reports": [],
+          "seconds": 8.700987128999259,
+          "seed": 5
+        },
+        {
+          "delay": 0.9916751047020788,
+          "mode": "spawn",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "ready_id": 2,
+          "reports": [
+            {
+              "action": "spawn-cleaned",
+              "id": 1
+            }
+          ],
+          "seconds": 8.56855961600013,
+          "seed": 6
+        },
+        {
+          "delay": 0.404790956041453,
+          "mode": "spawn",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "ready_id": 1,
+          "reports": [],
+          "seconds": 8.01673952300007,
+          "seed": 7
+        },
+        {
+          "delay": 0.28338232422631104,
+          "mode": "spawn",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "ready_id": 1,
+          "reports": [],
+          "seconds": 7.903076098000383,
+          "seed": 8
+        },
+        {
+          "delay": 0.5787591972687768,
+          "mode": "spawn",
+          "ok": true,
+          "process": {
+            "killed": true,
+            "rc": -9,
+            "stderr": "",
+            "stdout": ""
+          },
+          "ready_id": 1,
+          "reports": [],
+          "seconds": 7.860964069999682,
+          "seed": 9
+        }
+      ],
+      "runs": 10
+    }
+  },
+  "performance_and_comparison": {
+    "concurrency_16": {
+      "n": 16,
+      "rows": [
+        {
+          "failures": 0,
+          "n": 16,
+          "seconds": 17.659815996999896,
+          "stderr_tails": [],
+          "strategy": "clone-fast",
+          "successes": 16,
+          "unique_ids": 16
+        },
+        {
+          "failures": 0,
+          "n": 16,
+          "seconds": 0.5521672060003766,
+          "stderr_tails": [],
+          "strategy": "worktree",
+          "successes": 16
+        }
+      ]
+    },
+    "gc_concurrency": {
+      "rows": [
+        {
+          "errors": [
+            "fatal: gc is already running on machine 'cd845a5e5eda' pid 274819 (use --force if not)",
+            "fatal: gc is already running on machine 'cd845a5e5eda' pid 274819 (use --force if not)",
+            "fatal: Unable to create '/tmp/cws-gc-compare-p2a39do7/worktree/canonical/.git/gc.pid.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again. If it still fails, a git process\nmay have crashed in this repository earlier:\nremove the file manually to continue.",
+            "fatal: gc is already running on machine 'cd845a5e5eda' pid 274819 (use --force if not)",
+            "fatal: gc is already running on machine 'cd845a5e5eda' pid 274819 (use --force if not)",
+            "fatal: gc is already running on machine 'cd845a5e5eda' pid 274819 (use --force if not)",
+            "fatal: gc is already running on machine 'cd845a5e5eda' pid 274819 (use --force if not)"
+          ],
+          "failures": 7,
+          "n": 8,
+          "seconds": 0.6286838729993178,
+          "strategy": "worktree",
+          "successes": 1
+        },
+        {
+          "errors": [],
+          "failures": 0,
+          "n": 8,
+          "seconds": 1.54647427800046,
+          "strategy": "clone-fast",
+          "successes": 8
+        }
+      ]
+    },
+    "many_refs": {
+      "manyrefs-0000": {
+        "canonical_refs": 1,
+        "ref_pairs": 0,
+        "rows": [
+          {
+            "logs_files": 1,
+            "packed_refs_bytes": 0,
+            "refs_files": 0,
+            "seconds": 0.06349142799990659,
+            "strategy": "worktree",
+            "worker_delta_bytes": 61440,
+            "worker_git_bytes": 36864
+          },
+          {
+            "logs_files": 7,
+            "packed_refs_bytes": 46,
+            "refs_files": 6,
+            "seconds": 3.9056215140008135,
+            "strategy": "fast",
+            "worker_delta_bytes": 303104,
+            "worker_git_bytes": 262144
+          },
+          {
+            "logs_files": 7,
+            "packed_refs_bytes": 46,
+            "refs_files": 6,
+            "seconds": 3.991480791999493,
+            "strategy": "strong",
+            "worker_delta_bytes": 323584,
+            "worker_git_bytes": 262144
+          }
+        ]
+      },
+      "manyrefs-0050": {
+        "canonical_refs": 101,
+        "ref_pairs": 50,
+        "rows": [
+          {
+            "logs_files": 1,
+            "packed_refs_bytes": 0,
+            "refs_files": 0,
+            "seconds": 0.04712253599973337,
+            "strategy": "worktree",
+            "worker_delta_bytes": 61440,
+            "worker_git_bytes": 36864
+          },
+          {
+            "logs_files": 57,
+            "packed_refs_bytes": 46,
+            "refs_files": 56,
+            "seconds": 3.78694074699888,
+            "strategy": "fast",
+            "worker_delta_bytes": 712704,
+            "worker_git_bytes": 671744
+          },
+          {
+            "logs_files": 57,
+            "packed_refs_bytes": 46,
+            "refs_files": 56,
+            "seconds": 3.3611114630002703,
+            "strategy": "strong",
+            "worker_delta_bytes": 733184,
+            "worker_git_bytes": 671744
+          }
+        ]
+      },
+      "manyrefs-0250": {
+        "canonical_refs": 501,
+        "ref_pairs": 250,
+        "rows": [
+          {
+            "logs_files": 1,
+            "packed_refs_bytes": 0,
+            "refs_files": 0,
+            "seconds": 0.051664070999322576,
+            "strategy": "worktree",
+            "worker_delta_bytes": 61440,
+            "worker_git_bytes": 36864
+          },
+          {
+            "logs_files": 257,
+            "packed_refs_bytes": 46,
+            "refs_files": 256,
+            "seconds": 3.2650712209997437,
+            "strategy": "fast",
+            "worker_delta_bytes": 2351104,
+            "worker_git_bytes": 2310144
+          },
+          {
+            "logs_files": 257,
+            "packed_refs_bytes": 46,
+            "refs_files": 256,
+            "seconds": 3.190042962998632,
+            "strategy": "strong",
+            "worker_delta_bytes": 2371584,
+            "worker_git_bytes": 2310144
+          }
+        ]
+      },
+      "manyrefs-1000": {
+        "canonical_refs": 2001,
+        "ref_pairs": 1000,
+        "rows": [
+          {
+            "logs_files": 1,
+            "packed_refs_bytes": 0,
+            "refs_files": 0,
+            "seconds": 0.051440875000480446,
+            "strategy": "worktree",
+            "worker_delta_bytes": 61440,
+            "worker_git_bytes": 36864
+          },
+          {
+            "logs_files": 1007,
+            "packed_refs_bytes": 46,
+            "refs_files": 1006,
+            "seconds": 3.4412455540004885,
+            "strategy": "fast",
+            "worker_delta_bytes": 8548352,
+            "worker_git_bytes": 8507392
+          },
+          {
+            "logs_files": 1007,
+            "packed_refs_bytes": 46,
+            "refs_files": 1006,
+            "seconds": 3.0336931370002276,
+            "strategy": "strong",
+            "worker_delta_bytes": 8568832,
+            "worker_git_bytes": 8507392
+          }
+        ]
+      },
+      "manyrefs-2500": {
+        "canonical_refs": 5001,
+        "ref_pairs": 2500,
+        "rows": [
+          {
+            "logs_files": 1,
+            "packed_refs_bytes": 0,
+            "refs_files": 0,
+            "seconds": 0.04790407700056676,
+            "strategy": "worktree",
+            "worker_delta_bytes": 61440,
+            "worker_git_bytes": 36864
+          },
+          {
+            "logs_files": 2507,
+            "packed_refs_bytes": 46,
+            "refs_files": 2506,
+            "seconds": 3.9530016150001757,
+            "strategy": "fast",
+            "worker_delta_bytes": 20918272,
+            "worker_git_bytes": 20877312
+          },
+          {
+            "logs_files": 2507,
+            "packed_refs_bytes": 46,
+            "refs_files": 2506,
+            "seconds": 4.167017191999548,
+            "strategy": "strong",
+            "worker_delta_bytes": 20938752,
+            "worker_git_bytes": 20877312
+          }
+        ]
+      },
+      "manyrefs-5000": {
+        "canonical_refs": 10001,
+        "ref_pairs": 5000,
+        "rows": [
+          {
+            "logs_files": 1,
+            "packed_refs_bytes": 0,
+            "refs_files": 0,
+            "seconds": 0.039971801999854506,
+            "strategy": "worktree",
+            "worker_delta_bytes": 61440,
+            "worker_git_bytes": 36864
+          },
+          {
+            "logs_files": 5007,
+            "packed_refs_bytes": 46,
+            "refs_files": 5006,
+            "seconds": 3.3319470700007514,
+            "strategy": "fast",
+            "worker_delta_bytes": 41521152,
+            "worker_git_bytes": 41480192
+          },
+          {
+            "logs_files": 5007,
+            "packed_refs_bytes": 46,
+            "refs_files": 5006,
+            "seconds": 4.004015476000859,
+            "strategy": "strong",
+            "worker_delta_bytes": 41541632,
+            "worker_git_bytes": 41480192
+          }
+        ]
+      }
+    },
+    "scaling": {
+      "scale-binary-4": {
+        "profile": "binary",
+        "rows": [
+          {
+            "base_bytes": 33771520,
+            "canonical_git_bytes": 17166336,
+            "canonical_worktree_bytes": 16785408,
+            "profile": "binary",
+            "seconds_each": [
+              0.0635294719995727,
+              0.0660804819999612,
+              0.07012186700012535,
+              0.08261953300097957
+            ],
+            "seconds_mean": 0.0705878385001597,
+            "seconds_total": 0.2823513540006388,
+            "strategy": "worktree",
+            "total_bytes": 101117952,
+            "worker_delta_bytes": 67346432,
+            "workers": 4
+          },
+          {
+            "base_bytes": 33771520,
+            "canonical_git_bytes": 16994304,
+            "canonical_worktree_bytes": 16785408,
+            "profile": "binary",
+            "seconds_each": [
+              2.004756553000334,
+              2.2777291069996863,
+              1.874756189999971,
+              1.9980986640002811
+            ],
+            "seconds_mean": 2.038835128500068,
+            "seconds_total": 8.155340514000272,
+            "strategy": "fast",
+            "total_bytes": 101969920,
+            "worker_delta_bytes": 68198400,
+            "workers": 4
+          },
+          {
+            "base_bytes": 33771520,
+            "canonical_git_bytes": 16994304,
+            "canonical_worktree_bytes": 16785408,
+            "profile": "binary",
+            "seconds_each": [
+              2.1342246659987723,
+              2.0636640390002867,
+              2.215277329998571,
+              2.814269415999661
+            ],
+            "seconds_mean": 2.3068588627493227,
+            "seconds_total": 9.227435450997291,
+            "strategy": "strong",
+            "total_bytes": 169177088,
+            "worker_delta_bytes": 135405568,
+            "workers": 4
+          }
+        ],
+        "source_git_bytes": 16961536,
+        "source_worktree_bytes": 16785408,
+        "workers": 4
+      },
+      "scale-history-4": {
+        "profile": "history",
+        "rows": [
+          {
+            "base_bytes": 30629888,
+            "canonical_git_bytes": 29757440,
+            "canonical_worktree_bytes": 1052672,
+            "profile": "history",
+            "seconds_each": [
+              0.20464712099965254,
+              0.16549527999995917,
+              0.13410341600138054,
+              0.12105244600024889
+            ],
+            "seconds_mean": 0.15632456575031028,
+            "seconds_total": 0.6252982630012411,
+            "strategy": "worktree",
+            "total_bytes": 35045376,
+            "worker_delta_bytes": 4415488,
+            "workers": 4
+          },
+          {
+            "base_bytes": 30629888,
+            "canonical_git_bytes": 29585408,
+            "canonical_worktree_bytes": 1052672,
+            "profile": "history",
+            "seconds_each": [
+              1.8810348739989422,
+              2.070164978000321,
+              2.1271972800004733,
+              1.9740374600005453
+            ],
+            "seconds_mean": 2.0131086480000704,
+            "seconds_total": 8.052434592000282,
+            "strategy": "fast",
+            "total_bytes": 35897344,
+            "worker_delta_bytes": 5267456,
+            "workers": 4
+          },
+          {
+            "base_bytes": 30629888,
+            "canonical_git_bytes": 29585408,
+            "canonical_worktree_bytes": 1052672,
+            "profile": "history",
+            "seconds_each": [
+              1.9788364220003132,
+              2.150071134999962,
+              2.180607330999919,
+              1.740935879000972
+            ],
+            "seconds_mean": 2.0126126917502916,
+            "seconds_total": 8.050450767001166,
+            "strategy": "strong",
+            "total_bytes": 153468928,
+            "worker_delta_bytes": 122839040,
+            "workers": 4
+          }
+        ],
+        "source_git_bytes": 29552640,
+        "source_worktree_bytes": 1052672,
+        "workers": 4
+      },
+      "scale-manyfiles-4": {
+        "profile": "manyfiles",
+        "rows": [
+          {
+            "base_bytes": 25890816,
+            "canonical_git_bytes": 3244032,
+            "canonical_worktree_bytes": 24743936,
+            "profile": "manyfiles",
+            "seconds_each": [
+              0.14966927800014673,
+              0.1581550459995924,
+              0.1574933610008884,
+              0.16452381899944157
+            ],
+            "seconds_mean": 0.15746037600001728,
+            "seconds_total": 0.6298415040000691,
+            "strategy": "worktree",
+            "total_bytes": 126992384,
+            "worker_delta_bytes": 101101568,
+            "workers": 4
+          },
+          {
+            "base_bytes": 25890816,
+            "canonical_git_bytes": 1155072,
+            "canonical_worktree_bytes": 24743936,
+            "profile": "manyfiles",
+            "seconds_each": [
+              1.8457128009995358,
+              1.8571777360011765,
+              2.1267294980007136,
+              2.2033086320006987
+            ],
+            "seconds_mean": 2.008232166750531,
+            "seconds_total": 8.032928667002125,
+            "strategy": "fast",
+            "total_bytes": 127844352,
+            "worker_delta_bytes": 101953536,
+            "workers": 4
+          },
+          {
+            "base_bytes": 25890816,
+            "canonical_git_bytes": 1155072,
+            "canonical_worktree_bytes": 24743936,
+            "profile": "manyfiles",
+            "seconds_each": [
+              2.085655038999903,
+              2.1484458159993665,
+              2.123442182999497,
+              1.9460165319997031
+            ],
+            "seconds_mean": 2.0758898924996174,
+            "seconds_total": 8.30355956999847,
+            "strategy": "strong",
+            "total_bytes": 129773568,
+            "worker_delta_bytes": 103882752,
+            "workers": 4
+          }
+        ],
+        "source_git_bytes": 1122304,
+        "source_worktree_bytes": 24743936,
+        "workers": 4
+      },
+      "scale-refs-4": {
+        "profile": "refs",
+        "rows": [
+          {
+            "base_bytes": 380928,
+            "canonical_git_bytes": 552960,
+            "canonical_worktree_bytes": 8192,
+            "profile": "refs",
+            "seconds_each": [
+              0.07978799200100184,
+              0.12564858400037338,
+              0.16482185699896945,
+              0.27955128100074944
+            ],
+            "seconds_mean": 0.16245242850027353,
+            "seconds_total": 0.6498097140010941,
+            "strategy": "worktree",
+            "total_bytes": 618496,
+            "worker_delta_bytes": 237568,
+            "workers": 4
+          },
+          {
+            "base_bytes": 380928,
+            "canonical_git_bytes": 380928,
+            "canonical_worktree_bytes": 8192,
+            "profile": "refs",
+            "seconds_each": [
+              1.8322850540007494,
+              1.8857907689998683,
+              1.9481147299993609,
+              1.9745627110005444
+            ],
+            "seconds_mean": 1.9101883160001307,
+            "seconds_total": 7.640753264000523,
+            "strategy": "fast",
+            "total_bytes": 83931136,
+            "worker_delta_bytes": 83550208,
+            "workers": 4
+          },
+          {
+            "base_bytes": 380928,
+            "canonical_git_bytes": 380928,
+            "canonical_worktree_bytes": 8192,
+            "profile": "refs",
+            "seconds_each": [
+              2.018829116001143,
+              1.8766742649986554,
+              1.9910793889994238,
+              2.1959236949987826
+            ],
+            "seconds_mean": 2.0206266162495012,
+            "seconds_total": 8.082506464998005,
+            "strategy": "strong",
+            "total_bytes": 84013056,
+            "worker_delta_bytes": 83632128,
+            "workers": 4
+          }
+        ],
+        "source_git_bytes": 11223040,
+        "source_worktree_bytes": 8192,
+        "workers": 4
+      },
+      "scale-tiny-1": {
+        "profile": "tiny",
+        "rows": [
+          {
+            "base_bytes": 1056768,
+            "canonical_git_bytes": 286720,
+            "canonical_worktree_bytes": 827392,
+            "profile": "tiny",
+            "seconds_each": [
+              0.04164391999984218
+            ],
+            "seconds_mean": 0.04164391999984218,
+            "seconds_total": 0.04164391999984218,
+            "strategy": "worktree",
+            "total_bytes": 1953792,
+            "worker_delta_bytes": 897024,
+            "workers": 1
+          },
+          {
+            "base_bytes": 1056768,
+            "canonical_git_bytes": 237568,
+            "canonical_worktree_bytes": 827392,
+            "profile": "tiny",
+            "seconds_each": [
+              1.7298776549996546
+            ],
+            "seconds_mean": 1.7298776549996546,
+            "seconds_total": 1.7298776549996546,
+            "strategy": "fast",
+            "total_bytes": 2191360,
+            "worker_delta_bytes": 1134592,
+            "workers": 1
+          },
+          {
+            "base_bytes": 1056768,
+            "canonical_git_bytes": 237568,
+            "canonical_worktree_bytes": 827392,
+            "profile": "tiny",
+            "seconds_each": [
+              2.386457642000096
+            ],
+            "seconds_mean": 2.386457642000096,
+            "seconds_total": 2.386457642000096,
+            "strategy": "strong",
+            "total_bytes": 2224128,
+            "worker_delta_bytes": 1167360,
+            "workers": 1
+          }
+        ],
+        "source_git_bytes": 204800,
+        "source_worktree_bytes": 827392,
+        "workers": 1
+      },
+      "scale-tiny-4": {
+        "profile": "tiny",
+        "rows": [
+          {
+            "base_bytes": 1056768,
+            "canonical_git_bytes": 458752,
+            "canonical_worktree_bytes": 827392,
+            "profile": "tiny",
+            "seconds_each": [
+              0.03874422499939101,
+              0.04059263899944199,
+              0.045222188000479946,
+              0.04243560600116325
+            ],
+            "seconds_mean": 0.04174866450011905,
+            "seconds_total": 0.1669946580004762,
+            "strategy": "worktree",
+            "total_bytes": 4620288,
+            "worker_delta_bytes": 3563520,
+            "workers": 4
+          },
+          {
+            "base_bytes": 1056768,
+            "canonical_git_bytes": 237568,
+            "canonical_worktree_bytes": 827392,
+            "profile": "tiny",
+            "seconds_each": [
+              1.7992031470002985,
+              1.9037402409994684,
+              1.6933634500001062,
+              1.712516333000167
+            ],
+            "seconds_mean": 1.77720579275001,
+            "seconds_total": 7.10882317100004,
+            "strategy": "fast",
+            "total_bytes": 5472256,
+            "worker_delta_bytes": 4415488,
+            "workers": 4
+          },
+          {
+            "base_bytes": 1056768,
+            "canonical_git_bytes": 237568,
+            "canonical_worktree_bytes": 827392,
+            "profile": "tiny",
+            "seconds_each": [
+              1.8751409569995303,
+              1.7293754990005255,
+              1.9789424579994375,
+              1.7342663520012138
+            ],
+            "seconds_mean": 1.8294313165001768,
+            "seconds_total": 7.317725266000707,
+            "strategy": "strong",
+            "total_bytes": 5603328,
+            "worker_delta_bytes": 4546560,
+            "workers": 4
+          }
+        ],
+        "source_git_bytes": 204800,
+        "source_worktree_bytes": 827392,
+        "workers": 4
+      }
+    },
+    "shared_state": {
+      "rows": [
+        {
+          "after_worker_mutation": {
+            "config": "worker",
+            "dormant": false,
+            "origin": false,
+            "stash": ""
+          },
+          "before": {
+            "config": "canonical",
+            "dormant": true,
+            "origin": true,
+            "stash": "stash@{0}: On main: canonical"
+          },
+          "canonical_changed": true,
+          "strategy": "worktree"
+        },
+        {
+          "after_worker_mutation": {
+            "config": "canonical",
+            "dormant": true,
+            "origin": true,
+            "stash": "stash@{0}: On main: canonical"
+          },
+          "before": {
+            "config": "canonical",
+            "dormant": true,
+            "origin": true,
+            "stash": "stash@{0}: On main: canonical"
+          },
+          "canonical_changed": false,
+          "strategy": "clone-fast"
+        }
+      ]
+    }
+  },
+  "provenance_note": "hardening-results.json is an interrupted early aggregate. RESULTS.json uses the latest isolated row per named test from hardening-results.jsonl, plus individually executed crash failpoints from crash-results.jsonl.",
+  "randomized_state_machine": {
+    "failed": 0,
+    "files": 24,
+    "operations": 1000,
+    "passed": 24,
+    "rows": [
+      {
+        "counts": {
+          "abandon": 5,
+          "collect": 4,
+          "commit": 7,
+          "dirty": 4,
+          "discard": 2,
+          "mismatch_refused": 2,
+          "mutate": 4,
+          "recover": 5,
+          "recover_fallback": 3,
+          "retry": 4,
+          "spawn": 10
+        },
+        "events": 50,
+        "ok": true,
+        "seed": 0,
+        "steps": 50,
+        "workers": 10
+      },
+      {
+        "counts": {
+          "abandon": 1,
+          "advance": 6,
+          "collect": 6,
+          "commit": 3,
+          "discard": 2,
+          "discard_refused_changed": 2,
+          "mismatch_refused": 1,
+          "mutate": 1,
+          "post_collect_guard": 3,
+          "recover": 4,
+          "recover_fallback": 8,
+          "retry": 1,
+          "spawn": 8,
+          "summary_repair": 4
+        },
+        "events": 50,
+        "ok": true,
+        "seed": 1,
+        "steps": 50,
+        "workers": 8
+      },
+      {
+        "counts": {
+          "abandon": 4,
+          "advance": 7,
+          "collect": 5,
+          "commit": 2,
+          "discard": 2,
+          "mismatch_refused": 1,
+          "mutate": 1,
+          "recover": 5,
+          "recover_fallback": 10,
+          "retry": 4,
+          "retry_reallocated": 3,
+          "spawn": 6
+        },
+        "events": 50,
+        "ok": true,
+        "seed": 2,
+        "steps": 50,
+        "workers": 9
+      },
+      {
+        "counts": {
+          "abandon": 5,
+          "collect_refused_dirty": 1,
+          "commit": 4,
+          "dirty": 4,
+          "mismatch_refused": 2,
+          "mutate": 4,
+          "recover": 2,
+          "recover_fallback": 7,
+          "retry": 2,
+          "retry_reallocated": 1,
+          "spawn": 8
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 3,
+        "steps": 40,
+        "workers": 9
+      },
+      {
+        "counts": {
+          "abandon": 1,
+          "collect": 5,
+          "collect_refused_dirty": 4,
+          "commit": 6,
+          "dirty": 5,
+          "discard": 3,
+          "mutate": 5,
+          "post_collect_guard": 2,
+          "recover": 3,
+          "retry": 2,
+          "retry_reallocated": 2,
+          "spawn": 10,
+          "summary_repair": 2
+        },
+        "events": 50,
+        "ok": true,
+        "seed": 4,
+        "steps": 50,
+        "workers": 11
+      },
+      {
+        "counts": {
+          "abandon": 2,
+          "advance": 3,
+          "collect": 2,
+          "commit": 6,
+          "dirty": 3,
+          "discard": 2,
+          "mismatch_refused": 1,
+          "mutate": 1,
+          "recover": 3,
+          "recover_fallback": 5,
+          "retry": 3,
+          "spawn": 9
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 5,
+        "steps": 40,
+        "workers": 9
+      },
+      {
+        "counts": {
+          "abandon": 1,
+          "advance": 2,
+          "collect": 7,
+          "commit": 2,
+          "discard": 3,
+          "mismatch_refused": 1,
+          "mutate": 3,
+          "post_collect_guard": 1,
+          "recover": 1,
+          "recover_fallback": 6,
+          "retry": 4,
+          "spawn": 8,
+          "summary_repair": 1
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 6,
+        "steps": 40,
+        "workers": 8
+      },
+      {
+        "counts": {
+          "abandon": 4,
+          "advance": 2,
+          "collect": 6,
+          "collect_refused_dirty": 1,
+          "commit": 1,
+          "dirty": 2,
+          "discard": 3,
+          "mismatch_refused": 1,
+          "mutate": 2,
+          "post_collect_guard": 1,
+          "recover": 4,
+          "recover_fallback": 3,
+          "spawn": 9,
+          "summary_repair": 1
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 7,
+        "steps": 40,
+        "workers": 9
+      },
+      {
+        "counts": {
+          "abandon": 1,
+          "commit": 9,
+          "dirty": 4,
+          "mismatch_refused": 1,
+          "mutate": 5,
+          "recover": 2,
+          "recover_fallback": 8,
+          "retry": 3,
+          "spawn": 7
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 8,
+        "steps": 40,
+        "workers": 7
+      },
+      {
+        "counts": {
+          "advance": 5,
+          "collect": 6,
+          "commit": 3,
+          "discard": 3,
+          "mismatch_refused": 1,
+          "mutate": 1,
+          "recover": 4,
+          "recover_fallback": 8,
+          "retry": 2,
+          "spawn": 7
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 9,
+        "steps": 40,
+        "workers": 7
+      },
+      {
+        "counts": {
+          "abandon": 2,
+          "advance": 3,
+          "collect": 3,
+          "collect_refused_dirty": 1,
+          "commit": 6,
+          "dirty": 2,
+          "discard_refused_changed": 2,
+          "mismatch_refused": 1,
+          "mutate": 3,
+          "post_collect_guard": 3,
+          "recover": 1,
+          "recover_fallback": 2,
+          "retry": 2,
+          "spawn": 7,
+          "summary_repair": 2
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 10,
+        "steps": 40,
+        "workers": 7
+      },
+      {
+        "counts": {
+          "abandon": 2,
+          "advance": 3,
+          "collect": 6,
+          "commit": 3,
+          "discard": 3,
+          "mismatch_refused": 1,
+          "mutate": 1,
+          "post_collect_guard": 3,
+          "recover": 1,
+          "recover_fallback": 3,
+          "retry": 6,
+          "spawn": 8
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 11,
+        "steps": 40,
+        "workers": 8
+      },
+      {
+        "counts": {
+          "abandon": 4,
+          "advance": 1,
+          "collect": 2,
+          "commit": 5,
+          "dirty": 2,
+          "discard": 2,
+          "mismatch_refused": 2,
+          "mutate": 2,
+          "recover_fallback": 7,
+          "retry": 3,
+          "retry_reallocated": 1,
+          "spawn": 9
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 12,
+        "steps": 40,
+        "workers": 10
+      },
+      {
+        "counts": {
+          "abandon": 2,
+          "abandon_forced": 1,
+          "abandon_refused_changed": 2,
+          "advance": 3,
+          "collect": 2,
+          "commit": 7,
+          "discard_refused_changed": 4,
+          "mismatch_refused": 2,
+          "mutate": 1,
+          "post_collect_guard": 1,
+          "recover": 4,
+          "recover_fallback": 5,
+          "retry": 2,
+          "retry_reallocated": 1,
+          "spawn": 4
+        },
+        "events": 41,
+        "ok": true,
+        "seed": 13,
+        "steps": 40,
+        "workers": 5
+      },
+      {
+        "counts": {
+          "abandon": 2,
+          "collect": 5,
+          "collect_refused_dirty": 1,
+          "commit": 4,
+          "dirty": 1,
+          "mismatch_refused": 1,
+          "mutate": 4,
+          "recover": 3,
+          "recover_fallback": 6,
+          "retry": 5,
+          "spawn": 8
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 14,
+        "steps": 40,
+        "workers": 8
+      },
+      {
+        "counts": {
+          "abandon": 1,
+          "advance": 3,
+          "collect": 4,
+          "collect_refused_dirty": 1,
+          "commit": 4,
+          "dirty": 1,
+          "discard": 2,
+          "mismatch_refused": 1,
+          "mutate": 1,
+          "recover": 5,
+          "recover_fallback": 11,
+          "spawn": 5,
+          "summary_repair": 1
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 15,
+        "steps": 40,
+        "workers": 5
+      },
+      {
+        "counts": {
+          "abandon": 1,
+          "advance": 2,
+          "collect": 2,
+          "collect_refused_dirty": 1,
+          "commit": 5,
+          "dirty": 4,
+          "discard": 1,
+          "mismatch_refused": 3,
+          "mutate": 3,
+          "recover": 1,
+          "recover_fallback": 4,
+          "retry": 3,
+          "retry_reallocated": 2,
+          "spawn": 8
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 16,
+        "steps": 40,
+        "workers": 9
+      },
+      {
+        "counts": {
+          "abandon": 1,
+          "advance": 6,
+          "collect": 4,
+          "commit": 2,
+          "dirty": 3,
+          "discard": 2,
+          "mismatch_refused": 2,
+          "mutate": 1,
+          "recover": 4,
+          "recover_fallback": 3,
+          "retry": 3,
+          "spawn": 7,
+          "summary_repair": 2
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 17,
+        "steps": 40,
+        "workers": 7
+      },
+      {
+        "counts": {
+          "abandon": 3,
+          "advance": 4,
+          "collect": 4,
+          "commit": 5,
+          "dirty": 2,
+          "mismatch_refused": 1,
+          "mutate": 3,
+          "post_collect_guard": 1,
+          "recover": 2,
+          "recover_fallback": 6,
+          "retry": 2,
+          "retry_reallocated": 1,
+          "spawn": 6
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 18,
+        "steps": 40,
+        "workers": 7
+      },
+      {
+        "counts": {
+          "abandon": 6,
+          "advance": 5,
+          "collect": 3,
+          "commit": 3,
+          "dirty": 2,
+          "discard": 1,
+          "recover": 2,
+          "recover_fallback": 6,
+          "retry_reallocated": 2,
+          "spawn": 9,
+          "summary_repair": 1
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 19,
+        "steps": 40,
+        "workers": 11
+      },
+      {
+        "counts": {
+          "abandon": 1,
+          "advance": 2,
+          "collect": 3,
+          "commit": 6,
+          "dirty": 1,
+          "mutate": 3,
+          "recover": 7,
+          "recover_fallback": 5,
+          "retry": 4,
+          "spawn": 8
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 20,
+        "steps": 40,
+        "workers": 8
+      },
+      {
+        "counts": {
+          "abandon": 2,
+          "advance": 2,
+          "collect": 5,
+          "commit": 4,
+          "dirty": 1,
+          "discard": 2,
+          "mismatch_refused": 2,
+          "mutate": 2,
+          "recover": 2,
+          "recover_fallback": 4,
+          "retry": 4,
+          "retry_reallocated": 1,
+          "spawn": 7,
+          "summary_repair": 2
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 21,
+        "steps": 40,
+        "workers": 8
+      },
+      {
+        "counts": {
+          "abandon": 1,
+          "advance": 2,
+          "collect": 4,
+          "collect_refused_dirty": 2,
+          "commit": 3,
+          "dirty": 4,
+          "discard": 2,
+          "mismatch_refused": 2,
+          "mutate": 1,
+          "post_collect_guard": 1,
+          "recover": 6,
+          "recover_fallback": 2,
+          "retry": 2,
+          "spawn": 7,
+          "summary_repair": 1
+        },
+        "events": 40,
+        "ok": true,
+        "seed": 22,
+        "steps": 40,
+        "workers": 7
+      },
+      {
+        "counts": {
+          "abandon": 3,
+          "abandon_forced": 1,
+          "abandon_refused_changed": 1,
+          "advance": 1,
+          "collect": 5,
+          "discard": 1,
+          "mismatch_refused": 1,
+          "mutate": 1,
+          "post_collect_guard": 1,
+          "recover": 3,
+          "recover_fallback": 11,
+          "retry": 3,
+          "spawn": 6,
+          "summary_repair": 3
+        },
+        "events": 41,
+        "ok": true,
+        "seed": 23,
+        "steps": 40,
+        "workers": 6
+      }
+    ],
+    "seeds": 24
+  }
+}

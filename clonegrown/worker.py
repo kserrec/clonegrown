@@ -1,6 +1,24 @@
-"""Clonegrown implementation layer."""
-from clonegrown_repo import *  # noqa: F401,F403
+"""Worker identity: markers, authentication, result snapshots, and allocation."""
+from __future__ import annotations
 
+import os
+import secrets
+import stat
+import time
+from pathlib import Path
+from typing import Any
+
+from .core import CWSError, atomic_json, git, git_common_dir, git_dir, git_path, load_json, object_format, repo_root
+from .state import (
+    SCHEMA, TERMINAL_SPAWN_FAILURE, base_ref, final_worker_root, owner_fields, params_hash, read_state, request_path, staging_root, validate_worker_meta,
+    verify_canonical, worker_branch, worker_marker_path, worker_meta_path, workspace_lock, write_state,
+)
+
+# Git-directory entries whose presence means a merge/rebase/etc. is mid-flight.
+OPERATION_GIT_PATHS = (
+    "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG",
+    "rebase-apply", "rebase-merge", "sequencer",
+)
 
 
 def write_worker_marker(repo: Path, meta: dict[str, Any]) -> None:
@@ -16,13 +34,13 @@ def write_worker_marker(repo: Path, meta: dict[str, Any]) -> None:
 
 
 def verify_worker(state: dict[str, Any], meta: dict[str, Any], require_exists: bool = True) -> Path:
+    """Authenticate the on-disk worker against its metadata before touching it."""
     repo = Path(meta["path"])
     if not repo.exists():
         if require_exists:
             raise CWSError("worker repository is missing")
         return repo
-    final_root = repo.parent
-    for boundary, label in ((final_root, "worker slot"), (repo, "worker repository")):
+    for boundary, label in ((repo.parent, "worker slot"), (repo, "worker repository")):
         try:
             mode = os.lstat(boundary).st_mode
         except FileNotFoundError:
@@ -53,14 +71,11 @@ def verify_worker(state: dict[str, Any], meta: dict[str, Any], require_exists: b
 
 
 def op_in_progress(repo: Path) -> list[str]:
-    found = []
-    for rel in OPERATION_GIT_PATHS:
-        if git_path(repo, rel).exists():
-            found.append(rel)
-    return found
+    return [rel for rel in OPERATION_GIT_PATHS if git_path(repo, rel).exists()]
 
 
 def worker_snapshot(state: dict[str, Any], meta: dict[str, Any], require_ancestry: bool = True) -> dict[str, Any]:
+    """Describe a clean, collectable worker; raise if it is not in that condition."""
     repo = verify_worker(state, meta)
     dirty = git(repo, "status", "--porcelain=v1", "--untracked-files=all").stdout
     if dirty.strip():
@@ -73,8 +88,7 @@ def worker_snapshot(state: dict[str, Any], meta: dict[str, Any], require_ancestr
     if sym.returncode or sym.stdout.strip() != expected_ref:
         raise CWSError("worker HEAD is detached or not on its assigned task branch")
     head = git(repo, "rev-parse", "HEAD").stdout.strip()
-    branch = git(repo, "rev-parse", expected_ref).stdout.strip()
-    if head != branch:
+    if head != git(repo, "rev-parse", expected_ref).stdout.strip():
         raise CWSError("worker HEAD and assigned branch disagree")
     if require_ancestry:
         anc = git(repo, "merge-base", "--is-ancestor", meta["base_sha"], head, check=False)
@@ -83,22 +97,25 @@ def worker_snapshot(state: dict[str, Any], meta: dict[str, Any], require_ancestr
     return {"head": head, "branch_ref": expected_ref, "status": dirty, "operations": operations}
 
 
-def wait_for_existing(ws: Path, worker_id: int, timeout_seconds: float) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        meta = load_json(worker_meta_path(ws, worker_id))
-        if meta.get("status") == "ready" or meta.get("status") in {"collected", "discarded", "abandoned"}:
-            return meta
-        if meta.get("status") in TERMINAL_SPAWN_FAILURE or meta.get("status") == "broken":
-            raise CWSError(f"existing request failed in worker {worker_id}: {meta.get('error', meta.get('status'))}")
-        if time.monotonic() >= deadline:
-            raise CWSError(f"timed out waiting for existing request worker {worker_id}; run recover")
-        if not process_alive(meta.get("owner_pid"), meta.get("owner_start")):
-            recover(ws)
-        time.sleep(0.05)
+def load_worker_state(ws: Path, worker_id: int) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    """Return validated (workspace state, worker metadata, canonical path)."""
+    state = read_state(ws)
+    canonical = verify_canonical(state)
+    mp = worker_meta_path(ws, worker_id)
+    if not mp.exists():
+        raise CWSError(f"unknown worker: {worker_id}")
+    meta = load_json(mp)
+    validate_worker_meta(ws, state, worker_id, meta)
+    return state, meta, canonical
 
 
-def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str | None) -> tuple[dict[str, Any], bool]:
+def allocate_spawn(ws: Path, base: str, task: str, strong: bool,
+                   request_id: str | None) -> tuple[dict[str, Any], bool]:
+    """Reserve a worker ID, pin its base commit, and record ``allocated`` metadata.
+
+    Returns ``(meta, created)``. With a request ID that already maps to a
+    live or finished worker, the existing metadata is returned unchanged.
+    """
     with workspace_lock(ws):
         state = read_state(ws)
         canonical = verify_canonical(state)
@@ -121,12 +138,8 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
         base_sha = resolved.stdout.strip()
         worker_id = int(state["next_id"])
         state["next_id"] = worker_id + 1
-        atomic_json(ws_paths(ws)["state"], state)
+        write_state(ws, state)
         token = secrets.token_hex(16)
-        stage = staging_root(ws, worker_id, token)
-        final = final_worker_root(ws, worker_id)
-        repo = final / state["repo_name"]
-        branch = f"agent/{state['workspace_id']}/{worker_id}-{sanitize_task(task)}"
         git(canonical, "update-ref", base_ref(state, worker_id), base_sha, "0" * len(base_sha))
         meta: dict[str, Any] = {
             "schema": SCHEMA,
@@ -135,9 +148,9 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
             "canonical_token": state["canonical_token"],
             "worker_token": token,
             "status": "allocated",
-            "path": str(repo),
-            "stage_root": str(stage),
-            "branch": branch,
+            "path": str(final_worker_root(ws, worker_id) / state["repo_name"]),
+            "stage_root": str(staging_root(ws, worker_id, token)),
+            "branch": worker_branch(state, worker_id, task),
             "base": base,
             "base_sha": base_sha,
             "strong": bool(strong),

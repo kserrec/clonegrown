@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable, Any
 
 HERE=Path(__file__).resolve().parent
-CWS=HERE.parent/'clonegrown.py'
+CWS=HERE/'legacy_cli.py'
 ROOT=Path(os.environ.get('CWS_TEST_ROOT','/tmp/cws-v2-hardening-suite'))
 OUT=Path(os.environ.get('CWS_RESULTS_PATH',str(HERE/'hardening-results.json')))
 

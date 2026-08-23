@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json,shutil,subprocess,sys,tempfile
 from pathlib import Path
-HERE=Path(__file__).resolve().parent; CWS=HERE.parent/'clonegrown.py'
+HERE=Path(__file__).resolve().parent; CWS=HERE/'legacy_cli.py'
 def run(cmd,cwd=None,check=True):
  p=subprocess.run([str(x) for x in cmd],cwd=cwd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
  if check and p.returncode: raise RuntimeError(f'{cmd}\n{p.stdout}\n{p.stderr}')

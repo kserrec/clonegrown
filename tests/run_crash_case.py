@@ -34,6 +34,6 @@ except Exception as e:
     row={'mode':mode,'failpoint':fp,'ok':False,'seconds':time.perf_counter()-started,'error':repr(e),'root':str(root)}
 finally:
     if row.get('ok'): shutil.rmtree(root,ignore_errors=True)
-with (HERE/'crash-results.jsonl').open('a') as f: f.write(json.dumps(row,sort_keys=True)+'\n')
+with Path(os.environ.get('CWS_CRASH_RESULTS_PATH',str(HERE/'crash-results.jsonl'))).open('a') as f: f.write(json.dumps(row,sort_keys=True)+'\n')
 print(json.dumps(row,indent=2,sort_keys=True))
 raise SystemExit(0 if row['ok'] else 1)

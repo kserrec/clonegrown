@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, bootstrap-v0]
+    branches: [main]
   pull_request:
 
 permissions:
@@ -21,15 +21,17 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Compile
-        run: python -m py_compile clonegrown*.py
-      - name: CLI tests
-        run: python -m unittest tests.test_cli -v
+        run: python -m compileall -q clonegrown tests
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
       - name: Installer syntax
         run: sh -n install.sh
       - name: Package smoke test
         run: |
           python -m pip install .
+          clonegrown --version
           clonegrown --help
+          python -m clonegrown --help
 
   hardening:
     runs-on: ubuntu-latest

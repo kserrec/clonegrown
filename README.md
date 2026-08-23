@@ -54,7 +54,7 @@ or:
 uv tool install git+https://github.com/kserrec/clonegrown.git
 ```
 
-Those package-manager forms install the CLI only; the recommended `install.sh` also installs the agent skill.
+Those package-manager forms install the CLI only; the recommended `install.sh` also installs the agent skill. Either way, `clonegrown --version` confirms the install, and `python -m clonegrown` is equivalent to the command.
 
 ## Use
 
@@ -181,6 +181,16 @@ Highlights from the frozen candidate include:
 - fully independent clones became expensive when Git history dominated repository size.
 
 Those results establish mechanical viability and the tradeoff. They do not yet prove that every coding agent behaves better with Clonegrown than with worktrees.
+
+## Python API
+
+The same operations are importable, with no dependencies beyond the standard library:
+
+```python
+from clonegrown import init_workspace, spawn, collect, discard, recover, status, CWSError
+```
+
+Every function takes the workspace path and returns the same dictionaries the CLI prints (the CLI additionally redacts internal identity fields). [`ARCHITECTURE.md`](ARCHITECTURE.md) describes the package layout, on-disk state, and recovery model.
 
 ## Requirements and limitations
 

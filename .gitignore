@@ -7,3 +7,7 @@ dist/
 .coverage
 htmlcov/
 .DS_Store
+
+# Harness output when run with default paths
+tests/*.json
+tests/*.jsonl

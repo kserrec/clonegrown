@@ -4,8 +4,9 @@ import argparse, contextlib, json, os, random, shutil, subprocess, sys, time, tr
 from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
-sys.path.insert(0,str(HERE))
-import cws
+sys.path.insert(0,str(HERE.parent))
+import clonegrown as cws
+from clonegrown.state import summary_ref
 
 ROOT=Path(os.environ.get('CWS_FUZZ_ROOT','/tmp/cws-final-state-machine-fuzz'))
 
@@ -61,7 +62,7 @@ def invariant(c:Path,w:Path,origin_url:str,full=False):
             assert git(repo,'show-ref','--verify',f"refs/heads/{m['branch']}").returncode==0
         elif status=='collected':
             ref=m['result_ref']; assert git(c,'rev-parse',ref).stdout.strip()==m['result_sha']
-            assert git(c,'rev-parse',cws.summary_ref(st,wid)).stdout.strip()==m['result_sha']
+            assert git(c,'rev-parse',summary_ref(st,wid)).stdout.strip()==m['result_sha']
         elif status in ('discarded','abandoned'):
             assert not repo.parent.exists()
     return True
@@ -149,7 +150,7 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
             elif op=='recover':
                 cws.recover(w); record('recover')
             elif op=='summary_loss' and collected:
-                wid=rng.choice(collected); st=json.loads((w/'.cws/state.json').read_text()); sref=cws.summary_ref(st,wid); git(c,'update-ref','-d',sref); cws.recover(w); assert git(c,'rev-parse',sref).stdout.strip()==ms[wid]['result_sha']; record('summary_repair',wid)
+                wid=rng.choice(collected); st=json.loads((w/'.cws/state.json').read_text()); sref=summary_ref(st,wid); git(c,'update-ref','-d',sref); cws.recover(w); assert git(c,'rev-parse',sref).stdout.strip()==ms[wid]['result_sha']; record('summary_repair',wid)
             elif op=='post_collect_change' and collected:
                 wid=rng.choice(collected); repo=Path(ms[wid]['path'])
                 if repo.exists():

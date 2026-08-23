@@ -38,7 +38,7 @@ mv "$INSTALL_ROOT.new" "$INSTALL_ROOT"
 
 cat > "$BIN_DIR/clonegrown" <<EOF
 #!/bin/sh
-exec python3 "$INSTALL_ROOT/clonegrown_cli.py" "\$@"
+PYTHONPATH="$INSTALL_ROOT\${PYTHONPATH:+:\$PYTHONPATH}" exec python3 -m clonegrown "\$@"
 EOF
 chmod +x "$BIN_DIR/clonegrown"
 

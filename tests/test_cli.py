@@ -9,7 +9,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-import clonegrown_cli
+from clonegrown import cli as clonegrown_cli
 
 
 def run_git(repo: Path, *args: str) -> str:
