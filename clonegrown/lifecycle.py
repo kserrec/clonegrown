@@ -149,17 +149,23 @@ def _wait_for_existing(ws: Path, worker_id: int, timeout_seconds: float) -> dict
         time.sleep(0.05)
 
 
-def _advance_spawn(ws: Path, worker_id: int, status: str,
-                   worktree_admin: Path | None = None) -> tuple[WorkerRecord, WorkspaceState, Path]:
+def _advance_spawn(ws: Path, worker_id: int, status: str) -> tuple[WorkerRecord, WorkspaceState, Path]:
     """Record the next spawn stage and re-verify canonical, under the workspace lock."""
     with workspace_lock(ws):
         worker = WorkerRecord.load(ws, worker_id)
         worker.take_ownership(status)
-        if worktree_admin is not None:
-            worker.worktree_admin = str(worktree_admin)
         worker.save(ws)
         state = WorkspaceState.load(ws)
         return worker, state, state.verify_canonical()
+
+
+def _record_worktree_admin(ws: Path, worker_id: int, admin: Path) -> None:
+    """Persist the admin directory as soon as Git creates it, so a crash before the next
+    stage still leaves recovery something to remove."""
+    with workspace_lock(ws):
+        worker = WorkerRecord.load(ws, worker_id)
+        worker.worktree_admin = str(admin)
+        worker.save(ws)
 
 
 def _check_out_base(stage_repo: Path, worker: WorkerRecord) -> None:
@@ -277,9 +283,9 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
             shutil.rmtree(stage, ignore_errors=True)
             stage.mkdir(parents=True, exist_ok=False)
             stage_repo = stage / str(state.repo_name)
-            admin: Path | None = None
             if mode == "worktree":
                 admin = add_worktree(canonical, stage_repo, str(worker.base_sha))
+                _record_worktree_admin(ws, worker_id, admin)
             else:
                 clone_cmd: list[str | Path] = [GIT_BIN, "clone", "--no-checkout"]
                 if strong:
@@ -288,7 +294,7 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
             failpoint("spawn.after_clone")
             git(stage_repo, "cat-file", "-e", f"{worker.base_sha}^{{commit}}")
 
-            worker, state, canonical = _advance_spawn(ws, worker_id, WorkerStatus.CONFIGURING, worktree_admin=admin)
+            worker, state, canonical = _advance_spawn(ws, worker_id, WorkerStatus.CONFIGURING)
             if mode == "worktree":
                 details = _provision_worktree(canonical, stage_repo, worker)
             else:

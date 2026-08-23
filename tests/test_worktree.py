@@ -194,6 +194,16 @@ class WorktreeWorkerTests(unittest.TestCase):
         self.assert_forgotten(worker)
         self.assertEqual(self.worktree_paths(), {str(self.repo.resolve())})
 
+    def test_crash_right_after_worktree_add_leaves_no_admin_dir(self) -> None:
+        # Git has created .git/worktrees/<name> but nothing else has happened yet.
+        p = self.cli_process(self.repo, "spawn", "crash after add", "--worktree", "--request-id", "a",
+                             env={"CWS_FAILPOINT": "spawn.after_clone"})
+        self.assertEqual(p.returncode, 88, p.stderr)
+        recover(self.ws)
+        worker = status(self.ws)["workers"][0]
+        self.assertEqual(worker["status"], "spawn_failed")
+        self.assert_forgotten(worker)
+
     def test_crash_during_discard_is_recovered(self) -> None:
         worker = spawn(self.ws, "HEAD", "discard crash", strong=False, mode="worktree")
         sha = commit(Path(worker["path"]), "w.txt")
