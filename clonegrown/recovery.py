@@ -12,12 +12,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .core import CWSError, atomic_json, git
+from .core import CWSError, atomic_json, file_lock, git
 from .state import (
     ACTIVE_SPAWN, base_ref, clear_owner, final_worker_root, process_alive, read_state,
-    summary_ref, verify_canonical, worker_lock_path, workspace_lock, ws_paths,
+    summary_ref, verify_canonical, worker_lock_path, worker_mode, workspace_lock, ws_paths,
 )
-from .core import file_lock
+from .repository import delete_branch, remove_worktree_admin
 from .worker import load_worker_state, verify_worker, worker_snapshot
 
 Report = dict[str, Any]
@@ -71,6 +71,14 @@ class _Recovery:
     def drop_base_pin(self) -> None:
         git(self.canonical, "update-ref", "-d", base_ref(self.state, self.worker_id), check=False)
 
+    def forget_worktree(self) -> None:
+        """After a worktree worker's directory is gone, drop its admin dir and task branch."""
+        if worker_mode(self.meta) != "worktree":
+            return
+        if self.meta.get("worktree_admin"):
+            remove_worktree_admin(self.canonical, Path(self.meta["worktree_admin"]))
+        delete_branch(self.canonical, self.meta["branch"])
+
     def run(self) -> None:
         status = self.meta["status"]
         alive = process_alive(self.meta.get("owner_pid"), self.meta.get("owner_start"))
@@ -94,6 +102,8 @@ class _Recovery:
         # A crash after the atomic publish but before ready metadata can be completed safely.
         try:
             if final_repo.exists():
+                if worker_mode(meta) == "worktree":
+                    git(self.canonical, "worktree", "repair", final_repo, check=False)
                 verify_worker(self.state, meta)
                 if worker_snapshot(self.state, meta)["head"] == meta["base_sha"]:
                     details = meta.pop("pending_spawn_details", {})
@@ -116,6 +126,7 @@ class _Recovery:
                 self.mark_broken("unverified path exists after interrupted spawn", "spawn-broken-unverified-path")
                 return
         self.drop_base_pin()
+        self.forget_worktree()
         self.save(status="spawn_failed", failed=time.time(), error="interrupted spawn recovered")
         self.report("spawn-cleaned")
 
@@ -144,6 +155,7 @@ class _Recovery:
         final_root = final_worker_root(self.ws, self.worker_id)
         intent = meta.get("discard_intent", "discarded")
         if not final_root.exists():
+            self.forget_worktree()
             self.save(status=intent, discarded=time.time())
             self.report("discard-finished")
         elif intent == "abandoned":
@@ -152,6 +164,7 @@ class _Recovery:
             try:
                 verify_worker(self.state, meta)
                 shutil.rmtree(final_root)
+                self.forget_worktree()
                 self.save(status="abandoned", discarded=time.time())
                 self.report("abandon-finished")
             except Exception as exc:
@@ -193,6 +206,8 @@ class _Recovery:
                 self.report("tombstone-path-cleaned")
             except Exception:
                 self.report("tombstone-unverified-path-left")
+        if not final_root.exists():
+            self.forget_worktree()
         self.drop_base_pin()
 
 

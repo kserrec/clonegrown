@@ -55,18 +55,41 @@ Deliberate, small departures from "move only", each checked by the suite:
   repositories has not been remeasured; see product decision 1.
 - No runtime dependency was added, and none is planned.
 
-## Product decisions after the refactor
+## Worktree mode (decided and built, 2026-08-22)
 
-These are intentionally not implementation phases yet. Each requires an
-explicit decision and its own plan before code changes.
+Decision 2 below was resolved: Clonegrown is a **workspace manager**, not a
+clone-only tool. The custody lifecycle (idempotent spawn, verified collection,
+guarded deletion, recovery) was the most proven and most broadly useful part
+of the project and is not inherently about clones, so it now runs over either
+kind of worker:
+
+- `clonegrown spawn --worktree` creates a linked worktree worker;
+  `spawn(..., mode="worktree")` in the API. Clone remains the default.
+- Worker records carry `mode`; pre-existing records without it are clones and
+  still validate (the request-id digest includes `mode` only when it is not
+  `clone`, so old digests are unchanged).
+- Covered by `tests/test_worktree.py` (11 cases incl. crash at
+  `spawn.after_publish`, `spawn.after_checkout`, `discard.after_delete`); the
+  56-case clone suite is unchanged and still passes.
+- Documented in `ARCHITECTURE.md` ("Worker modes") and the README's
+  "Three kinds of worker" table.
+
+Not yet done for worktree mode: the adversarial campaign (symlink/tamper
+matrix, SIGKILL runs, fuzzer) has only been run against clone workers.
+Extending `tests/hardening_suite.py` to parametrize over mode is the next
+testing step.
+
+## Product decisions still open
+
+Each requires an explicit decision and its own plan before code changes.
 
 1. **Auxiliary-ref policy.** First rerun a ref-heavy benchmark against the
    current package. Then choose which remote-tracking refs workers truly need
    and whether to narrow the fetch, compact refs, or combine both. This can
    change offline worker semantics and cannot be smuggled into cleanup work.
-2. **Clone tool or workspace manager.** Decide whether Clonegrown remains a
-   clone-only tool or adds an explicit worktree mode. A worktree fallback would
-   expand the lifecycle and safety model substantially.
+2. **Clone tool or workspace manager.** Resolved: workspace manager; see
+   "Worktree mode" above. Remaining follow-up is test parity for worktree
+   workers.
 3. **Preflight recommendations.** Decide whether the CLI merely reports
    repository facts or recommends a mode. Any thresholds need new measurements
    across real repositories; the historical results from one machine are not a
@@ -89,5 +112,6 @@ explicit decision and its own plan before code changes.
    campaign artifacts. A current-only replacement harness must be named and
    reported as a new experiment.
 
-The next work is a product decision from the list above, each of which needs
-its own plan before code changes. None is in progress.
+The next executable work is **worktree test parity**: parametrize the
+hardening suite over worker mode and run the SIGKILL and fuzz campaigns with
+worktree workers. After that, the open product decisions above.

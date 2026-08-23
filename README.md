@@ -1,8 +1,8 @@
 # Clonegrown
 
-**Isolated Git clone workspaces for coding agents.**
+**Safe worker management for coding agents — as worktrees or as isolated clones.**
 
-Clonegrown gives autonomous coding agents ordinary, independent Git clones instead of linked worktrees, while keeping creation, collection, recovery, and cleanup deterministic.
+Clonegrown gives each agent task its own Git working directory (a *worker*) and manages the whole lifecycle so that nothing is created twice, nothing is deleted before its work is saved, and nothing is left half-done after a crash. A worker can be a linked worktree (fast, shares canonical's Git internals) or an independent clone (slower, shares nothing). You choose per task.
 
 > **Status:** alpha. The Git mechanics have been heavily adversarially tested on Linux. The CLI and installer are also exercised on macOS in CI.
 
@@ -107,41 +107,29 @@ Workers start from canonical `HEAD` by default, so Clonegrown does not assume yo
 clonegrown spawn "compare parser approach" --base feature/parser
 ```
 
-## Fast vs strong clones
-
-Normal workers use Git's efficient local clone behavior:
+## Three kinds of worker
 
 ```bash
-clonegrown spawn "add tests"
+clonegrown spawn "add tests" --worktree   # linked worktree: fastest, shares Git internals
+clonegrown spawn "add tests"              # clone (default): independent repo, shares object files
+clonegrown spawn "add tests" --strong     # clone with nothing shared at all
 ```
 
-For physical independence of Git object files:
+| | Separate files | Separate config, refs, stash, hooks | Separate object files | Spawn cost |
+|---|---|---|---|---|
+| `--worktree` | yes | no | no | near zero |
+| clone (default) | yes | yes | no | seconds |
+| `--strong` | yes | yes | yes | seconds + full copy |
 
-```bash
-clonegrown spawn "risky Git experiment" --strong
-```
+The lifecycle — idempotent spawn, verified collection, guarded deletion, crash recovery — is identical for all three. Only the isolation differs.
 
-The default fast mode still isolates Git config, refs, remotes, stashes, indexes, reflogs, and ordinary repository state. `--strong` additionally avoids local object sharing, which can cost substantial disk space when Git history is large.
+**Choose a worktree** when history is very large, tasks are short, or you create and destroy many workers quickly. Everything the agent does to Git config, branches, stashes, or hooks is visible to canonical and to every other worktree; Clonegrown records a compatibility warning on every worktree worker to say so.
 
-## Why clones?
+**Choose a clone** when several autonomous agents will run for minutes or longer, when a task involves risky Git operations (history rewriting, `gc`, hook or config changes), or when one agent's Git mistakes must not be able to reach another. In the stress fixture, eight concurrent `git gc --prune=now` runs succeeded 8/8 in clones and 1/8 in linked worktrees.
 
-Worktrees are extremely efficient, but they deliberately share repository state. That can include repo-local config, remotes, refs, stashes, and object maintenance.
+**Choose `--strong`** only when physical independence of object files is specifically required; with a large history it costs a full copy.
 
-For autonomous agents, reducing shared mutable Git state can be worth a small workspace-creation cost. Clonegrown is therefore most promising when:
-
-- you run a small or moderate number of autonomous agents;
-- tasks last minutes or longer rather than seconds;
-- the repository's Git history is not enormous;
-- isolation between workers matters more than absolute spawn speed.
-
-Worktrees are usually the better fit when:
-
-- `.git` history is very large;
-- you create and destroy many workers rapidly;
-- tasks are extremely short;
-- minimizing disk and spawn overhead dominates isolation concerns.
-
-Clonegrown does **not** claim clones are always better.
+Clonegrown does **not** claim clones are always better. It gives you the lifecycle either way and the evidence to pick.
 
 ## Safety model
 
@@ -149,13 +137,14 @@ Clonegrown's lifecycle is deliberately stricter than ad-hoc local cloning:
 
 - workers start from an explicit resolved commit;
 - worker allocation is serialized under concurrency;
-- the local canonical source is configured as non-pushable;
+- the local canonical source is configured as non-pushable (clone workers);
+- a discarded worktree worker's admin entry and task branch are removed from canonical, never via a blanket `git worktree prune`;
 - collection preserves and verifies a worker result before cleanup;
 - deletion is blocked until work is collected or explicitly abandoned;
 - interrupted lifecycle operations can be recovered;
 - helper Git calls strip hostile process-level `GIT_*` overrides.
 
-Clonegrown provides **Git-state isolation, not an OS sandbox**. An unrestricted process can still deliberately traverse into sibling directories.
+Clonegrown provides **Git-state isolation, not an OS sandbox**. An unrestricted process can still deliberately traverse into sibling directories. Worktree workers share Git state with canonical by design; the custody guarantees hold, the isolation ones do not.
 
 ## Agent skill
 
@@ -171,7 +160,7 @@ The included [`research/REPORT.md`](research/REPORT.md), [`research/REPRODUCE.md
 
 Highlights from the frozen candidate include:
 
-- 56/56 named deterministic/adversarial tests passed;
+- 56/56 named deterministic/adversarial tests passed (clone workers); worktree workers are covered by `tests/test_worktree.py`, including crash recovery;
 - 11/11 explicit collection/deletion crash points recovered;
 - 24/24 randomized lifecycle seeds passed across 1,000 generated operations;
 - process-kill campaigns during spawn, collection, and deletion recovered successfully;
@@ -190,7 +179,7 @@ The same operations are importable, with no dependencies beyond the standard lib
 from clonegrown import init_workspace, spawn, collect, discard, recover, status, CWSError
 ```
 
-Every function takes the workspace path and returns the same dictionaries the CLI prints (the CLI additionally redacts internal identity fields). [`ARCHITECTURE.md`](ARCHITECTURE.md) describes the package layout, on-disk state, and recovery model.
+Every function takes the workspace path and returns the same dictionaries the CLI prints (the CLI additionally redacts internal identity fields). `spawn(..., mode="worktree")` selects a worktree worker. [`ARCHITECTURE.md`](ARCHITECTURE.md) describes the package layout, on-disk state, and recovery model.
 
 ## Requirements and limitations
 

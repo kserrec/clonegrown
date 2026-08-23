@@ -19,12 +19,13 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .core import (
-    CWSError, atomic_json, file_lock, git_common_dir, lexical_abs, load_json, object_format,
+    CWSError, atomic_json, file_lock, git_common_dir, git_dir, lexical_abs, load_json, object_format,
     validate_primary_repo,
 )
 
 SCHEMA = 3
 RESERVED_SOURCE_PREFIX = "cws-source"
+WORKER_MODES = {"clone", "worktree"}
 
 ACTIVE_SPAWN = {"allocated", "cloning", "configuring", "publishing"}
 ACTIVE_COLLECT = {"collecting"}
@@ -84,7 +85,9 @@ def canonical_marker_path(canonical: Path, workspace_id: str) -> Path:
 
 
 def worker_marker_path(repo: Path) -> Path:
-    return git_common_dir(repo) / "cws-worker.json"
+    # The per-repository Git directory: for a clone that is .git itself; for a
+    # linked worktree it is the private .git/worktrees/<name> admin directory.
+    return git_dir(repo) / "cws-worker.json"
 
 
 def validate_control_dir(ws: Path, require_state: bool = False) -> None:
@@ -155,8 +158,16 @@ def worker_branch(state: dict[str, Any], worker_id: int, task: str) -> str:
     return f"agent/{state['workspace_id']}/{worker_id}-{sanitize_task(task)}"
 
 
-def params_hash(base: str, task: str, strong: bool) -> str:
-    raw = json.dumps({"base": base, "task": task, "strong": bool(strong)}, sort_keys=True, separators=(",", ":"))
+def worker_mode(meta: dict[str, Any]) -> str:
+    """Records written before worktree mode existed carry no ``mode`` and are clones."""
+    return meta.get("mode", "clone")
+
+
+def params_hash(base: str, task: str, strong: bool, mode: str = "clone") -> str:
+    params: dict[str, Any] = {"base": base, "task": task, "strong": bool(strong)}
+    if mode != "clone":
+        params["mode"] = mode  # omitted for clones so pre-worktree records still verify
+    raw = json.dumps(params, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -179,8 +190,21 @@ def validate_worker_meta(ws: Path, state: dict[str, Any], worker_id: int, meta: 
         raise CWSError("worker task/base metadata is malformed")
     if meta.get("branch") != worker_branch(state, worker_id, meta["task"]):
         raise CWSError("worker branch does not match deterministic assignment")
-    if meta.get("params_hash") != params_hash(meta["base"], meta["task"], bool(meta.get("strong"))):
+    mode = worker_mode(meta)
+    if mode not in WORKER_MODES:
+        raise CWSError(f"unknown worker mode: {mode!r}")
+    if mode == "worktree" and meta.get("strong"):
+        raise CWSError("worktree worker cannot be strong")
+    if meta.get("params_hash") != params_hash(meta["base"], meta["task"], bool(meta.get("strong")), mode):
         raise CWSError("worker parameter digest mismatch")
+    admin = meta.get("worktree_admin")
+    if admin is not None:
+        if mode != "worktree" or not isinstance(admin, str):
+            raise CWSError("worktree admin path is malformed")
+        admin_path = lexical_abs(admin)
+        worktrees = lexical_abs(state["canonical_git_dir"]) / "worktrees"
+        if admin_path.parent != worktrees or admin_path.name in {"", ".", ".."}:
+            raise CWSError("worktree admin path is outside the canonical worktrees directory")
     if lexical_abs(meta.get("path", "")) != expected_worker_repo(ws, state, worker_id):
         raise CWSError("worker metadata path does not match its allocated slot")
     if lexical_abs(meta.get("stage_root", "")) != lexical_abs(staging_root(ws, worker_id, token)):

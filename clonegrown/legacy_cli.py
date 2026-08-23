@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base", default="main")
     p.add_argument("--task", required=True)
     p.add_argument("--fast", action="store_true")
+    p.add_argument("--worktree", action="store_true")
     p.add_argument("--request-id")
     p.add_argument("--wait-seconds", type=float, default=120.0)
     p = sub.add_parser("collect")
@@ -51,7 +52,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "init":
             result = init_workspace(Path(args.canonical), Path(args.workspace))
         elif args.command == "spawn":
-            result = spawn(Path(args.workspace), args.base, args.task, not args.fast, args.request_id, args.wait_seconds)
+            result = spawn(Path(args.workspace), args.base, args.task, not args.fast and not args.worktree,
+                           args.request_id, args.wait_seconds, mode="worktree" if args.worktree else "clone")
         elif args.command == "collect":
             result = collect(Path(args.workspace), args.id, args.allow_rewrite)
         elif args.command == "discard":

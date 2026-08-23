@@ -1,15 +1,15 @@
 ---
 name: clonegrown
-description: Use Clonegrown to create and manage isolated Git clone workspaces for parallel or delegated coding-agent work when clone isolation is a better fit than linked Git worktrees.
+description: Use Clonegrown to create, collect, recover, and delete per-task Git working directories (linked worktrees or isolated clones) for parallel or delegated coding-agent work without losing or duplicating work.
 ---
 
 # Clonegrown
 
-Use Clonegrown when work needs an isolated Git workspace and independent-clone isolation is a better fit than a linked worktree.
+Use Clonegrown whenever a task needs its own Git working directory. It manages the whole lifecycle — spawn, collect, discard, recover — so work is never duplicated, deleted before it is saved, or left half-created after a crash.
 
-Good fits include a small or moderate number of autonomous workers, ordinary-sized repositories, tasks lasting minutes or longer, risky Git experimentation, and situations where reducing shared Git state is valuable.
+Each worker is either a **linked worktree** (`--worktree`: near-instant, shares canonical's config, refs, stash, and hooks) or an **independent clone** (default: seconds to create, shares nothing; `--strong` additionally copies object files).
 
-Prefer native worktrees when repository history is enormous, worker creation/destruction is extremely frequent, tasks are very short, or spawn/storage efficiency clearly matters more than Git-state isolation.
+Choose `--worktree` when history is enormous, tasks are short, or workers are created and destroyed rapidly. Choose a clone when several autonomous workers will run for minutes or longer, when the task involves risky Git operations, or when one worker's Git mistakes must not reach another.
 
 ## Core rule
 
@@ -29,7 +29,7 @@ Clonegrown normally discovers its workspace automatically. Do not pass explicit 
 
    `clonegrown spawn "<short task description>"`
 
-   The worker starts from canonical `HEAD` unless `--base <ref-or-sha>` is supplied. Fast local cloning is the default. Use `--strong` only when physical independence of Git object files is specifically required.
+   The worker starts from canonical `HEAD` unless `--base <ref-or-sha>` is supplied. Add `--worktree` for a linked worktree, or `--strong` for a clone with nothing shared. Pass `--request-id <stable-id>` when a spawn may be retried, so a retry returns the same worker.
 
 3. Work only inside the returned worker repository. Treat that repository as disposable and exclusively owned by this task.
 
@@ -62,8 +62,8 @@ Clonegrown normally discovers its workspace automatically. Do not pass explicit 
 - Never reuse a worker for an unrelated task.
 - Never intentionally give two tasks the same worker branch.
 - Never push to Clonegrown's local canonical-source remote; the CLI configures it as non-pushable.
+- In a worktree worker, never change Git config, delete branches, or touch the stash you did not create: those are shared with canonical and every other worktree.
 - Do not treat clone isolation as an OS security sandbox.
-- Prefer the default fast clone mode for ordinary application repositories.
 - Use `--strong` sparingly because large Git histories can make fully independent clones expensive.
 
 ## Result handoff

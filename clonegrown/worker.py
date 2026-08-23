@@ -8,10 +8,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .core import CWSError, atomic_json, git, git_common_dir, git_dir, git_path, load_json, object_format, repo_root
+from .core import CWSError, atomic_json, git, git_common_dir, git_dir, git_path, lexical_abs, load_json, object_format, repo_root
 from .state import (
     SCHEMA, TERMINAL_SPAWN_FAILURE, base_ref, final_worker_root, owner_fields, params_hash, read_state, request_path, staging_root, validate_worker_meta,
-    verify_canonical, worker_branch, worker_marker_path, worker_meta_path, workspace_lock, write_state,
+    verify_canonical, worker_branch, worker_marker_path, worker_meta_path, worker_mode, workspace_lock, write_state,
 )
 
 # Git-directory entries whose presence means a merge/rebase/etc. is mid-flight.
@@ -51,8 +51,20 @@ def verify_worker(state: dict[str, Any], meta: dict[str, Any], require_exists: b
             raise CWSError(f"{label} is not a directory")
     if repo_root(repo) != repo.resolve():
         raise CWSError("worker repository root changed")
-    if git_dir(repo) != git_common_dir(repo):
-        raise CWSError("worker was replaced with a linked worktree")
+    private, common = git_dir(repo), git_common_dir(repo)
+    if worker_mode(meta) == "clone":
+        if private != common:
+            raise CWSError("worker was replaced with a linked worktree")
+    else:
+        if private == common:
+            raise CWSError("worktree worker was replaced with an independent repository")
+        if common != Path(state["canonical_git_dir"]).resolve():
+            raise CWSError("worktree worker is not linked to the canonical repository")
+        if private.parent != common / "worktrees":
+            raise CWSError("worktree worker admin directory is not where Git keeps it")
+        admin = meta.get("worktree_admin")
+        if admin is not None and lexical_abs(admin) != private:
+            raise CWSError("worktree worker admin directory changed")
     marker = load_json(worker_marker_path(repo))
     checks = {
         "workspace_id": state["workspace_id"],
@@ -110,7 +122,7 @@ def load_worker_state(ws: Path, worker_id: int) -> tuple[dict[str, Any], dict[st
 
 
 def allocate_spawn(ws: Path, base: str, task: str, strong: bool,
-                   request_id: str | None) -> tuple[dict[str, Any], bool]:
+                   request_id: str | None, mode: str = "clone") -> tuple[dict[str, Any], bool]:
     """Reserve a worker ID, pin its base commit, and record ``allocated`` metadata.
 
     Returns ``(meta, created)``. With a request ID that already maps to a
@@ -119,7 +131,7 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool,
     with workspace_lock(ws):
         state = read_state(ws)
         canonical = verify_canonical(state)
-        ph = params_hash(base, task, strong)
+        ph = params_hash(base, task, strong, mode)
         if request_id:
             rp = request_path(ws, request_id)
             if rp.exists():
@@ -127,7 +139,7 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool,
                 if req.get("request_id") != request_id:
                     raise CWSError("request index hash collision or corruption")
                 if req.get("params_hash") != ph:
-                    raise CWSError("request ID was reused with different base/task/isolation parameters")
+                    raise CWSError("request ID was reused with different base/task/isolation/mode parameters")
                 old = load_json(worker_meta_path(ws, int(req["worker_id"])))
                 if old.get("status") not in TERMINAL_SPAWN_FAILURE:
                     return old, False
@@ -154,6 +166,7 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool,
             "base": base,
             "base_sha": base_sha,
             "strong": bool(strong),
+            "mode": mode,
             "task": task,
             "request_id": request_id,
             "params_hash": ph,

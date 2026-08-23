@@ -71,8 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task", dest="task_flag", help="task description (alternate form)")
     workspace_option(p)
     p.add_argument("--base", default="HEAD", help="base ref or commit (default: HEAD)")
-    p.add_argument("--strong", action="store_true",
-                   help="disable Git's local object sharing for physical object independence")
+    isolation = p.add_mutually_exclusive_group()
+    isolation.add_argument("--strong", action="store_true",
+                           help="independent clone with no object sharing at all")
+    isolation.add_argument("--worktree", action="store_true",
+                           help="linked worktree sharing canonical's Git internals (fastest, least isolated)")
     p.add_argument("--request-id", help="stable id for idempotent repeated spawn requests")
     p.add_argument("--wait-seconds", type=float, default=120.0,
                    help="how long to wait for an in-flight spawn with the same request id")
@@ -110,7 +113,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not task:
                 parser.error("spawn requires a task, e.g. `clonegrown spawn \"fix auth race\"`")
             result = spawn(resolve_workspace(args.workspace), args.base, task,
-                           args.strong, args.request_id, args.wait_seconds)
+                           args.strong, args.request_id, args.wait_seconds,
+                           mode="worktree" if args.worktree else "clone")
         elif args.command == "collect":
             result = collect(resolve_workspace(args.workspace), args.id, args.allow_rewrite)
         elif args.command == "discard":

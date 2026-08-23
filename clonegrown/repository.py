@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
+import tempfile
 from pathlib import Path
 
-from .core import CWSError, git, git_common_dir, git_path
+from .core import CWSError, git, git_common_dir, git_dir, git_path, lexical_abs
 from .state import RESERVED_SOURCE_PREFIX
 
 # Local config that describes *this* repository's shape rather than user intent;
@@ -190,9 +192,46 @@ def checkout_without_hooks(repo: Path, branch: str, base_sha: str) -> None:
     The worker keeps its configured hooks for the agent's later commands; only
     this provisioning checkout is suppressed.
     """
-    empty = git_common_dir(repo) / "cws-provisioning-empty-hooks"
-    empty.mkdir(parents=True, exist_ok=True)
-    try:
+    with tempfile.TemporaryDirectory(prefix="cws-empty-hooks-") as empty:
         git(repo, "-c", f"core.hooksPath={empty}", "checkout", "-b", branch, base_sha)
-    finally:
-        shutil.rmtree(empty, ignore_errors=True)
+
+
+# --- linked worktrees --------------------------------------------------------
+
+WORKTREE_SHARING_WARNING = (
+    "worktree worker shares canonical Git configuration, remotes, refs, stash, and hooks"
+)
+
+
+def add_worktree(canonical: Path, path: Path, base_sha: str) -> Path:
+    """Create a detached, unpopulated linked worktree; return its private admin directory."""
+    git(canonical, "worktree", "add", "--no-checkout", "--detach", path, base_sha)
+    return git_dir(path)
+
+
+def repair_worktree(canonical: Path, path: Path) -> None:
+    """Fix Git's back-pointer after a worktree directory has been renamed."""
+    git(canonical, "worktree", "repair", path)
+
+
+def remove_worktree_admin(canonical: Path, admin: Path) -> None:
+    """Delete one worktree's admin directory so Git forgets it.
+
+    Deliberately not ``git worktree prune``: that would also drop any of the
+    user's own worktrees whose directories happen to be unreachable.
+    """
+    admin = lexical_abs(admin)
+    if admin.parent != git_common_dir(canonical) / "worktrees":
+        raise CWSError("refusing to delete a path outside the worktrees directory")
+    try:
+        mode = os.lstat(admin).st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise CWSError("worktree admin path is not a directory")
+    shutil.rmtree(admin, ignore_errors=True)
+
+
+def delete_branch(canonical: Path, branch: str) -> bool:
+    """Remove a worker's task branch from the shared refs; False if it was already gone."""
+    return git(canonical, "branch", "-D", branch, check=False).returncode == 0

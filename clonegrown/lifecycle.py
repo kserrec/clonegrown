@@ -18,14 +18,15 @@ from typing import Any
 from .core import GIT_BIN, CWSError, atomic_json, failpoint, file_lock, git, git_common_dir, inside, load_json, object_format, run, validate_primary_repo
 from .recovery import recover
 from .repository import (
-    checkout_without_hooks, copy_auxiliary_refs, copy_info_files, copy_local_config,
-    copy_remote_config, copy_sparse_policy, detach_alternates_if_needed, private_hook_warnings,
+    WORKTREE_SHARING_WARNING, add_worktree, checkout_without_hooks, copy_auxiliary_refs, copy_info_files,
+    copy_local_config, copy_remote_config, copy_sparse_policy, delete_branch, detach_alternates_if_needed,
+    private_hook_warnings, remove_worktree_admin, repair_worktree,
 )
 from .state import (
-    ACTIVE_COLLECT, ACTIVE_DISCARD, ACTIVE_SPAWN, SCHEMA, TERMINAL_SPAWN_FAILURE, base_ref,
+    ACTIVE_COLLECT, ACTIVE_DISCARD, ACTIVE_SPAWN, SCHEMA, TERMINAL_SPAWN_FAILURE, WORKER_MODES, base_ref,
     canonical_marker_path, clear_owner, final_worker_root, immutable_result_ref, owner_fields,
     process_alive, read_state, summary_ref, validate_state, verify_canonical, worker_lock_path,
-    worker_meta_path, workspace_lock, write_state, ws_paths,
+    worker_meta_path, worker_mode, workspace_lock, write_state, ws_paths,
 )
 from .worker import allocate_spawn, load_worker_state, verify_worker, worker_snapshot, write_worker_marker
 
@@ -117,17 +118,37 @@ def _wait_for_existing(ws: Path, worker_id: int, timeout_seconds: float) -> dict
         time.sleep(0.05)
 
 
-def _advance_spawn(ws: Path, worker_id: int, status: str) -> tuple[dict[str, Any], dict[str, Any], Path]:
+def _advance_spawn(ws: Path, worker_id: int, status: str,
+                   worktree_admin: Path | None = None) -> tuple[dict[str, Any], dict[str, Any], Path]:
     """Record the next spawn stage and re-verify canonical under the workspace lock."""
     with workspace_lock(ws):
         current = load_json(worker_meta_path(ws, worker_id))
         current.update({"status": status, **owner_fields()})
+        if worktree_admin is not None:
+            current["worktree_admin"] = str(worktree_admin)
         atomic_json(worker_meta_path(ws, worker_id), current)
         state = read_state(ws)
         return current, state, verify_canonical(state)
 
 
-def _provision(canonical: Path, stage_repo: Path, meta: dict[str, Any], strong: bool) -> dict[str, Any]:
+def _provision_worktree(canonical: Path, stage_repo: Path, meta: dict[str, Any]) -> dict[str, Any]:
+    """Check out the base in a staged worktree; everything else is shared with canonical."""
+    sparse = copy_sparse_policy(canonical, stage_repo)
+    checkout_without_hooks(stage_repo, meta["branch"], meta["base_sha"])
+    write_worker_marker(stage_repo, meta)
+    if git(stage_repo, "rev-parse", "HEAD").stdout.strip() != meta["base_sha"]:
+        raise CWSError("worker checkout differs from immutable requested base")
+    return {
+        "source_remote": None,
+        "alternates_detached": False,
+        "copied_local_config": [],
+        "copied_sparse_checkout": sparse,
+        "copied_auxiliary_refs": {},
+        "compatibility_warnings": [WORKTREE_SHARING_WARNING],
+    }
+
+
+def _provision_clone(canonical: Path, stage_repo: Path, meta: dict[str, Any], strong: bool) -> dict[str, Any]:
     """Configure the staged clone and check out the base; return the spawn details."""
     detached, warnings = detach_alternates_if_needed(stage_repo, strong)
     source_remote = copy_remote_config(canonical, stage_repo)
@@ -170,15 +191,23 @@ def _record_spawn_failure(ws: Path, worker_id: int, exc: BaseException) -> None:
 
 
 def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
-          request_id: str | None = None, wait_seconds: float = 120.0) -> dict[str, Any]:
-    """Create a worker clone of ``base`` and return its ``ready`` metadata.
+          request_id: str | None = None, wait_seconds: float = 120.0,
+          mode: str = "clone") -> dict[str, Any]:
+    """Create a worker at ``base`` and return its ``ready`` metadata.
 
-    Stages: allocated -> cloning -> configuring -> publishing -> ready. The
-    clone is built under ``.cws/staging`` and moved into its numbered slot with
-    one atomic rename, so a visible worker directory is always complete.
+    ``mode`` is ``"clone"`` (an independent repository; ``strong`` disables
+    object sharing) or ``"worktree"`` (a linked worktree sharing canonical's
+    Git internals). Stages: allocated -> cloning -> configuring -> publishing
+    -> ready. The worker is built under ``.cws/staging`` and moved into its
+    numbered slot with one atomic rename, so a visible worker directory is
+    always complete.
     """
+    if mode not in WORKER_MODES:
+        raise CWSError(f"unknown worker mode: {mode!r}")
+    if mode == "worktree" and strong:
+        raise CWSError("a worktree worker shares canonical's objects; --strong does not apply")
     ws = ws_path.resolve()
-    meta, created = allocate_spawn(ws, base, task, strong, request_id)
+    meta, created = allocate_spawn(ws, base, task, strong, request_id, mode)
     if not created:
         return _wait_for_existing(ws, int(meta["id"]), wait_seconds)
     worker_id = int(meta["id"])
@@ -192,15 +221,22 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
             shutil.rmtree(stage, ignore_errors=True)
             stage.mkdir(parents=True, exist_ok=False)
             stage_repo = stage / state["repo_name"]
-            cmd: list[str | Path] = [GIT_BIN, "clone", "--no-checkout"]
-            if strong:
-                cmd.append("--no-hardlinks")
-            run([*cmd, canonical, stage_repo], timeout=None)
+            admin: Path | None = None
+            if mode == "worktree":
+                admin = add_worktree(canonical, stage_repo, meta["base_sha"])
+            else:
+                cmd: list[str | Path] = [GIT_BIN, "clone", "--no-checkout"]
+                if strong:
+                    cmd.append("--no-hardlinks")
+                run([*cmd, canonical, stage_repo], timeout=None)
             failpoint("spawn.after_clone")
             git(stage_repo, "cat-file", "-e", f"{meta['base_sha']}^{{commit}}")
 
-            meta, state, canonical = _advance_spawn(ws, worker_id, "configuring")
-            spawn_details = _provision(canonical, stage_repo, meta, strong)
+            meta, state, canonical = _advance_spawn(ws, worker_id, "configuring", worktree_admin=admin)
+            if mode == "worktree":
+                spawn_details = _provision_worktree(canonical, stage_repo, meta)
+            else:
+                spawn_details = _provision_clone(canonical, stage_repo, meta, strong)
             failpoint("spawn.after_checkout")
 
             with workspace_lock(ws):
@@ -216,6 +252,10 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
                     raise CWSError("worker final path already exists")
                 os.replace(stage, final)
                 failpoint("spawn.after_publish")
+                if mode == "worktree":
+                    # The rename moved the worktree; Git's pointer back to it is now stale.
+                    repair_worktree(canonical, final / state["repo_name"])
+                failpoint("spawn.after_repair")
                 current.update({"status": "ready", "ready": time.time(), **spawn_details})
                 current.pop("pending_spawn_details", None)
                 clear_owner(current)
@@ -231,7 +271,21 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
                 _record_spawn_failure(ws, worker_id, exc)
             if not final_worker_root(ws, worker_id).exists():
                 shutil.rmtree(stage, ignore_errors=True)
+                with contextlib.suppress(Exception):
+                    _forget_worktree(ws, worker_id)
             raise
+
+
+def _forget_worktree(ws: Path, worker_id: int) -> None:
+    """Remove a worktree worker's admin directory and task branch from canonical."""
+    state = read_state(ws)
+    canonical = verify_canonical(state)
+    meta = load_json(worker_meta_path(ws, worker_id))
+    if worker_mode(meta) != "worktree":
+        return
+    if meta.get("worktree_admin"):
+        remove_worktree_admin(canonical, Path(meta["worktree_admin"]))
+    delete_branch(canonical, meta["branch"])
 
 
 # --- collect -----------------------------------------------------------------
@@ -380,6 +434,10 @@ def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = 
         failpoint("discard.after_delete")
         with workspace_lock(ws):
             state, current, canonical = load_worker_state(ws, worker_id)
+            if worker_mode(current) == "worktree":
+                if current.get("worktree_admin"):
+                    remove_worktree_admin(canonical, Path(current["worktree_admin"]))
+                delete_branch(canonical, current["branch"])
             current["status"] = current.get("discard_intent", "discarded")
             current["discarded"] = time.time()
             clear_owner(current)
