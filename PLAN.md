@@ -128,5 +128,39 @@ Each requires an explicit decision and its own plan before code changes.
    campaign artifacts. A current-only replacement harness must be named and
    reported as a new experiment.
 
-Worktree test parity is done. The next work is one of the open product
-decisions above; none is in progress.
+## Maintainability pass (2026-08-23)
+
+A fresh read of the package after the worktree work found no logic defects
+but plenty of generated-code drift: two product names, stale help text,
+string-keyed dicts as the data model, pieces living in the wrong module
+with lazy imports to compensate, duplicated guards, a second CLI kept only
+for the harnesses, and an output shape nobody had designed. Five phases,
+each verified by the full campaign in both modes:
+
+1. Product strings and names (`ClonegrownError`, `PROTOCOL_NAME`,
+   `CLONEGROWN_GIT`, `--help` text).
+2. `WorkerRecord` / `WorkspaceState` dataclasses; `WorkerStatus` owns the
+   state machine.
+3. Each piece in its home: liveness in core, worktree removal in worker,
+   repository.py pure Git; one rollback guard; no lazy imports.
+4. `clonegrown/legacy_cli.py` deleted; `tests/legacy_cli.py` translates the
+   harnesses' positional form onto the real CLI. Worktree provisioning no
+   longer rewrites shared sparse config.
+5. A documented CLI output contract (ARCHITECTURE.md "Command output"),
+   pinned by `test_output_contract`.
+
+Deliberately kept: `params_hash` includes `mode` only for non-clone
+workers. Removing that needs a schema bump plus a migration of every v3
+record and request-index entry — more machinery than the one-line
+conditional it would replace. Also kept: `tests/hardening_suite.py`'s
+one-liner style; it is the evidence base and rewriting it risks changing
+what it tests.
+
+Measured, not fixed: each spawn makes ~64 Git subprocess calls, 17 of them
+`rev-parse --git-common-dir`, because canonical is fully re-verified five
+times per spawn under the workspace lock. That is what makes eight parallel
+spawns ~4× (clone) to ~6× (worktree) one spawn. Caching the verification
+within one transaction is the obvious follow-up.
+
+The next work is one of the open product decisions above; none is in
+progress.

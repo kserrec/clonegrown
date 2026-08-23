@@ -109,6 +109,38 @@ class ClonegrownCliTests(unittest.TestCase):
             self.assertEqual(discarded["status"], "discarded")
             self.assertFalse(worker_repo.exists())
 
+    READY_WORKER_KEYS = {
+        "id", "status", "mode", "strong", "task", "base", "base_sha", "branch", "path", "request_id",
+        "workspace_id", "created", "ready",
+        "source_remote", "alternates_detached", "copied_local_config", "copied_sparse_checkout",
+        "copied_auxiliary_refs", "compatibility_warnings",
+    }
+
+    def test_output_contract(self) -> None:
+        # The CLI's JSON is a documented contract, not whatever the record happens to hold.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = self.make_repo(root)
+            _, initialized = self.cli(repo, "init")
+            self.assertEqual(set(initialized), {"status", "workspace_id", "workspace", "canonical",
+                                                 "object_format", "repo_name", "created"})
+            _, worker = self.cli(repo, "spawn", "contract", "--request-id", "r1")
+            self.assertEqual(set(worker), self.READY_WORKER_KEYS)
+            self.assertRegex(worker["created"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+            worker_repo = Path(worker["path"])
+            run_git(worker_repo, "config", "user.name", "Clonegrown Test")
+            run_git(worker_repo, "config", "user.email", "clonegrown@example.test")
+            (worker_repo / "c.txt").write_text("c\n", encoding="utf-8")
+            run_git(worker_repo, "add", "c.txt")
+            run_git(worker_repo, "commit", "-m", "c")
+            _, collected = self.cli(repo, "collect", str(worker["id"]))
+            self.assertEqual(set(collected), self.READY_WORKER_KEYS | {"allow_rewrite", "result_sha", "result_ref", "collected"})
+            _, listing = self.cli(repo, "status")
+            self.assertEqual(set(listing), {"workspace", "canonical", "workspace_id", "workers", "issues"})
+            self.assertEqual(set(listing["workers"][0]), set(collected))
+            _, discarded = self.cli(repo, "discard", str(worker["id"]))
+            self.assertEqual(set(discarded), set(collected) | {"discarded"})
+
     def test_default_workspace_name_and_explicit_override(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

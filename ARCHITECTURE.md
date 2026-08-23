@@ -7,14 +7,13 @@ standard library, Git, and Python 3.11+.
 clonegrown/
   __init__.py     public Python API: CWSError, init_workspace, spawn, collect, discard, recover, status
   __main__.py     python -m clonegrown
-  cli.py          the installed `clonegrown` command (auto-discovery, redacted JSON output)
-  legacy_cli.py   positional interface used by the research harnesses in tests/
+  cli.py          the installed `clonegrown` command (auto-discovery, documented JSON output)
   lifecycle.py    the four transactions: init, spawn, collect, discard
   recovery.py     recover (finish or roll back interrupted transactions) and status
-  worker.py       worker identity markers, authentication, result snapshots, allocation
-  repository.py   making a worker out of a clone (remotes, config, refs, sparse, alternates) or a linked worktree
-  state.py        durable layout, schema validation, ref names, process ownership
-  core.py         Git runner with environment sanitization, atomic JSON, failpoints, file locks
+  worker.py       one worker on disk: marker, authentication, snapshot, allocation, worktree removal
+  repository.py   Git operations only: provisioning a clone, creating and repairing worktrees
+  state.py        WorkspaceState and WorkerRecord (the two JSON records), WorkerStatus (the state machine)
+  core.py         Git runner with environment sanitization, atomic JSON, failpoints, process liveness, file locks
 ```
 
 Dependencies point strictly downward: `cli` → `lifecycle`/`recovery` →
@@ -91,6 +90,37 @@ alive (PID plus Linux start-tick fingerprint), and either finishes the
 operation or rolls it back to the last safe state. It never deletes a directory
 it cannot authenticate as the worker the record describes.
 
+## Command output
+
+Every command prints JSON. The Python API returns the full record; the CLI
+prints the record minus two kinds of field — secrets (`canonical_token`,
+`worker_token`, `params_hash`) and transaction bookkeeping (owner, staging
+and candidate fields, admin paths, snapshots) — with timestamps rendered as
+ISO 8601 UTC strings. `tests/test_cli.py::test_output_contract` pins the
+exact key sets.
+
+A ready worker:
+
+```json
+{
+  "id": 1, "status": "ready", "mode": "clone", "strong": false,
+  "task": "fix auth race", "base": "HEAD", "base_sha": "…", "branch": "agent/<ws>/1-fix-auth-race",
+  "path": "/…/app-dev/1/app", "request_id": null, "workspace_id": "…",
+  "created": "2026-08-23T03:10:00Z", "ready": "2026-08-23T03:10:02Z",
+  "source_remote": "cws-source", "alternates_detached": false,
+  "copied_local_config": [], "copied_sparse_checkout": false, "copied_auxiliary_refs": {},
+  "compatibility_warnings": []
+}
+```
+
+Collection adds `allow_rewrite`, `result_sha`, `result_ref`, `collected`;
+discard adds `discarded`. Failures carry `error` (spawn), `collection_error`
+(collect) or `interrupted_error`. `status` returns `{workspace, canonical,
+workspace_id, workers: [...], issues: [...]}` where a worker may also carry
+`drift`; `recover` returns a list of `{id, action}` reports; `init` returns
+`{status, workspace_id, workspace, canonical, object_format, repo_name,
+created}`.
+
 ## Safety properties
 
 - Worker allocation and every metadata write happen under the workspace lock;
@@ -115,7 +145,8 @@ is an operating-system sandbox.
 - `tests/test_worktree.py` — worktree-mode lifecycle, guards, tampering, and
   crash recovery.
 - `tests/hardening_suite.py` — 56 deterministic and adversarial cases, including
-  every crash failpoint, run through `tests/legacy_cli.py`. `CWS_SUITE_MODE=worktree`
+  every crash failpoint. The harnesses write the original prototype's positional
+  command form; `tests/legacy_cli.py` translates it onto the real CLI. `CWS_SUITE_MODE=worktree`
   runs the same cases with worktree workers; the ten cases that assert clone
   isolation assert the documented sharing instead (and that the spawn warned
   about it). CI runs both modes.

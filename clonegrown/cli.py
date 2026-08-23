@@ -7,6 +7,7 @@ and transaction fields removed.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import sys
 from pathlib import Path
@@ -17,13 +18,36 @@ from .core import ClonegrownError, validate_primary_repo
 from .lifecycle import collect, discard, init_workspace, spawn
 from .recovery import recover, status
 
-_PRIVATE_KEYS = {"canonical_token", "worker_token", "params_hash", "owner_pid", "owner_start", "stage_root"}
+# The JSON a caller sees is the record minus two kinds of field: secrets and
+# transaction bookkeeping. What remains is the documented output contract
+# (ARCHITECTURE.md, "Command output"); timestamps are rendered as ISO 8601.
+_SECRET_KEYS = {"canonical_token", "worker_token", "params_hash"}
+_BOOKKEEPING_KEYS = {
+    "schema", "next_id", "canonical_git_dir",
+    "owner_pid", "owner_start", "heartbeat", "stage_root",
+    "worktree_admin", "worktree_admin_left", "pending_spawn_details",
+    "candidate_sha", "candidate_ref", "collect_started", "collected_snapshot", "collection_race",
+    "discard_intent", "discard_previous", "discard_started",
+}
+_TIMESTAMP_KEYS = {"created", "ready", "failed", "collected", "discarded", "collection_failed", "collection_recovered"}
+
+
+def _iso(seconds: float) -> str:
+    return dt.datetime.fromtimestamp(seconds, dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def public_result(value: Any) -> Any:
-    """Remove internal transaction/identity fields from CLI output."""
+    """Reduce a record (or a list/dict of records) to the documented CLI output."""
     if isinstance(value, dict):
-        return {k: public_result(v) for k, v in value.items() if k not in _PRIVATE_KEYS}
+        out = {}
+        for key, item in value.items():
+            if key in _SECRET_KEYS or key in _BOOKKEEPING_KEYS:
+                continue
+            if key in _TIMESTAMP_KEYS and isinstance(item, (int, float)):
+                out[key] = _iso(item)
+            else:
+                out[key] = public_result(item)
+        return out
     if isinstance(value, list):
         return [public_result(item) for item in value]
     return value
