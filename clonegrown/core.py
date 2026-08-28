@@ -1,7 +1,7 @@
 """Process, Git, filesystem, and locking primitives shared by every layer.
 
 Nothing in this module knows about workspaces or workers. It owns the error
-type, the hardened Git runner, atomic JSON I/O, test failpoints, repository
+type, the Git runner, atomic JSON I/O, test failpoints, repository
 path discovery, and the advisory file lock.
 """
 from __future__ import annotations
@@ -75,7 +75,8 @@ def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     for key in list(env):
         if key in GIT_ENV_EXACT or key.startswith(GIT_ENV_PREFIXES):
             env.pop(key, None)
-    # Helper operations are local and must never prompt an unattended agent.
+    # When callers use this sanitized environment, disable terminal prompts.
+    # A custom executable whose basename is not `git` currently bypasses it.
     env["GIT_TERMINAL_PROMPT"] = "0"
     if extra:
         env.update(extra)
@@ -92,7 +93,8 @@ def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
     except subprocess.TimeoutExpired as exc:
         raise ClonegrownError(f"command timed out: {argv[0]} {argv[1] if len(argv) > 1 else ''}") from exc
     if check and p.returncode:
-        # Git stderr is kept for diagnosis; config values and the environment are not dumped.
+        # stderr and argv are kept for diagnosis. Callers must currently treat
+        # command arguments as potentially visible in this public error text.
         raise ClonegrownError(f"command failed ({p.returncode}): {' '.join(argv)}\nstdout: {p.stdout}\nstderr: {p.stderr}")
     return p
 

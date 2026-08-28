@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clonegrown"
 dynamic = ["version"]
-description = "Isolated Git clone workspaces for coding agents"
+description = "Git worker lifecycle management for coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [

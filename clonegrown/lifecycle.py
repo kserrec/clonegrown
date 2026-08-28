@@ -1,8 +1,9 @@
 """The four lifecycle transactions: init, spawn, collect, discard.
 
-Each transaction writes the worker record before every irreversible step, so
-a crash at any point leaves a record that ``recover`` can finish or roll
-back. ``failpoint`` names mark those crash windows for the test harnesses.
+Transactions persist named recovery checkpoints around their major stages.
+Those records support the recovery paths represented in durable state; they do
+not yet cover every destructive substep. ``failpoint`` names mark the tested
+checkpoint windows.
 """
 from __future__ import annotations
 
@@ -39,7 +40,8 @@ from .worker import (
 def _rolling_back(on_error: Callable[[BaseException], None]) -> Iterator[None]:
     """Run ``on_error`` (best effort) if the body fails, then re-raise.
 
-    SIGKILL and ``os._exit`` bypass this entirely; recover() handles those.
+    SIGKILL and ``os._exit`` bypass this entirely; recover() handles the
+    interruption states represented by the worker record.
     Interrupts are re-raised untouched so the record keeps its in-flight owner.
     """
     try:
@@ -160,8 +162,11 @@ def _advance_spawn(ws: Path, worker_id: int, status: str) -> tuple[WorkerRecord,
 
 
 def _record_worktree_admin(ws: Path, worker_id: int, admin: Path) -> None:
-    """Persist the admin directory as soon as Git creates it, so a crash before the next
-    stage still leaves recovery something to remove."""
+    """Persist the admin directory immediately after ``git worktree add`` returns.
+
+    A process can still die after Git creates the directory but before this
+    function records it; that current alpha gap is documented publicly.
+    """
     with workspace_lock(ws):
         worker = WorkerRecord.load(ws, worker_id)
         worker.worktree_admin = str(admin)
@@ -220,7 +225,8 @@ def _record_spawn_failure(ws: Path, worker_id: int, exc: BaseException) -> None:
         worker = WorkerRecord.load(ws, worker_id)
         published = worker_slot(ws, worker_id).exists()
         if published or worker.status == WorkerStatus.READY:
-            # A published directory is never downgraded to a disposable failure.
+            # The ordinary exception path keeps a published directory in a
+            # recoverable publishing state instead of marking spawn_failed.
             if worker.status != WorkerStatus.READY:
                 worker.status = WorkerStatus.PUBLISHING
             worker.interrupted_error = str(exc)[:1000]
@@ -255,8 +261,8 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
     object sharing) or ``"worktree"`` (a linked worktree sharing canonical's
     Git internals). Stages: allocated -> cloning -> configuring -> publishing
     -> ready. The worker is built under ``.cws/staging`` and moved into its
-    numbered slot with one atomic rename, so a visible worker directory is
-    always complete.
+    numbered slot with one atomic rename. Worktree repair and the final ready
+    record occur after that rename while Clonegrown still holds its locks.
     """
     if mode not in WORKER_MODES:
         raise ClonegrownError(f"unknown worker mode: {mode!r}")

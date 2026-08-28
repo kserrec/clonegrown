@@ -71,7 +71,8 @@ def copy_local_config(canonical: Path, worker: Path) -> tuple[list[str], list[st
         copied.append(key)
     # Include directives are not copied. Their *effective* values were flattened in
     # above, so a relative or conditional include cannot bind the worker back to
-    # canonical. Values are never recorded in Clonegrown metadata.
+    # canonical. Values are not put in durable Clonegrown metadata, although a
+    # failing Git command can currently repeat them in its public error text.
     if any(k.lower().startswith(("include.", "includeif.")) for k in raw):
         warnings.append("repo-local config includes were flattened into private worker config")
     return copied, sorted(set(warnings))
@@ -80,8 +81,8 @@ def copy_local_config(canonical: Path, worker: Path) -> tuple[list[str], list[st
 def copy_remote_config(canonical: Path, worker: Path) -> str:
     """Rename the clone's source remote out of the way, then mirror canonical's remotes.
 
-    Returns the name given to the canonical-source remote. Its push URL is an
-    invalid transport so an accidental push fails; this is not a sandbox.
+    Returns the name given to the canonical-source remote. Its push URL uses an
+    invalid transport as an accident guard; this is not a security boundary.
     """
     canonical_remotes = set(git(canonical, "remote").stdout.split())
     source = RESERVED_SOURCE_PREFIX

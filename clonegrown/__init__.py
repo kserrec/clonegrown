@@ -1,8 +1,8 @@
-"""Clonegrown: safe per-task Git working directories for coding agents.
+"""Clonegrown: per-task Git working-directory lifecycle management.
 
-Each agent task gets its own worker — a linked worktree or an independent
-clone — and the lifecycle (spawn, collect, discard, recover) guarantees that
-work is never duplicated, deleted before it is saved, or left half-done.
+Each agent task can use a linked-worktree or local-clone worker. Collection
+preserves a clean committed tip under a canonical Git ref; integration remains
+explicit. The alpha's current custody limits are documented in the README.
 
 Public Python API::
 

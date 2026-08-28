@@ -82,7 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="clonegrown",
         description="Per-task Git working directories for coding agents: spawn a worker, "
-                    "work in it, collect the result, discard the worker. Interrupted steps recover.",
+                    "work in it, preserve its committed result, then discard it. "
+                    "Recover reconciles recorded interruption boundaries.",
     )
     parser.add_argument("--version", action="version", version=f"clonegrown {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -101,26 +102,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base", default="HEAD", help="base ref or commit (default: HEAD)")
     isolation = p.add_mutually_exclusive_group()
     isolation.add_argument("--strong", action="store_true",
-                           help="independent clone with no object sharing at all")
+                           help="clone with no object files shared with canonical")
     isolation.add_argument("--worktree", action="store_true",
                            help="linked worktree sharing canonical's Git internals (fastest, least isolated)")
-    p.add_argument("--request-id", help="stable id for idempotent repeated spawn requests")
+    p.add_argument("--request-id", help="stable id that makes matching spawn retries return one allocation")
     p.add_argument("--wait-seconds", type=float, default=120.0,
                    help="how long to wait for an in-flight spawn with the same request id")
 
-    p = sub.add_parser("collect", help="save a worker's committed result into the canonical repo")
+    p = sub.add_parser("collect", help="preserve a worker's clean committed tip under a canonical ref")
     p.add_argument("id", type=int, help="worker id")
     workspace_option(p)
     p.add_argument("--allow-rewrite", action="store_true",
                    help="accept a result that does not descend from the worker's base")
 
-    p = sub.add_parser("discard", help="delete a worker whose result is saved (or --abandon it)")
+    p = sub.add_parser(
+        "discard",
+        help="delete a worker (alpha: ignored files and external writers are not protected)",
+        description="Delete a worker. In this alpha, ignored files and external writers are not protected; "
+                    "read the README safety boundary before cleanup.",
+    )
     p.add_argument("id", type=int, help="worker id")
     workspace_option(p)
-    p.add_argument("--abandon", action="store_true", help="discard uncollected work intentionally")
-    p.add_argument("--force", action="store_true", help="discard even if the worker changed after collection")
+    p.add_argument("--abandon", action="store_true", help="discard all uncollected worker content intentionally")
+    p.add_argument("--force", action="store_true", help="discard detected post-collection changes intentionally")
 
-    p = sub.add_parser("recover", help="finish or roll back operations interrupted by a crash")
+    p = sub.add_parser("recover", help="reconcile interrupted operations represented in durable state")
     workspace_option(p)
 
     p = sub.add_parser("status", help="show workspace and worker state")

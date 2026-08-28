@@ -296,7 +296,7 @@ class WorkspaceState:
 
 @dataclass
 class WorkerRecord:
-    """``.cws/workers/<id>.json``: everything known about one worker, written before every irreversible step."""
+    """``.cws/workers/<id>.json``: identity and recorded lifecycle checkpoints for one worker."""
     # identity (written at allocation, never changed)
     schema: int | None = None
     id: int | None = None
