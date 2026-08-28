@@ -32,7 +32,7 @@ class ClonegrownCliTests(unittest.TestCase):
 
     def test_zero_config_lifecycle_from_canonical_and_worker(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
+            root = Path(td).resolve()
             repo = make_repo(root)
 
             rc, initialized = self.cli(repo, "init")
@@ -77,7 +77,7 @@ class ClonegrownCliTests(unittest.TestCase):
     def test_output_contract(self) -> None:
         # The CLI's JSON is a documented contract, not whatever the record happens to hold.
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
+            root = Path(td).resolve()
             repo = make_repo(root)
             _, initialized = self.cli(repo, "init")
             self.assertEqual(set(initialized), {"status", "workspace_id", "workspace", "canonical",
@@ -99,7 +99,7 @@ class ClonegrownCliTests(unittest.TestCase):
 
     def test_default_workspace_name_and_explicit_override(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
+            root = Path(td).resolve()
             repo = make_repo(root)
             custom = root / "custom-workers"
             rc, initialized = self.cli(repo, "init", str(repo), "--workspace", str(custom))

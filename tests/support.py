@@ -51,3 +51,14 @@ def run_cli(cwd: Path, *args: str) -> tuple[int, Any]:
     finally:
         os.chdir(old)
     return rc, json.loads(output.getvalue())
+
+
+def filesystem_accepts_non_utf8_names(root: Path) -> bool:
+    """APFS (macOS) rejects file names that are not valid UTF-8; Linux filesystems accept any bytes."""
+    probe = os.fsencode(str(root)) + b"/probe-\xff"
+    try:
+        os.mkdir(probe)
+    except OSError:
+        return False
+    os.rmdir(probe)
+    return True

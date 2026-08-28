@@ -31,7 +31,7 @@ def tree_fingerprint(root: Path) -> dict[str, tuple[int, int]]:
 class AuditTests(unittest.TestCase):
     def setUp(self) -> None:
         self.td = tempfile.TemporaryDirectory()
-        self.root = Path(self.td.name)
+        self.root = Path(self.td.name).resolve()  # macOS: TMPDIR is a symlink
         self.repo = make_repo(self.root)
         self.ws = self.root / "demo-dev"
         rc, _ = run_cli(self.repo, "init")

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from clonegrown import ClonegrownError, collect, discard, recover, release, spawn, status
 from clonegrown.state import quarantine_root, worker_record_path
-from support import commit, make_repo, run_cli, run_git
+from support import commit, make_repo, run_cli, run_git, filesystem_accepts_non_utf8_names
 
 ROOT = Path(__file__).resolve().parents[1]
 MODES = ("clone", "worktree")
@@ -22,7 +22,7 @@ MODES = ("clone", "worktree")
 class QuarantineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.td = tempfile.TemporaryDirectory()
-        self.root = Path(self.td.name)
+        self.root = Path(self.td.name).resolve()  # macOS: TMPDIR is a symlink
         self.repo = make_repo(self.root)
         self.ws = self.root / "demo-dev"
         rc, _ = run_cli(self.repo, "init")
@@ -682,6 +682,8 @@ class QuarantineTests(unittest.TestCase):
         self.assertIn(("orphan-worker-directory", 7), [(i["issue"], i.get("id")) for i in status(self.ws)["issues"]])
 
     def test_non_utf8_workspace_path_runs_the_whole_lifecycle(self) -> None:
+        if not filesystem_accepts_non_utf8_names(self.root):
+            self.skipTest("this filesystem rejects non-UTF-8 file names")
         raw_root = os.fsencode(str(self.root)) + b"/w\xff-space"
         os.mkdir(raw_root)
         root = Path(os.fsdecode(raw_root))

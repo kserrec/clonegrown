@@ -8,7 +8,7 @@ from pathlib import Path
 
 from clonegrown import ClonegrownError, collect, discard, release, spawn
 from clonegrown.worker import IGNORED_SAMPLE_LIMIT, inspect_ignored_content
-from support import commit, make_repo, run_cli, run_git
+from support import commit, make_repo, run_cli, run_git, filesystem_accepts_non_utf8_names
 
 MODES = ("clone", "worktree")
 SECRET_CONTENT = "ignored-file-body-that-must-never-be-printed-7f3a9c"
@@ -17,7 +17,7 @@ SECRET_CONTENT = "ignored-file-body-that-must-never-be-printed-7f3a9c"
 class DiscardIgnoredTests(unittest.TestCase):
     def setUp(self) -> None:
         self.td = tempfile.TemporaryDirectory()
-        self.root = Path(self.td.name)
+        self.root = Path(self.td.name).resolve()  # macOS: TMPDIR is a symlink
         # Global excludes come from the user's own Git configuration; point them at a throwaway home.
         self.home = self.root / "home"
         (self.home / ".config" / "git").mkdir(parents=True)
@@ -106,6 +106,8 @@ class DiscardIgnoredTests(unittest.TestCase):
         self.assertEqual(listing.sample[0], "trace-0000.log")
 
     def test_non_utf8_ignored_name_is_listed_without_failing(self) -> None:
+        if not filesystem_accepts_non_utf8_names(self.root):
+            self.skipTest("this filesystem rejects non-UTF-8 file names")
         worker = self.collected_worker("non utf8 name")
         repo = Path(worker["path"])
         raw = os.fsencode(str(repo)) + b"/tr\xfface.log"

@@ -10,6 +10,8 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
+from support import filesystem_accepts_non_utf8_names
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = PROJECT_ROOT / "install.sh"
@@ -122,7 +124,7 @@ class InstallerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()  # macOS: TMPDIR is a symlink; the installer prints real paths
 
     def marker_id(self, target: Path, kind: str) -> str:
         lines = (target / MARKER).read_text(encoding="utf-8").splitlines()
@@ -346,6 +348,8 @@ class InstallerTests(unittest.TestCase):
         assert_launcher("v2")
 
     def test_non_utf8_paths_are_preserved_as_filesystem_bytes(self) -> None:
+        if not filesystem_accepts_non_utf8_names(self.root):
+            self.skipTest("this filesystem rejects non-UTF-8 file names")
         # Every path the installer prints back through Python (preflight record,
         # PATH guidance) carries a byte no UTF-8 decoder accepts; this pins
         # byte-oriented output regardless of the developer's locale.
