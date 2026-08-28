@@ -8,11 +8,9 @@ under a ref in the canonical repository. A worker can be a linked worktree or a
 local clone. Collection preserves a result; it does not merge, rebase,
 cherry-pick, or otherwise integrate that result into a user branch.
 
-> **Status:** alpha, POSIX-only. The current release has known custody gaps in
-> destructive operations. In particular, discard does not protect ignored
-> files or coordinate with processes writing outside Clonegrown, and a failed
-> recursive deletion can currently be recorded as complete. Do not use
-> unattended cleanup for valuable work. Read [Current alpha safety
+> **Status:** alpha, POSIX-only. Destructive operations are conservative, but
+> the work lease that guards discard is cooperative and cannot stop a process
+> that ignores it. Do not use unattended cleanup for valuable work. Read [Current alpha safety
 > boundary](#current-alpha-safety-boundary) before using `discard`.
 
 ## Install
@@ -49,8 +47,9 @@ All four replacements are staged beside their destinations and synced before
 publication. During an update, each old owned target is renamed to a unique
 backup. Before the four-target commit, a command failure or caught `HUP`,
 `INT`, or `TERM` restores the previous targets in reverse order. `SIGKILL` and
-machine power loss cannot run that rollback; an authenticated backup may
-remain beside its destination for manual recovery.
+machine power loss cannot run that rollback, and a caught signal after the
+commit skips the remaining backup removal; in those cases an authenticated
+backup may remain beside its destination for manual recovery.
 
 Abandoned-stage cleanup checks the filesystem identity captured when the stage
 was created and does not pass that validated name to a separate `rm` command.
@@ -91,8 +90,10 @@ Codex skill
   -> ~/.agents/skills/clonegrown/SKILL.md
 ```
 
-It does not edit the shell profile. If `~/.local/bin` is not on `PATH`, it
-prints the line needed to add it. Git and Python 3.11+ are required.
+It does not edit the shell profile. If the command directory is not on `PATH`,
+it prints the shell-safe line needed to add it. A directory containing `:`
+cannot be represented as one POSIX `PATH` entry, so that case receives a
+shell-safe full-path command instead. Git and Python 3.11+ are required.
 `clonegrown --version` confirms the CLI installation, and
 `python -m clonegrown` is equivalent to the command.
 
@@ -106,6 +107,8 @@ clonegrown init
 
 For a repository named `my-project`, Clonegrown creates a sibling workspace
 named `my-project-dev` and manages numbered workers underneath it.
+The workspace must live on a filesystem that supports hard links: worker
+records are created with `os.link`.
 
 Spawn a worker:
 
@@ -126,17 +129,34 @@ Collection creates an immutable result ref and updates Clonegrown's summary
 ref. Review and integrate that commit into the intended user branch with an
 explicit Git operation outside Clonegrown.
 
-After stopping every process that can write to the worker, remove it:
+Every worker is leased from spawn. After stopping every process that can
+write to the worker, release the lease, then remove the worker:
 
 ```bash
+clonegrown release 1
 clonegrown discard 1
 ```
 
+Discard refuses a leased worker whatever flags it is given; `release` is the
+caller's statement that the worker is quiet, which Clonegrown records but
+cannot verify. A released worker that is still `ready` can be taken over again
+with `clonegrown claim 1`.
+
 To intentionally throw away an uncollected worker and all content Clonegrown
-does and does not inspect:
+does and does not inspect, release it and then:
 
 ```bash
 clonegrown discard 1 --abandon
+```
+
+A collected worker is one-shot: `--abandon` is refused for it. Its two
+remaining custody questions each have their own flag: detected changes after
+collection need `--force`, and Git-ignored paths, which collection never
+inspects, need `--discard-ignored`. The refusal names the count and a bounded
+sample of ignored path names; it never prints file contents.
+
+```bash
+clonegrown discard 1 --discard-ignored
 ```
 
 Inspect or reconcile recorded interrupted operations:
@@ -145,6 +165,12 @@ Inspect or reconcile recorded interrupted operations:
 clonegrown status
 clonegrown recover
 ```
+
+`status` is a complete audit that changes nothing: every disagreement
+between the records, the workspace, and the canonical repository is listed
+under `issues` with a stable code (the codes are enumerated in
+[Architecture](ARCHITECTURE.md#command-output)). `recover` repairs only what
+a record provably owns and reports the rest.
 
 Recovery covers the lifecycle checkpoints represented in durable state. It
 does not currently prove cleanup at every filesystem boundary.
@@ -218,16 +244,40 @@ object database, so histories with many objects cost more time and disk.
 - Worker allocation and lifecycle metadata updates use workspace and worker
   locks.
 - Collection and normal deletion authenticate the published worker path and
-  marker before acting on it. Existing request-index hits currently return the
-  stored record without equivalent revalidation or worker authentication.
+  marker before acting on it. A request-index hit is validated field by field
+  and its settled worker is authenticated on disk before it is returned.
 - Collection compares snapshots before and after fetch, preserves the fetched
   commit under an immutable result ref, and does not accept a change detected
   between those snapshots as collected.
-- Normal deletion requires a collected result; deleting an uncollected worker
-  requires explicit `--abandon`; detected post-collection drift requires
-  explicit `--force`.
+- Every deletion requires an explicit lease release first; neither
+  `--abandon` nor `--force` overrides the lease, and recovery never infers a
+  release from a dead process. Normal deletion requires a collected result;
+  deleting an uncollected worker requires explicit `--abandon`; detected
+  post-collection drift requires explicit `--force`; a collected worker's
+  Git-ignored paths require explicit `--discard-ignored`; a collected worker
+  cannot be abandoned or claimed again.
+- Deletion goes through an authenticated quarantine: intent is recorded, the
+  worker is fingerprinted, its slot is renamed to `.cws/quarantine/`, the
+  quarantined worker is authenticated and rechecked against the fingerprint,
+  deleted with errors enabled, and proved absent. A change in the old
+  final-check window, a deletion error, or an interruption leaves the worker
+  preserved in quarantine with the reason recorded; `status` reports it,
+  `recover` resumes it, and a repeated `discard` with the same acknowledgement
+  deletes it (a quarantined worktree whose admin directory Git has since
+  pruned is fingerprinted without Git for that deletion). Content found both
+  in the slot and at the quarantine path is never resolved automatically. The terminal `discarded`/`abandoned` state is recorded only
+  after the worker, its stage, the quarantine, and canonical's worktree
+  state are each proved clean.
 - Worktree cleanup targets the recorded, authenticated admin entry rather than
-  running a blanket `git worktree prune`.
+  running a blanket `git worktree prune`, verifies that the directory is
+  gone, and deletes the task branch only in a ref transaction that proves this
+  worker created it and that it still points where cleanup recorded. A moved
+  branch, or one checked out in canonical or in another working tree, is
+  retained and reported, and the record stays `discarding` until the branch
+  is moved back, the checkout released, or a stale worktree entry pruned
+  (`git worktree prune`); a branch that is absent, or that
+  was already absent when cleanup was recorded, is nothing of the worker's
+  and cleanup finishes without touching it.
 - Clone workers receive an invalid push URL for the local canonical-source
   remote. This is a best-effort accident guard, not a security boundary.
 - Recovery reconciles the interruption boundaries represented by the current
@@ -238,17 +288,19 @@ object database, so histories with many objects cost more time and disk.
 The following limits are verified properties of the current implementation,
 not hypothetical platform concerns:
 
-- Collection and drift snapshots omit Git-ignored paths. Normal discard can
-  therefore delete ignored content without requiring separate acknowledgement.
-- A worker has no durable work lease. A process outside Clonegrown can write
-  after the final check and race discard.
-- Recursive deletion currently suppresses filesystem errors and can record a
-  terminal discarded or abandoned state without proving the worker path is
-  absent.
-- Recovery of an interrupted spawn can currently delete an authenticated,
-  published worker after observing that it changed from its base.
-- Worktree spawn uses a deterministic task branch, and rollback can delete a
-  branch of that name without proving this invocation created it.
+- Collection and drift snapshots omit Git-ignored paths. Discard of a
+  collected worker enumerates them by name through Git's own ignore rules and
+  refuses without `--discard-ignored`; `--abandon` on an uncollected worker
+  authorizes deleting everything, ignored content included.
+- The work lease is cooperative. A process that ignores it, or keeps file
+  descriptors open across a release, can still write after the final
+  fingerprint. The fingerprint covers Git's status listing plus the size and
+  modification time of every entry in the worker directory tree except
+  `.git` (nested repositories, FIFOs, and sockets included); a rewrite that
+  keeps both size and timestamp is not detected.
+- The deletion unit is the slot directory `<workspace>/<id>/`. Anything
+  placed beside the repository inside it is fingerprinted but never
+  inspected for ignored-content or drift acknowledgement.
 - Command-failure output currently includes the full Git argument vector and
   stderr. Copied configuration values or credential-bearing remote URLs can
   therefore appear in an error even though successful CLI records redact
@@ -265,11 +317,11 @@ not hypothetical platform concerns:
   independence.
 
 The accepted target custody contract is recorded in [`PLAN.md`](PLAN.md) and
-[Architecture](ARCHITECTURE.md#target-custody-contract-planned-not-implemented):
+[Architecture](ARCHITECTURE.md#target-custody-contract-implemented):
 a durable cooperative lease, explicit acknowledgement for ignored content,
 authenticated quarantine before checked deletion, one-shot workers after
-collection, and explicit integration. Those additions are planned and are
-**not implemented in this release**.
+collection, and explicit integration. All of it is implemented in this
+release.
 
 Git LFS, arbitrary filters, network or distributed filesystems, genuine
 disk/inode exhaustion, and native Windows are separate unverified validation
@@ -313,7 +365,7 @@ The operations are importable with no runtime dependencies beyond the standard
 library:
 
 ```python
-from clonegrown import ClonegrownError, collect, discard, init_workspace, recover, spawn, status
+from clonegrown import ClonegrownError, claim, collect, discard, init_workspace, recover, release, spawn, status
 ```
 
 The API returns full internal dictionaries; successful CLI results remove

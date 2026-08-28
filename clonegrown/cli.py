@@ -1,8 +1,10 @@
 """The installed ``clonegrown`` command.
 
 Workspaces are discovered automatically from the canonical checkout, the
-workspace, or any worker beneath it. Output is JSON with internal identity
-and transaction fields removed.
+workspace, or any worker beneath it. Successful lifecycle subcommands write
+JSON to stdout with internal identity and transaction fields removed. Help and
+version output are text on stdout; argument and Clonegrown runtime errors are
+text on stderr.
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ from typing import Any, Sequence
 
 from . import __version__
 from .core import ClonegrownError, validate_primary_repo
-from .lifecycle import collect, discard, init_workspace, spawn
+from .lifecycle import claim, collect, discard, init_workspace, release, spawn
 from .recovery import recover, status
 
 # The JSON a caller sees is the record minus two kinds of field: secrets and
@@ -25,11 +27,12 @@ _SECRET_KEYS = {"canonical_token", "worker_token", "params_hash"}
 _BOOKKEEPING_KEYS = {
     "schema", "next_id", "canonical_git_dir",
     "owner_pid", "owner_start", "heartbeat", "stage_root",
-    "worktree_admin", "worktree_admin_left", "pending_spawn_details",
+    "worktree_admin", "branch_cleanup_sha", "pending_spawn_details",
     "candidate_sha", "candidate_ref", "collect_started", "collected_snapshot", "collection_race",
-    "discard_intent", "discard_previous", "discard_started",
+    "discard_intent", "discard_previous", "discard_started", "quarantine_snapshot",
 }
-_TIMESTAMP_KEYS = {"created", "ready", "failed", "collected", "discarded", "collection_failed", "collection_recovered"}
+_TIMESTAMP_KEYS = {"created", "ready", "failed", "collected", "discarded", "collection_failed", "collection_recovered",
+                   "lease_released"}
 
 
 def _iso(seconds: float) -> str:
@@ -37,7 +40,7 @@ def _iso(seconds: float) -> str:
 
 
 def public_result(value: Any) -> Any:
-    """Reduce a record (or a list/dict of records) to the documented CLI output."""
+    """Reduce a record (or a list/dict of records) to documented successful CLI JSON."""
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
@@ -115,16 +118,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-rewrite", action="store_true",
                    help="accept a result that does not descend from the worker's base")
 
+    p = sub.add_parser("release", help="release a worker's cooperative work lease so it can be discarded")
+    p.add_argument("id", type=int, help="worker id")
+    workspace_option(p)
+
+    p = sub.add_parser("claim", help="take the lease on a released worker that is still ready")
+    p.add_argument("id", type=int, help="worker id")
+    workspace_option(p)
+
     p = sub.add_parser(
         "discard",
-        help="delete a worker (alpha: ignored files and external writers are not protected)",
-        description="Delete a worker. In this alpha, ignored files and external writers are not protected; "
-                    "read the README safety boundary before cleanup.",
+        help="delete a released worker",
+        description="Delete a worker whose lease has been released. A collected worker needs --force for "
+                    "changes after collection and --discard-ignored for Git-ignored paths; an uncollected "
+                    "worker needs --abandon. The lease is cooperative, not enforced; read the README safety "
+                    "boundary before cleanup.",
     )
     p.add_argument("id", type=int, help="worker id")
     workspace_option(p)
-    p.add_argument("--abandon", action="store_true", help="discard all uncollected worker content intentionally")
+    p.add_argument("--abandon", action="store_true",
+                   help="discard an uncollected worker and all of its content intentionally")
     p.add_argument("--force", action="store_true", help="discard detected post-collection changes intentionally")
+    p.add_argument("--discard-ignored", action="store_true",
+                   help="discard a collected worker's Git-ignored paths intentionally")
 
     p = sub.add_parser("recover", help="reconcile interrupted operations represented in durable state")
     workspace_option(p)
@@ -151,8 +167,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                            mode="worktree" if args.worktree else "clone")
         elif args.command == "collect":
             result = collect(resolve_workspace(args.workspace), args.id, args.allow_rewrite)
+        elif args.command == "release":
+            result = release(resolve_workspace(args.workspace), args.id)
+        elif args.command == "claim":
+            result = claim(resolve_workspace(args.workspace), args.id)
         elif args.command == "discard":
-            result = discard(resolve_workspace(args.workspace), args.id, args.abandon, args.force)
+            result = discard(resolve_workspace(args.workspace), args.id, args.abandon, args.force,
+                             args.discard_ignored)
         elif args.command == "recover":
             result = recover(resolve_workspace(args.workspace))
         else:

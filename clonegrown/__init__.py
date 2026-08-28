@@ -6,13 +6,14 @@ explicit. The alpha's current custody limits are documented in the README.
 
 Public Python API::
 
-    from clonegrown import init_workspace, spawn, collect, discard, recover, status, ClonegrownError
+    from clonegrown import init_workspace, spawn, collect, release, claim, discard, recover, status, ClonegrownError
 """
 from __future__ import annotations
 
 from .core import ClonegrownError, CWSError
-from .lifecycle import collect, discard, init_workspace, spawn
+from .lifecycle import claim, collect, discard, init_workspace, release, spawn
 from .recovery import recover, status
 
 __version__ = "0.1.0a1"
-__all__ = ["ClonegrownError", "CWSError", "init_workspace", "spawn", "collect", "discard", "recover", "status", "__version__"]
+__all__ = ["ClonegrownError", "CWSError", "init_workspace", "spawn", "collect", "release", "claim", "discard",
+           "recover", "status", "__version__"]

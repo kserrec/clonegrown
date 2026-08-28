@@ -37,21 +37,21 @@ def spawn_case(seed):
  proc=start_and_kill(['spawn',w,'--task',req,'--base','main','--request-id',req,*STRONG],delay)
  reports=j(cw('recover',w)); ready=j(cw('spawn',w,'--task',req,'--base','main','--request-id',req,*STRONG))
  r=Path(ready['path']); assert ready['status']=='ready'; assert git(r,'rev-parse','HEAD').stdout.strip()==ready['base_sha']; git(c,'fsck','--full')
- cw('discard',w,str(ready['id']),'--abandon'); row={'mode':'spawn','seed':seed,'delay':delay,'process':proc,'reports':reports,'ready_id':ready['id'],'ok':True}; shutil.rmtree(b,ignore_errors=True); return row
+ cw('release',w,str(ready['id'])); cw('discard',w,str(ready['id']),'--abandon'); row={'mode':'spawn','seed':seed,'delay':delay,'process':proc,'reports':reports,'ready_id':ready['id'],'ok':True}; shutil.rmtree(b,ignore_errors=True); return row
 
 def collect_case(seed):
  rng=random.Random(seed); b,c,w=make_case(f'collect-{seed}',large_mb=4); m=j(cw('spawn',w,'--task','collect','--request-id',f'c-{seed}',*ISO)); r=Path(m['path']); (r/f'new-{seed}.bin').write_bytes(os.urandom(8*1024*1024)); git(r,'add','.'); git(r,'commit','-m','large result'); sha=git(r,'rev-parse','HEAD').stdout.strip(); delay=rng.uniform(0.0,.22)
  proc=start_and_kill(['collect',w,str(m['id'])],delay); reports=j(cw('recover',w)); mm=meta(w,m['id'])
  if mm['status']=='ready': mm=j(cw('collect',w,str(m['id'])))
  assert mm['status']=='collected' and mm['result_sha']==sha; st=state(w); ref=f"refs/cws/{st['workspace_id']}/workers/{m['id']}/result"; assert git(c,'rev-parse',ref).stdout.strip()==sha; git(c,'fsck','--full')
- cw('discard',w,str(m['id'])); row={'mode':'collect','seed':seed,'delay':delay,'process':proc,'reports':reports,'sha':sha,'ok':True}; shutil.rmtree(b,ignore_errors=True); return row
+ cw('release',w,str(m['id'])); cw('discard',w,str(m['id'])); row={'mode':'collect','seed':seed,'delay':delay,'process':proc,'reports':reports,'sha':sha,'ok':True}; shutil.rmtree(b,ignore_errors=True); return row
 
 def discard_case(seed):
  rng=random.Random(seed); b,c,w=make_case(f'discard-{seed}',large_mb=2); m=j(cw('spawn',w,'--task','discard','--request-id',f'd-{seed}',*ISO)); r=Path(m['path']); (r/'x').write_text('x'); git(r,'add','x'); git(r,'commit','-m','result'); sha=git(r,'rev-parse','HEAD').stdout.strip(); mm=j(cw('collect',w,str(m['id'])))
  build=r/'build'; build.mkdir();
  for i in range(3500): (build/f'{i:05d}.tmp').write_text('x'*256)
- delay=rng.uniform(0.0,.08); proc=start_and_kill(['discard',w,str(m['id'])],delay); reports=j(cw('recover',w)); mm=meta(w,m['id'])
- if Path(m['path']).exists(): mm=j(cw('discard',w,str(m['id'])))
+ cw('release',w,str(m['id'])); delay=rng.uniform(0.0,.08); proc=start_and_kill(['discard',w,str(m['id']),'--discard-ignored'],delay); reports=j(cw('recover',w)); mm=meta(w,m['id'])
+ if Path(m['path']).exists(): mm=j(cw('discard',w,str(m['id']),'--discard-ignored'))
  assert mm['status']=='discarded' and not Path(m['path']).exists(); st=state(w); ref=f"refs/cws/{st['workspace_id']}/workers/{m['id']}/result"; assert git(c,'rev-parse',ref).stdout.strip()==sha; git(c,'fsck','--full')
  row={'mode':'discard','seed':seed,'delay':delay,'process':proc,'reports':reports,'sha':sha,'ok':True}; shutil.rmtree(b,ignore_errors=True); return row
 

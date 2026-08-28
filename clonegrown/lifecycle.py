@@ -24,15 +24,20 @@ from .core import (
 from .recovery import recover
 from .repository import (
     WORKTREE_SHARING_WARNING, add_worktree, checkout_without_hooks, copy_auxiliary_refs, copy_info_files,
-    copy_local_config, copy_remote_config, copy_sparse_patterns, copy_sparse_policy, detach_alternates_if_needed,
-    private_hook_warnings, ref_points_at, repair_worktree, sparse_checkout_enabled,
+    absent_marker, copy_local_config, copy_remote_config, copy_sparse_patterns, copy_sparse_policy,
+    create_task_branch, delete_ref, detach_alternates_if_needed, is_symbolic_ref, private_hook_warnings,
+    ref_points_at, repair_worktree, resolve_ref, sparse_checkout_enabled, write_ref,
 )
 from .state import (
-    SCHEMA, WORKER_MODES, WorkerRecord, WorkerStatus, WorkspaceState, canonical_marker_path, worker_lock_path,
-    worker_slot, workspace_lock, ws_paths,
+    SCHEMA, WORKER_MODES, WorkerRecord, WorkerStatus, WorkspaceState, branch_owner_ref, canonical_marker_path,
+    worker_lock_path, worker_slot, workspace_lock, ws_paths,
 )
 from .worker import (
-    allocate_spawn, forget_worktree, load_worker, snapshot_worker, verify_worker, write_worker_marker,
+    DELETION_AUTHORIZED, AdminDirectoryMissing, adoptable_quarantine, allocate_spawn, authenticate_settled, require_worker,
+    clear_quarantine, custody_fingerprint,
+    delete_through_quarantine, delete_verified, finish_deletion, forget_worktree, inspect_ignored_content,
+    load_worker, repair_owned_worktree, snapshot_worker, unrecorded_quarantine, verify_worker, withdraw_discard,
+    write_worker_marker,
 )
 
 
@@ -135,14 +140,28 @@ class SpawnDetails:
             setattr(worker, key, value)
 
 
+class _RetryableOutcome(Exception):
+    """The existing worker for this request ended in a state that lets the request be allocated again."""
+
+
+def _require_plain_refs(canonical: Path, *refs: str) -> None:
+    """A namespace ref that is symbolic is not ours: refuse to write through it."""
+    for ref in refs:
+        if is_symbolic_ref(canonical, ref):
+            raise ClonegrownError(f"refusing to write through a symbolic ref in Clonegrown's namespace: {ref}")
+
+
 def _wait_for_existing(ws: Path, worker_id: int, timeout_seconds: float) -> dict[str, Any]:
-    """Wait for another process's spawn of the same request ID to settle."""
+    """Wait for another process's spawn of the same request ID to settle, then hand back a proven outcome."""
     deadline = time.monotonic() + timeout_seconds
     while True:
-        worker = WorkerRecord.load(ws, worker_id)
+        state, worker, canonical = load_worker(ws, worker_id)
+        if worker.status in WorkerStatus.RETRYABLE:
+            raise _RetryableOutcome(worker.status)  # the caller allocates afresh, as a retry would
         if worker.status in WorkerStatus.SETTLED:
+            authenticate_settled(ws, state, worker, canonical)
             return worker.to_json()
-        if worker.status in WorkerStatus.RETRYABLE or worker.status == WorkerStatus.BROKEN:
+        if worker.status == WorkerStatus.BROKEN:
             raise ClonegrownError(f"existing request failed in worker {worker_id}: {worker.error or worker.status}")
         if time.monotonic() >= deadline:
             raise ClonegrownError(f"timed out waiting for existing request worker {worker_id}; run recover")
@@ -165,17 +184,30 @@ def _record_worktree_admin(ws: Path, worker_id: int, admin: Path) -> None:
     """Persist the admin directory immediately after ``git worktree add`` returns.
 
     A process can still die after Git creates the directory but before this
-    function records it; that current alpha gap is documented publicly.
+    function records it; recovery then locates the entry by its ``gitdir``
+    back-pointer into this worker's unique staged path.
     """
+    failpoint("spawn.after_worktree_add")
     with workspace_lock(ws):
         worker = WorkerRecord.load(ws, worker_id)
         worker.worktree_admin = str(admin)
         worker.save(ws)
 
 
-def _check_out_base(stage_repo: Path, worker: WorkerRecord) -> None:
-    """Put the staged repository on its task branch at the pinned base and stamp its identity."""
-    checkout_without_hooks(stage_repo, str(worker.branch), str(worker.base_sha))
+def _check_out_base(stage_repo: Path, worker: WorkerRecord, canonical: Path | None = None) -> None:
+    """Put the staged repository on its task branch at the pinned base and stamp its identity.
+
+    A clone creates the branch in its own refs. A worktree's branch lives in
+    canonical's shared refs, so it is created there first, together with the
+    worker's private ownership ref, in one create-only transaction that a
+    pre-existing branch of that name aborts untouched.
+    """
+    if canonical is not None:
+        create_task_branch(canonical, str(worker.branch),
+                           branch_owner_ref(str(worker.workspace_id), int(worker.id)), str(worker.base_sha))
+        checkout_without_hooks(stage_repo, str(worker.branch), str(worker.base_sha), create=False)
+    else:
+        checkout_without_hooks(stage_repo, str(worker.branch), str(worker.base_sha))
     write_worker_marker(stage_repo, worker)
     if git(stage_repo, "rev-parse", "HEAD").stdout.strip() != worker.base_sha:
         raise ClonegrownError("worker checkout differs from immutable requested base")
@@ -186,7 +218,7 @@ def _provision_worktree(canonical: Path, stage_repo: Path, worker: WorkerRecord)
     sparse = sparse_checkout_enabled(canonical)  # the config is shared; only the pattern file is per-worktree
     if sparse:
         copy_sparse_patterns(canonical, stage_repo)
-    _check_out_base(stage_repo, worker)
+    _check_out_base(stage_repo, worker, canonical)
     return SpawnDetails(
         source_remote=None,
         alternates_detached=False,
@@ -237,18 +269,24 @@ def _record_spawn_failure(ws: Path, worker_id: int, exc: BaseException) -> None:
         worker.release_ownership()
         worker.save(ws)
         if not published:
-            git(state.verify_canonical(), "update-ref", "-d", state.base_ref(worker_id), check=False)
+            delete_ref(state.verify_canonical(), state.base_ref(worker_id), check=False)
 
 
 def _discard_unpublished_stage(ws: Path, worker_id: int, stage: Path) -> None:
     if worker_slot(ws, worker_id).exists():
         return
-    shutil.rmtree(stage, ignore_errors=True)
+    stage_error: str | None = None
+    try:
+        delete_verified(stage, "worker stage")
+    except ClonegrownError as exc:
+        stage_error = str(exc)[:500]  # left for recovery; the record says so
     with contextlib.suppress(Exception):
         state = WorkspaceState.load(ws)
         canonical = state.verify_canonical()
         worker = WorkerRecord.load(ws, worker_id)
-        forget_worktree(canonical, worker)
+        forget_worktree(canonical, worker, persist=lambda: worker.save(ws))
+        if stage_error:
+            worker.error = f"{worker.error or 'spawn failed'}; stage not removed: {stage_error}"
         worker.save(ws)
 
 
@@ -269,9 +307,16 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
     if mode == "worktree" and strong:
         raise ClonegrownError("a worktree worker shares canonical's objects; --strong does not apply")
     ws = ws_path.resolve()
-    worker, created = allocate_spawn(ws, base, task, strong, request_id, mode)
-    if not created:
-        return _wait_for_existing(ws, int(worker.id), wait_seconds)
+    for _ in range(3):
+        worker, created = allocate_spawn(ws, base, task, strong, request_id, mode)
+        if created:
+            break
+        try:
+            return _wait_for_existing(ws, int(worker.id), wait_seconds)
+        except _RetryableOutcome:
+            continue  # the existing worker was abandoned or failed meanwhile; allocate again
+    else:
+        raise ClonegrownError(f"request {request_id!r} kept settling in a retryable state; try again")
     worker_id = int(worker.id)
     stage = Path(str(worker.stage_root))
 
@@ -331,7 +376,9 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = True,
                 current.pending_spawn_details = None
                 current.release_ownership()
                 current.save(ws)
-                git(state.verify_canonical(), "update-ref", "-d", state.base_ref(worker_id))
+                # Best effort: the worker is ready either way; a pin that cannot be dropped (a
+                # symbolic ref planted under its name) is reported by status, not by this spawn.
+                delete_ref(state.verify_canonical(), state.base_ref(worker_id), check=False)
                 failpoint("spawn.after_ready")
                 return current.to_json()
 
@@ -364,6 +411,7 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
     already collected, unchanged worker is a no-op that refreshes the summary ref.
     """
     ws = ws_path.resolve()
+    require_worker(ws, worker_id)  # never create a lock file for an id that names no worker
     with file_lock(worker_lock_path(ws, worker_id)) as acquired:
         if not acquired:
             raise ClonegrownError("worker is busy")
@@ -375,13 +423,15 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
                     raise ClonegrownError("worker changed after collection; refusing to hide newer work")
                 if not ref_points_at(canonical, worker.result_ref, worker.result_sha):
                     raise ClonegrownError("collected result ref is missing or changed")
-                git(canonical, "update-ref", state.summary_ref(worker_id), str(worker.result_sha))
+                _require_plain_refs(canonical, state.summary_ref(worker_id), str(worker.result_ref))
+                write_ref(canonical, state.summary_ref(worker_id), str(worker.result_sha))
                 return worker.to_json()
             if worker.status != WorkerStatus.READY:
                 raise ClonegrownError(f"worker is not collectable from state {worker.status}")
         first = snapshot_worker(state, worker, require_ancestry=not allow_rewrite)
         candidate = first.head
         result_ref = state.result_ref(worker_id, candidate)
+        _require_plain_refs(canonical, result_ref, state.summary_ref(worker_id))
         with workspace_lock(ws):
             state, current, canonical = load_worker(ws, worker_id)
             if current.status != WorkerStatus.READY or current.worker_token != worker.worker_token:
@@ -423,7 +473,7 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
                 state, current, canonical = load_worker(ws, worker_id)
                 if current.status != WorkerStatus.COLLECTING or current.candidate_sha != candidate:
                     raise ClonegrownError("collection metadata changed")
-                git(canonical, "update-ref", state.summary_ref(worker_id), candidate)
+                write_ref(canonical, state.summary_ref(worker_id), candidate)
                 failpoint("collect.after_summary")
                 current.status = WorkerStatus.COLLECTED
                 current.result_sha = candidate
@@ -437,11 +487,84 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
                 return current.to_json()
 
 
+# --- the work lease ------------------------------------------------------------
+
+# Statuses whose lease can be released: the worker is published and no operation is in flight.
+LEASE_RELEASABLE = frozenset({WorkerStatus.READY, WorkerStatus.COLLECTED, WorkerStatus.BROKEN})
+
+
+def claim(ws_path: Path, worker_id: int) -> dict[str, Any]:
+    """Take the cooperative work lease on a released worker that is still ``ready``.
+
+    A spawned worker is leased from the start; ``claim`` exists for the
+    handoff after an explicit ``release``. A collected worker is one-shot and
+    cannot be claimed again.
+    """
+    ws = ws_path.resolve()
+    require_worker(ws, worker_id)  # never create a lock file for an id that names no worker
+    with file_lock(worker_lock_path(ws, worker_id)) as acquired:
+        if not acquired:
+            raise ClonegrownError("worker is busy")
+        with workspace_lock(ws):
+            _, worker, _ = load_worker(ws, worker_id)
+            if worker.status != WorkerStatus.READY:
+                raise ClonegrownError(f"only a ready worker can be claimed; worker {worker_id} is {worker.status}")
+            if worker.is_leased:
+                raise ClonegrownError(f"worker {worker_id} is already leased; it must be released before it can be claimed again")
+            worker.lease = "active"
+            worker.lease_released = None
+            worker.save(ws)
+            return worker.to_json()
+
+
+def release(ws_path: Path, worker_id: int) -> dict[str, Any]:
+    """Release the cooperative work lease so the worker may be discarded. Repeating it is a no-op.
+
+    Release is the caller's statement that every process it started in the
+    worker has stopped. Clonegrown records that statement; it cannot verify it.
+    """
+    ws = ws_path.resolve()
+    require_worker(ws, worker_id)  # never create a lock file for an id that names no worker
+    with file_lock(worker_lock_path(ws, worker_id)) as acquired:
+        if not acquired:
+            raise ClonegrownError("worker is busy")
+        with workspace_lock(ws):
+            _, worker, _ = load_worker(ws, worker_id)
+            if worker.status not in LEASE_RELEASABLE:
+                raise ClonegrownError(f"worker {worker_id} holds no releasable lease in state {worker.status}")
+            if worker.is_leased:
+                worker.lease = "released"
+                worker.lease_released = time.time()
+                worker.save(ws)
+            return worker.to_json()
+
+
 # --- discard -----------------------------------------------------------------
 
-def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = False) -> dict[str, Any]:
-    """Delete a worker directory. Uncollected work needs ``abandon``; drift after collection needs ``force``."""
+def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = False,
+            discard_ignored: bool = False) -> dict[str, Any]:
+    """Delete a released worker through an authenticated quarantine.
+
+    Each acknowledgement is separate and explicit: an uncollected worker needs
+    ``abandon`` (which covers everything it holds); a collected worker needs
+    ``force`` for changes detected after collection and ``discard_ignored``
+    for Git-ignored paths, which the collection snapshot never saw. The lease
+    is checked before any flag: none of them overrides it. A collected worker
+    is one-shot, so ``abandon`` does not apply to it.
+
+    Deletion records its intent, fingerprints the worker, moves the slot to
+    ``.cws/quarantine/<id>-<token>`` with one rename, rechecks the quarantined
+    worker against that fingerprint, deletes it with errors enabled, proves
+    the path absent, and cleans canonical's worktree state. The terminal
+    status is recorded only when every part succeeded; otherwise the record
+    stays ``discarding`` with the quarantine path and the error, and a later
+    ``recover`` resumes it. A worker preserved in quarantine because it
+    changed can be deleted by running ``discard`` again with the same
+    acknowledgement (``abandon``, or ``force`` for a collected one), which
+    takes a fresh fingerprint.
+    """
     ws = ws_path.resolve()
+    require_worker(ws, worker_id)  # never create a lock file for an id that names no worker
     with file_lock(worker_lock_path(ws, worker_id)) as acquired:
         if not acquired:
             raise ClonegrownError("worker is busy")
@@ -449,38 +572,149 @@ def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = 
             state, worker, canonical = load_worker(ws, worker_id)
             if worker.status in WorkerStatus.GONE:
                 return worker.to_json()
-            if worker.status in WorkerStatus.ACTIVE:
-                raise ClonegrownError(f"worker has an active operation: {worker.status}")
-            # Every destructive path authenticates the published worker first, so that
-            # --abandon cannot turn metadata tampering into an accepted deletion.
-            if worker_slot(ws, worker_id).exists():
-                verify_worker(state, worker)
-            if worker.status == WorkerStatus.COLLECTED:
-                if not ref_points_at(canonical, worker.result_ref, worker.result_sha):
-                    raise ClonegrownError("refusing deletion because collected result is not preserved")
-                if worker.repo.exists() and not force:
-                    snap = snapshot_worker(state, worker, require_ancestry=not worker.allow_rewrite)
-                    if snap.head != worker.result_sha:
-                        raise ClonegrownError("worker changed after collection; use --force only to knowingly discard it")
-            elif not abandon:
-                raise ClonegrownError("refusing to delete an uncollected worker; use explicit --abandon")
-            worker.discard_intent = WorkerStatus.ABANDONED if abandon else WorkerStatus.DISCARDED
-            worker.discard_previous = worker.status
-            worker.discard_started = time.time()
+            if worker.status == WorkerStatus.DISCARDING and _intent_never_moved(ws, worker):
+                # A recorded intent that moved nothing is stale: withdraw it and decide again
+                # with the caller's acknowledgements against the worker as it is now.
+                withdraw_discard(worker)
+                worker.save(ws)  # the withdrawal stands even if the fresh authorization refuses
+                _authorize_discard(ws, state, worker, canonical, worker_id, abandon, force, discard_ignored)
+            elif worker.status == WorkerStatus.DISCARDING:
+                _reauthorize_quarantined(state, worker, canonical, abandon, force)
+            else:
+                _authorize_discard(ws, state, worker, canonical, worker_id, abandon, force, discard_ignored)
             worker.take_ownership(WorkerStatus.DISCARDING)
             worker.save(ws)
         failpoint("discard.after_mark")
-        failpoint("discard.before_delete")
-        shutil.rmtree(worker_slot(ws, worker_id), ignore_errors=True)
-        if worker.stage_root and Path(worker.stage_root).exists():
-            shutil.rmtree(Path(worker.stage_root), ignore_errors=True)
-        failpoint("discard.after_delete")
+
+        def persist() -> None:
+            with workspace_lock(ws):
+                worker.save(ws)
+
+        def preserve(exc: BaseException) -> None:
+            # Decide by what is on disk, not by which field happens to be set. Nothing moved:
+            # return the worker to its previous status with the discard intent withdrawn.
+            # Content in quarantine: keep it there with the reason. Content gone but cleanup
+            # unfinished: stay discarding so recover finishes it.
+            with workspace_lock(ws):
+                _, current, _ = load_worker(ws, worker_id)
+                if current.status != WorkerStatus.DISCARDING or current.worker_token != worker.worker_token:
+                    return
+                slot_present = worker_slot(ws, worker_id).exists()
+                quarantine_present = bool(current.quarantine_path and os.path.lexists(current.quarantine_path))
+                reason = str(exc) if isinstance(exc, ClonegrownError) else f"{type(exc).__name__}: {exc}"
+                if slot_present and not quarantine_present:
+                    withdraw_discard(current)
+                elif quarantine_present:
+                    current.quarantine_error = reason[:1000]
+                else:
+                    current.error = f"deletion incomplete: {reason[:900]}"
+                current.release_ownership()
+                current.save(ws)
+
+        with _rolling_back(preserve):
+            delete_through_quarantine(ws, state, worker, canonical, persist)
         with workspace_lock(ws):
             state, current, canonical = load_worker(ws, worker_id)
-            forget_worktree(canonical, current)
-            current.status = current.discard_intent or WorkerStatus.DISCARDED
-            current.discarded = time.time()
-            current.release_ownership()
-            current.save(ws)
+            if current.status != WorkerStatus.DISCARDING or current.worker_token != worker.worker_token:
+                raise ClonegrownError("discard metadata changed")
+            if not finish_deletion(canonical, current, lambda: current.save(ws)):
+                raise ClonegrownError(
+                    f"worker {worker_id} content is deleted but canonical cleanup is incomplete "
+                    f"({current.branch_cleanup_left or current.worktree_admin_left}); "
+                    "the record stays discarding and recover will retry")
             failpoint("discard.after_metadata")
             return current.to_json()
+
+
+def _authorize_discard(ws: Path, state: WorkspaceState, worker: WorkerRecord, canonical: Path, worker_id: int,
+                       abandon: bool, force: bool, discard_ignored: bool) -> None:
+    """Every refusal before deletion intent is recorded; the record is not modified here."""
+    if worker.status in WorkerStatus.ACTIVE:
+        raise ClonegrownError(f"worker has an active operation: {worker.status}")
+    # Every destructive path authenticates the published worker first, so that
+    # --abandon cannot turn metadata tampering into an accepted deletion.
+    if worker_slot(ws, worker_id).exists():
+        verify_worker(state, worker)
+    if abandon and worker.status == WorkerStatus.COLLECTED:
+        raise ClonegrownError("a collected worker is one-shot; --abandon applies only to an uncollected worker")
+    if worker.status != WorkerStatus.SPAWN_FAILED and worker.is_leased:
+        raise ClonegrownError(
+            f"worker {worker_id} is leased; stop every process that writes to it, then run "
+            f"`clonegrown release {worker_id}` before discarding it")
+    if worker.status == WorkerStatus.COLLECTED:
+        if not ref_points_at(canonical, worker.result_ref, worker.result_sha):
+            raise ClonegrownError("refusing deletion because collected result is not preserved")
+        if worker.repo.exists():
+            # Two custody questions, answered separately: did the committed tip move,
+            # and is there ignored content the collection snapshot never inspected?
+            missing: list[str] = []
+            if not force:
+                snap = snapshot_worker(state, worker, require_ancestry=not worker.allow_rewrite)
+                if snap.head != worker.result_sha:
+                    missing.append("--force: the worker changed after collection")
+            if not discard_ignored:
+                ignored = inspect_ignored_content(worker.repo)
+                if ignored.count:
+                    missing.append(f"--discard-ignored: the worker holds {ignored.describe()}")
+            if missing:
+                raise ClonegrownError(
+                    f"refusing to discard collected worker {worker_id} without explicit acknowledgement; "
+                    "required: " + "; ".join(missing))
+    elif not abandon:
+        raise ClonegrownError("refusing to delete an uncollected worker; use explicit --abandon")
+    worker.discard_intent = WorkerStatus.ABANDONED if abandon else WorkerStatus.DISCARDED
+    worker.discard_previous = worker.status
+    worker.discard_started = time.time()
+    if worker.is_worktree:
+        # Record where the task branch points now, before anything is deleted; cleanup
+        # deletes it only if it still points there. An absent branch is recorded as the
+        # all-zero id, so one that appears later under the same name is not taken as ours.
+        worker.branch_cleanup_sha = (resolve_ref(canonical, f"refs/heads/{worker.branch}")
+                                     or absent_marker(str(worker.base_sha)))
+
+
+def ws_for(worker: WorkerRecord) -> Path:
+    """The workspace a validated record belongs to: two levels above its repository path."""
+    return worker.repo.parent.parent
+
+
+def _intent_never_moved(ws: Path, worker: WorkerRecord) -> bool:
+    """A discarding record whose owner is gone and whose slot is still in place, with no quarantine anywhere."""
+    if process_alive(worker.owner_pid, worker.owner_start):
+        raise ClonegrownError(f"worker has an active operation: {worker.status}")
+    quarantined = worker.quarantine_path is not None and os.path.lexists(worker.quarantine_path)
+    return (worker_slot(ws, int(worker.id)).exists() and not quarantined
+            and unrecorded_quarantine(ws, worker) is None)
+
+
+def _reauthorize_quarantined(state: WorkspaceState, worker: WorkerRecord, canonical: Path,
+                             abandon: bool, force: bool) -> None:
+    """A worker preserved in quarantine is deleted only by a fresh, matching acknowledgement."""
+    if process_alive(worker.owner_pid, worker.owner_start):
+        raise ClonegrownError(f"worker has an active operation: {worker.status}")
+    if worker.quarantine_path is None:
+        found = adoptable_quarantine(ws_for(worker), state, worker, canonical)
+        if found is None:
+            return  # nothing of the worker remains to ask about; this run finishes stage and canonical cleanup
+        worker.quarantine_path = str(found)  # found at its derived path with no recorded fingerprint
+    if worker.quarantine_snapshot == DELETION_AUTHORIZED:
+        return  # the custody check already passed and deletion began; this run just finishes it
+    needed = "abandon" if worker.discard_intent == WorkerStatus.ABANDONED else "force"
+    if not (abandon if needed == "abandon" else force):
+        raise ClonegrownError(
+            f"worker {int(worker.id)} is preserved in quarantine at {worker.quarantine_path} "
+            f"({worker.quarantine_error or 'deletion did not complete'}); pass --{needed} to delete it anyway")
+    repo = Path(worker.quarantine_path) / str(state.repo_name)
+    if worker_slot(ws_for(worker), int(worker.id)).exists():
+        raise ClonegrownError(
+            f"worker {int(worker.id)} has content both in its slot and at {worker.quarantine_path}; "
+            "nothing is deleted until one of them is moved away by hand")
+    try:
+        repair_owned_worktree(canonical, worker, repo)
+        verify_worker(state, worker, repo=repo)
+    except AdminDirectoryMissing:
+        # Git can no longer read the quarantined checkout, but the path is derived from this
+        # record's identity under .cws and the caller has just acknowledged deleting it.
+        pass
+    worker.quarantine_snapshot = custody_fingerprint(repo)  # the new baseline the caller just accepted
+    worker.quarantine_error = None

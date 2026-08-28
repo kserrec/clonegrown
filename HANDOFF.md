@@ -1,50 +1,74 @@
 # Session handoff
 
-Written 2026-08-27. This handoff becomes stale when Phase 1 Step 1.8 is
-completed, `PLAN.md` changes the next unfinished Step, or this checkout moves
-away from `main`.
+Written 2026-08-28 (updated after Phase 1 closed). This handoff becomes stale
+when Phase 4 Step 4.1 is completed, `PLAN.md` changes the next unfinished
+Step, or this checkout moves away from `main`.
 
 ## Exact stop point
 
-- Work is on `main`, tracking `origin/main`.
-- Phase 1 is the whole contract-and-installer remediation body. Its individual
-  parts are Steps 1.1 through 1.11; use those terms literally.
-- Steps 1.1 through 1.7 are complete. The next `$next` pass is **Phase 1,
-  Step 1.8 — State recovery guarantees at represented checkpoints**.
-- Step 1.8 is prose-only. Follow its exact scope in `PLAN.md`: correct the
-  `recovery.py` module contract and nearby recovery descriptions that promise
-  more than the represented durable checkpoints provide. Do not change
-  executable behavior unless Kyle separately authorizes a different Step.
-- Steps 1.9 through 1.11 remain pending after Step 1.8. Step 1.11 is the final
-  cold review for the complete Phase 1 diff.
+- Work is on `main`, tracking `origin/main`, with the complete Phase 1 change
+  set **uncommitted** in the working tree (Kyle has chosen not to read code
+  until all phases are done; commit at wrap-up).
+- Phase 1 (Steps 1.1 through 1.13) is complete and closed by the Step 1.13
+  fresh review, which found no open Phase 1 finding.
+- Phase 2 Step 2.1 is complete: `WorkerRecord.validate` is the one
+  table-driven validator, with the lease and quarantine fields reserved and
+  validated but not yet set by any command.
+- Phase 2 Step 2.2 is complete: workers are leased from spawn, `release`
+  and `claim` exist in the API and CLI, discard and recovery deletion require
+  a released lease, and a collected worker is one-shot.
+- Phase 2 Step 2.3 is complete: discard of a collected worker enumerates
+  ignored paths by name and requires `--discard-ignored`.
+- Phase 2 Step 2.4 is complete: worktree task branches carry a private
+  ownership ref created with them in one transaction and are deleted only by
+  a verifying transaction; admin-directory removal is error-checked and
+  absence-verified; conflicts retain evidence and are reported.
+- Phase 2 Step 2.5 is complete: discard fingerprints, quarantines,
+  rechecks, deletes with errors enabled, proves absence, and records a
+  terminal status only when everything is clean; recovery resumes
+  quarantines and never labels residue gone.
+- Phase 2 Step 2.6 is complete: a diverged published spawn is preserved as
+  `broken` with a content-free description; the worktree add/persist window
+  is closed by gitdir-based ownership.
+- Phase 2 (Steps 2.1 through 2.7) is complete and closed by the Step 2.7
+  cold review; its six confirmed defects were fixed and re-reviewed in the
+  same pass (details under Step 2.7 in `PLAN.md`). A Phase 2 bughunt then
+  found and fixed eight more (checked-out branch deletion, three stuck
+  cleanup states, Unicode-digit and non-UTF-8 path crashes, validator bypass,
+  fingerprint blind spots); its record follows Step 2.7 in `PLAN.md`.
+- Phase 3 (Steps 3.1 through 3.5) is complete and closed by the Step 3.5
+  cold review: create-only allocation, validated request indexes, a
+  non-mutating `status` audit with stable issue codes, and ownership-scoped
+  `recover` reconciliation; its five review findings were fixed in the same
+  pass (records under Phase 3 in `PLAN.md`). A Phase 3 bughunt then found
+  and fixed eight more, chiefly namespace writes that followed symbolic refs
+  onto canonical's own branches; its record follows Step 3.5 in `PLAN.md`.
+- The next `$next` pass is the first unfinished Step of **Phase 4 — Restore
+  exact Git semantics and safe operational errors**; follow its exact scope
+  in `PLAN.md`.
 
-## Completed in this session
+## Completed through this stop point
 
-- Step 1.1 replaced unconditional safety, isolation, idempotency, integration,
-  recovery, and evidence claims with the verified current alpha boundary and
-  froze the later custody contract.
-- Steps 1.2 and 1.4 through 1.6 replaced the custom installer's unchecked
-  replacement behavior with four-target installation identity, staged
-  publication and rollback, filesystem-identity-bound stage cleanup, a
-  colon-safe command launcher, and exact preflight framing/path validation.
-- Step 1.3 cold-reviewed those changes and recorded seven bounded remediation
-  findings. The first three were resolved by Steps 1.4 through 1.6.
-- Step 1.7 documented the real hook boundary: only the default private
-  `.git/hooks` location is separate. A copied `core.hooksPath` can resolve
-  outside the worker; absolute values receive a warning, while tilde-prefixed
-  and traversal-heavy values can escape without it. A final fresh review found
-  no remaining Step 1.7 issue.
-- `PLAN.md` now defines Phase versus Step near the top so future status reports
-  do not call Phase 1 a Step.
+- Steps 1.1 through 1.11 as recorded in `PLAN.md`.
+- Step 1.12 bound backup relocation to token-bearing reservations and to
+  identity plus ownership evidence for every deletion and restoration path.
+  A bughunt against that working tree found and fixed seven installer defects
+  (non-UTF-8 paths under a UTF-8 locale, identity-only trust defeated by inode
+  reuse, a false rollback message, a locale-dependent test, three disagreeing
+  ownership predicates, a FIFO blocking the installer, and updates failing
+  under a non-UTF-8 source path), each with a regression and three cold-review
+  rounds; details are under Step 1.12 in `PLAN.md`.
+- Step 1.13's fresh review closed Phase 1; its two low notes were fixed in the
+  same pass (`SIGPIPE` trapped with a regression; README and architecture now
+  say a caught signal after commit can leave authenticated backups).
 
 ## Verified close state
 
-- `python3 -m unittest discover -s tests`: 31 tests passed.
-- `python3 -m unittest discover -s tests -p 'test_installer.py'`: 13 tests
-  passed.
-- `python3 tests/campaign/hardening_suite.py --one provisioning_hooks`: passed
-  and returned the expected absolute-hook shared-dependency warning.
-- `sh -n install.sh`, `python3 -m compileall -q clonegrown tests`, and
-  `git diff --check`: passed.
+- `python3 -m unittest discover -s tests`: 147 tests passed.
+- Campaign cases (init/spawn/collect/discard crash matrices, dirty-ready
+  recovery, recovery resilience, hook provisioning, private hook boundary) in
+  clone and worktree modes: passed.
+- Five direct CLI output probes, retired-claim search, out-of-checkout byte
+  compilation, `sh -n install.sh`, and `git diff --check`: passed.
 - No session-owned Python, Git, shell, or reviewer process remains running.
-- No pending user ruling or manual action blocks Step 1.8.
+- No pending user ruling or manual action blocks Phase 4.

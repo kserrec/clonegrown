@@ -11,7 +11,7 @@ PRIVATE_FIELDS = {"canonical_token", "worker_token", "params_hash", "owner_pid",
 
 READY_WORKER_KEYS = {
     "id", "status", "mode", "strong", "task", "base", "base_sha", "branch", "path", "request_id",
-    "workspace_id", "created", "ready",
+    "workspace_id", "created", "ready", "lease",
     "source_remote", "alternates_detached", "copied_local_config", "copied_sparse_checkout",
     "copied_auxiliary_refs", "compatibility_warnings",
 }
@@ -64,6 +64,10 @@ class ClonegrownCliTests(unittest.TestCase):
             self.assert_no_private_fields(collected)
             self.assertEqual(collected["status"], "collected")
 
+            rc, released = self.cli(repo, "release", str(worker["id"]))
+            self.assertEqual(rc, 0)
+            self.assertEqual(released["lease"], "released")
+
             rc, discarded = self.cli(repo, "discard", str(worker["id"]))
             self.assertEqual(rc, 0)
             self.assert_no_private_fields(discarded)
@@ -87,8 +91,11 @@ class ClonegrownCliTests(unittest.TestCase):
             _, listing = self.cli(repo, "status")
             self.assertEqual(set(listing), {"workspace", "canonical", "workspace_id", "workers", "issues"})
             self.assertEqual(set(listing["workers"][0]), set(collected))
+            _, released = self.cli(repo, "release", str(worker["id"]))
+            self.assertEqual(set(released), set(collected) | {"lease_released"})
+            self.assertRegex(released["lease_released"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
             _, discarded = self.cli(repo, "discard", str(worker["id"]))
-            self.assertEqual(set(discarded), set(collected) | {"discarded"})
+            self.assertEqual(set(discarded), set(released) | {"discarded"})
 
     def test_default_workspace_name_and_explicit_override(self) -> None:
         with tempfile.TemporaryDirectory() as td:

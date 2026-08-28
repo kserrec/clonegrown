@@ -82,7 +82,7 @@ def t_detached_head_refused():
 
 def t_post_collect_drift_guard():
     b,c,w,_=mkcase('post-collect'); m=spawn(w,request='r'); r=Path(m['path']); a=commit(r,'A'); cws('collect',w,str(m['id'])); bsha=commit(r,'B')
-    p=cws('discard',w,str(m['id']),check=False); assert_true(p.returncode!=0 and r.exists())
+    cws('release',w,str(m['id'])); p=cws('discard',w,str(m['id']),check=False); assert_true(p.returncode!=0 and 'force' in p.stderr and r.exists())
     p2=cws('collect',w,str(m['id']),check=False); assert_true(p2.returncode!=0 and 'changed after collection' in p2.stderr)
     return result(collected=a,newer=bsha)
 
@@ -177,7 +177,7 @@ def t_base_pin_survives_gc():
     assert_true(marker.exists()); git(c,'branch','-D','temp'); git(c,'reflog','expire','--expire=now','--all'); git(c,'gc','--prune=now'); out,err=p.communicate(timeout=30); assert_true(p.returncode==0,err); m=json.loads(out); assert_true(m['base_sha']==sha and git(Path(m['path']),'rev-parse','HEAD').stdout.strip()==sha); return result(base=sha)
 
 def t_collect_discard_race():
-    b,c,w,_=mkcase('collect-discard'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r)
+    b,c,w,_=mkcase('collect-discard'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r); cws('release',w,str(m['id']))
     def col(): return cws('collect',w,str(m['id']),check=False)
     def dis(): return cws('discard',w,str(m['id']),check=False)
     with cf.ThreadPoolExecutor(max_workers=2) as ex: a=ex.submit(col); d=ex.submit(dis); pc,pd=a.result(),d.result()
@@ -208,7 +208,7 @@ def t_init_crash_matrix():
     return result(failpoints=out)
 
 def t_spawn_crash_matrix():
-    fps=('spawn.after_allocated','spawn.after_clone','spawn.after_checkout','spawn.after_publish')+(('spawn.after_repair',) if WORKTREE else ())+('spawn.after_ready',); actions=[]
+    fps=('spawn.after_allocated',)+(('spawn.after_worktree_add',) if WORKTREE else ())+('spawn.after_clone','spawn.after_checkout','spawn.after_publish')+(('spawn.after_repair',) if WORKTREE else ())+('spawn.after_ready',); actions=[]
     for i,fp in enumerate(fps):
         b,c,w,_=mkcase(f'spawn-crash-{i}'); p=cws('spawn',w,'--task','x','--base','main','--request-id','r',ISOLATION_FLAG,env={'CWS_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,1)
         if fp in ('spawn.after_publish','spawn.after_repair','spawn.after_ready'): assert_true(mm['status']=='ready')
@@ -226,9 +226,9 @@ def t_collect_crash_matrix():
     return result(cases=rows)
 
 def t_discard_crash_matrix():
-    fps=('discard.after_mark','discard.before_delete','discard.after_delete','discard.after_metadata'); rows=[]
+    fps=('discard.after_mark','discard.before_delete','discard.after_quarantine','discard.after_recheck','discard.after_delete','discard.after_metadata'); rows=[]
     for i,fp in enumerate(fps):
-        b,c,w,_=mkcase(f'discard-crash-{i}'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r); cws('collect',w,str(m['id'])); p=cws('discard',w,str(m['id']),env={'CWS_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,m['id']);
+        b,c,w,_=mkcase(f'discard-crash-{i}'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r); cws('collect',w,str(m['id'])); cws('release',w,str(m['id'])); p=cws('discard',w,str(m['id']),env={'CWS_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,m['id']);
         if mm['status']=='collected': cws('discard',w,str(m['id'])); mm=meta(w,m['id'])
         assert_true(mm['status']=='discarded' and not r.exists()); assert_true(git(c,'cat-file','-e',sha).returncode==0); rows.append([fp,rep])
     return result(cases=rows)
@@ -304,7 +304,7 @@ def t_metadata_path_tamper_guards():
     return result(collect_error=pc.stderr.strip()[-160:],discard_error=pd.stderr.strip()[-160:])
 
 def t_worker_slot_symlink_guard():
-    b,c,w,_=mkcase('slot-symlink'); m=spawn(w,request='r'); slot=Path(m['path']).parent; saved=b/'saved'; slot.rename(saved)
+    b,c,w,_=mkcase('slot-symlink'); m=spawn(w,request='r'); cws('release',w,str(m['id'])); slot=Path(m['path']).parent; saved=b/'saved'; slot.rename(saved)
     victim=b/'victim'; victim.mkdir(); (victim/'KEEP').write_text('keep'); os.symlink(victim,slot)
     p=cws('discard',w,str(m['id']),'--abandon',check=False)
     assert_true(p.returncode!=0 and (victim/'KEEP').exists()); return result(error=p.stderr.strip()[-160:])
@@ -355,8 +355,10 @@ def t_normal_failure_rollbacks():
 
 def t_final_path_collision_is_never_deleted():
     b,c,w,_=mkcase('slot-collision'); victim=w/'1'; victim.mkdir(); (victim/'KEEP').write_text('keep')
-    p=cws('spawn',w,'--task','collision','--base','main','--request-id','collision',ISOLATION_FLAG,check=False); assert_true(p.returncode!=0)
-    rep=jload(cws('recover',w)); assert_true((victim/'KEEP').exists()); assert_true(meta(w,1)['status']=='broken')
+    p=cws('spawn',w,'--task','collision','--base','main','--request-id','collision',ISOLATION_FLAG,check=False); assert_true(p.returncode!=0 and 'counter is stale' in p.stderr)
+    # Allocation is create-only: the occupied slot is evidence, so no record is written and nothing is touched.
+    rep=jload(cws('recover',w)); assert_true((victim/'KEEP').exists()); assert_true(not (w/'.cws'/'workers'/'1.json').exists())
+    s=jload(cws('status',w)); assert_true(any(i.get('issue')=='orphan-worker-directory' and i.get('id')==1 for i in s['issues']))
     return result(reports=rep)
 
 def t_branch_rename_and_gitdir_substitution_refused():
@@ -368,7 +370,7 @@ def t_branch_rename_and_gitdir_substitution_refused():
     return result(branch_error=p.stderr.strip()[-120:],gitdir_error=p2.stderr.strip()[-120:])
 
 def t_result_survives_discard_and_gc():
-    b,c,w,_=mkcase('result-gc'); m=spawn(w,request='r'); sha=commit(Path(m['path']),'valuable'); got=jload(cws('collect',w,str(m['id']))); cws('discard',w,str(m['id']))
+    b,c,w,_=mkcase('result-gc'); m=spawn(w,request='r'); sha=commit(Path(m['path']),'valuable'); got=jload(cws('collect',w,str(m['id']))); cws('release',w,str(m['id'])); cws('discard',w,str(m['id']))
     git(c,'reflog','expire','--expire=now','--all'); git(c,'gc','--prune=now'); assert_true(git(c,'cat-file','-e',f'{sha}^{{commit}}',check=False).returncode==0)
     assert_true(git(c,'rev-parse',got['result_ref']).stdout.strip()==sha); return result(ref=got['result_ref'],sha=sha)
 
@@ -389,7 +391,7 @@ def t_control_and_lock_symlink_rejected():
 
 def t_late_commit_after_crashed_discard_survives():
     b,c,w,_=mkcase('late-discard'); m=spawn(w,request='r'); r=Path(m['path']); first=commit(r,'first')
-    cws('collect',w,str(m['id'])); p=cws('discard',w,str(m['id']),env={'CWS_FAILPOINT':'discard.before_delete'},check=False); assert_true(p.returncode==88)
+    cws('collect',w,str(m['id'])); cws('release',w,str(m['id'])); p=cws('discard',w,str(m['id']),env={'CWS_FAILPOINT':'discard.before_delete'},check=False); assert_true(p.returncode==88)
     late=commit(r,'late'); reports=jload(cws('recover',w)); assert_true(r.exists()); mm=meta(w,m['id']); assert_true(mm['status']=='collected')
     s=jload(cws('status',w)); assert_true(s['workers'][0].get('drift')=='changed-after-collection')
     return result(first=first,late=late,reports=reports)

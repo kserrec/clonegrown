@@ -17,7 +17,7 @@ import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .core import (
     PROTOCOL_NAME, ClonegrownError, atomic_json, file_lock, git_common_dir, git_dir, lexical_abs, load_json,
@@ -27,6 +27,7 @@ from .core import (
 SCHEMA = 3
 RESERVED_SOURCE_PREFIX = f"{PROTOCOL_NAME}-source"
 WORKER_MODES = frozenset({"clone", "worktree"})
+LEASE_STATES = frozenset({"active", "released"})
 
 _HEX = r"[0-9a-f]+"
 
@@ -76,6 +77,7 @@ def ws_paths(ws: Path) -> dict[str, Path]:
         "requests": ctl / "requests",
         "locks": ctl / "locks",
         "staging": ctl / "staging",
+        "quarantine": ctl / "quarantine",
     }
 
 
@@ -99,6 +101,21 @@ def worker_slot(ws: Path, worker_id: int) -> Path:
 
 def staging_root(ws: Path, worker_id: int, token: str) -> Path:
     return ws_paths(ws)["staging"] / f"{worker_id}-{token}"
+
+
+def base_pin_ref(workspace_id: str, worker_id: int) -> str:
+    """The ref that pins a worker's base commit against GC until it is ready or gone."""
+    return f"refs/{PROTOCOL_NAME}/{workspace_id}/bases/{worker_id}"
+
+
+def branch_owner_ref(workspace_id: str, worker_id: int) -> str:
+    """The private ref that proves a worktree worker created its task branch; created with it, deleted with it."""
+    return f"refs/{PROTOCOL_NAME}/{workspace_id}/workers/{worker_id}/branch-owner"
+
+
+def quarantine_root(ws: Path, worker_id: int, token: str) -> Path:
+    """Where a worker slot is parked before its final deletion; derived from identity, never stored raw."""
+    return ws_paths(ws)["quarantine"] / f"{worker_id}-{token}"
 
 
 def canonical_marker_path(canonical: Path, workspace_id: str) -> Path:
@@ -128,6 +145,13 @@ def validate_control_dir(ws: Path, require_state: bool = False) -> None:
             raise ClonegrownError(f"workspace control subdirectory is missing: {p.name}")
         if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
             raise ClonegrownError(f"workspace control subdirectory is unsafe: {p.name}")
+    try:
+        mode = os.lstat(paths["quarantine"]).st_mode
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            raise ClonegrownError("workspace quarantine directory is unsafe: it is not a real directory")
     if paths["state"].exists() or require_state:
         try:
             mode = os.lstat(paths["state"]).st_mode
@@ -230,7 +254,7 @@ class WorkspaceState:
 
     def base_ref(self, worker_id: int) -> str:
         """Pins a worker's base commit against GC until the spawn is published."""
-        return f"{self.ref_prefix}/bases/{worker_id}"
+        return base_pin_ref(str(self.workspace_id), worker_id)
 
     def summary_ref(self, worker_id: int) -> str:
         """Mutable pointer to a worker's most recently collected result."""
@@ -242,6 +266,9 @@ class WorkspaceState:
 
     def worker_branch(self, worker_id: int, task: str) -> str:
         return f"agent/{self.workspace_id}/{worker_id}-{sanitize_task(task)}"
+
+    def branch_owner_ref(self, worker_id: int) -> str:
+        return branch_owner_ref(str(self.workspace_id), worker_id)
 
     def worker_repo(self, ws: Path, worker_id: int) -> Path:
         return lexical_abs(worker_slot(ws, worker_id) / str(self.repo_name))
@@ -322,8 +349,10 @@ class WorkerRecord:
     owner_start: str | None = None
     heartbeat: float | None = None
     # spawn
-    worktree_admin: str | None = None         # .git/worktrees/<name>; cleared once the directory is removed
-    worktree_admin_left: str | None = None
+    worktree_admin: str | None = None         # .git/worktrees/<name>; cleared once the directory is proved gone
+    worktree_admin_left: str | None = None    # why the admin directory was not removed
+    branch_cleanup_sha: str | None = None     # the task branch tip recorded before cleanup; cleared once deleted
+    branch_cleanup_left: str | None = None    # why the task branch was retained
     pending_spawn_details: dict[str, Any] | None = None
     ready: float | None = None
     failed: float | None = None
@@ -352,6 +381,14 @@ class WorkerRecord:
     discard_previous: str | None = None
     discard_started: float | None = None
     discarded: float | None = None
+    # ownership handoff (schema 3, compatible extension): absent means active/unreleased
+    lease: str | None = None                  # "active" or "released"
+    lease_released: float | None = None
+    # deletion custody (schema 3, compatible extension): absent means never quarantined
+    quarantine_path: str | None = None        # .cws/quarantine/<id>-<token>; the parked slot awaiting deletion
+    quarantine_started: float | None = None
+    quarantine_snapshot: dict[str, Any] | None = None  # custody fingerprint taken before the rename
+    quarantine_error: str | None = None       # why the final deletion did not complete
     extra: dict[str, Any] = field(default_factory=dict)
 
     _ALWAYS = frozenset({"schema", "id", "workspace_id", "canonical_token", "worker_token", "status", "path",
@@ -368,7 +405,10 @@ class WorkerRecord:
     def to_json(self) -> dict[str, Any]:
         # Spawn details are part of the ready contract: present (possibly null) once the worker was published.
         always = self._ALWAYS | self._SPAWN_DETAILS if self.ready is not None else self._ALWAYS
-        return _to_json(self, always)
+        out = _to_json(self, always)
+        if self.ready is not None and self.lease is None:
+            out["lease"] = "active"  # an absent lease means leased; every published record says so
+        return out
 
     @classmethod
     def load(cls, ws: Path, worker_id: int) -> "WorkerRecord":
@@ -384,6 +424,11 @@ class WorkerRecord:
     @property
     def is_worktree(self) -> bool:
         return self.mode == "worktree"
+
+    @property
+    def is_leased(self) -> bool:
+        """The cooperative work lease. Absent means leased: records from before the field default safe."""
+        return self.lease != "released"
 
     def take_ownership(self, status: str) -> None:
         """Record this process as the live owner of an operation on the worker."""
@@ -401,7 +446,22 @@ class WorkerRecord:
         self.candidate_ref = None
 
     def validate(self, ws: Path, state: WorkspaceState, worker_id: int) -> None:
-        """Validate durable metadata before it selects a path or a Git ref."""
+        """Validate durable metadata before it selects a path or a Git ref.
+
+        One pass, in order: identity fields that bind the record to this
+        workspace and slot; the shape of every field that is present; the
+        fields each status requires and forbids; and the dependencies between
+        fields (a ref must name its commit, a timestamp must follow its state).
+        Absent lease and quarantine fields keep their conservative meaning:
+        leased and never quarantined.
+        """
+        self._validate_identity(ws, state, worker_id)
+        self._validate_shapes(state)
+        self._validate_status_fields()
+        self._validate_dependencies(ws, state, worker_id)
+
+    # identity: the record is this workspace's record for this slot
+    def _validate_identity(self, ws: Path, state: WorkspaceState, worker_id: int) -> None:
         if self.schema != SCHEMA:
             raise ClonegrownError("worker metadata schema mismatch")
         if type(self.id) is not int or self.id != worker_id:
@@ -415,27 +475,193 @@ class WorkerRecord:
             raise ClonegrownError("worker metadata token is malformed")
         if self.status not in WorkerStatus.ALL:
             raise ClonegrownError(f"unknown worker status: {self.status!r}")
-        if not isinstance(self.task, str) or not isinstance(self.base, str):
+        if not isinstance(self.task, str) or not isinstance(self.base, str) or not self.base:
             raise ClonegrownError("worker task/base metadata is malformed")
         if self.branch != state.worker_branch(worker_id, self.task):
             raise ClonegrownError("worker branch does not match deterministic assignment")
         if self.mode not in WORKER_MODES:
             raise ClonegrownError(f"unknown worker mode: {self.mode!r}")
+        if type(self.strong) is not bool:
+            raise ClonegrownError("worker isolation flag is malformed")
         if self.is_worktree and self.strong:
             raise ClonegrownError("worktree worker cannot be strong")
-        if self.params_hash != params_hash(self.base, self.task, bool(self.strong), self.mode):
+        if self.params_hash != params_hash(self.base, self.task, self.strong, self.mode):
             raise ClonegrownError("worker parameter digest mismatch")
+        # Exact normalized strings: a path that merely normalizes to the slot (``x/../app``)
+        # would still be used verbatim by every operation.
+        if self.path != str(state.worker_repo(ws, worker_id)):
+            raise ClonegrownError("worker metadata path does not match its allocated slot")
+        if self.stage_root != str(lexical_abs(staging_root(ws, worker_id, token))):
+            raise ClonegrownError("worker staging path does not match its allocation token")
+        if self.request_id is not None and not isinstance(self.request_id, str):
+            raise ClonegrownError("worker request ID is malformed")
+
+    # shape: every present field has the type and format its readers assume
+    def _validate_shapes(self, state: WorkspaceState) -> None:
+        for name, check, what in _FIELD_SHAPES:
+            value = getattr(self, name)
+            if value is not None and not check(value):
+                raise ClonegrownError(f"worker {name} is malformed: expected {what}")
+        for name in _COMMIT_FIELDS:
+            value = getattr(self, name)
+            if value is not None and not _is_commit_id(value, state.object_format):
+                raise ClonegrownError(f"worker {name} is not a {state.object_format} commit ID")
+        if self.created is None:
+            raise ClonegrownError("worker created timestamp is missing")
+        if self.lease is not None and self.lease not in LEASE_STATES:
+            raise ClonegrownError(f"unknown worker lease state: {self.lease!r}")
+        if self.discard_intent is not None and self.discard_intent not in WorkerStatus.GONE:
+            raise ClonegrownError(f"unknown worker discard intent: {self.discard_intent!r}")
+        if self.discard_previous is not None and self.discard_previous not in _DISCARD_ORIGINS:
+            raise ClonegrownError(f"unknown worker discard origin: {self.discard_previous!r}")
+        worktree_only = (self.worktree_admin, self.worktree_admin_left, self.branch_cleanup_sha, self.branch_cleanup_left)
+        if any(value is not None for value in worktree_only) and not self.is_worktree:
+            raise ClonegrownError("worktree cleanup fields are only valid for a worktree worker")
+        if self.pending_spawn_details is not None and not set(self.pending_spawn_details) <= self._SPAWN_DETAILS:
+            raise ClonegrownError("worker pending spawn details name fields that are not spawn details")
         if self.worktree_admin is not None:
-            if not self.is_worktree or not isinstance(self.worktree_admin, str):
-                raise ClonegrownError("worktree admin path is malformed")
             admin = lexical_abs(self.worktree_admin)
             if admin.parent != lexical_abs(str(state.canonical_git_dir)) / "worktrees" or admin.name in {"", ".", ".."}:
                 raise ClonegrownError("worktree admin path is outside the canonical worktrees directory")
-        if lexical_abs(self.path or "") != state.worker_repo(ws, worker_id):
-            raise ClonegrownError("worker metadata path does not match its allocated slot")
-        if lexical_abs(self.stage_root or "") != lexical_abs(staging_root(ws, worker_id, token)):
-            raise ClonegrownError("worker staging path does not match its allocation token")
-        sha = self.base_sha
-        expected_len = 64 if state.object_format == "sha256" else 40
-        if not isinstance(sha, str) or len(sha) != expected_len or not re.fullmatch(_HEX, sha):
-            raise ClonegrownError("worker base commit ID is malformed")
+
+    # status: what this status must and must not carry
+    def _validate_status_fields(self) -> None:
+        required, forbidden = _STATUS_FIELDS[str(self.status)]
+        for name in required:
+            if getattr(self, name) is None:
+                raise ClonegrownError(f"worker in status {self.status} is missing {name}")
+        for name in forbidden:
+            if getattr(self, name) is not None:
+                raise ClonegrownError(f"worker in status {self.status} must not carry {name}")
+        if self.status not in WorkerStatus.ACTIVE and self.owner_pid is not None:
+            raise ClonegrownError(f"worker in status {self.status} must not have an operation owner")
+
+    # dependencies: fields that only make sense together, and refs that must name their commit
+    def _validate_dependencies(self, ws: Path, state: WorkspaceState, worker_id: int) -> None:
+        if self.owner_start is not None and self.owner_pid is None:
+            raise ClonegrownError("worker owner fingerprint without an owner process")
+        for sha_name, ref_name in (("candidate_sha", "candidate_ref"), ("result_sha", "result_ref")):
+            sha, ref = getattr(self, sha_name), getattr(self, ref_name)
+            if (sha is None) != (ref is None):
+                raise ClonegrownError(f"worker {sha_name} and {ref_name} must be recorded together")
+            if sha is not None and ref != state.result_ref(worker_id, sha):
+                raise ClonegrownError(f"worker {ref_name} does not name its commit inside this workspace's namespace")
+        snapshot = self.collected_snapshot
+        if snapshot is not None:
+            if (not _is_commit_id(snapshot.get("head"), state.object_format)
+                    or snapshot.get("branch_ref") != f"refs/heads/{self.branch}"):
+                raise ClonegrownError("worker collected snapshot is malformed")
+            if self.result_sha is not None and snapshot["head"] != self.result_sha:
+                raise ClonegrownError("worker collected snapshot does not match its result")
+        if self.discard_intent == WorkerStatus.DISCARDED and self.discard_previous not in {None, WorkerStatus.COLLECTED}:
+            raise ClonegrownError("only a collected worker can be discarded without abandonment")
+        if self.status == WorkerStatus.DISCARDED and self.discard_intent == WorkerStatus.ABANDONED:
+            raise ClonegrownError("worker recorded as discarded carries an abandon intent")
+        if self.status == WorkerStatus.ABANDONED and self.discard_intent == WorkerStatus.DISCARDED:
+            raise ClonegrownError("worker recorded as abandoned carries a discard intent")
+        if self.status == WorkerStatus.DISCARDING and self.discard_previous == WorkerStatus.COLLECTED and self.result_sha is None:
+            raise ClonegrownError("discarding a collected worker requires its preserved result")
+        if (self.status in _DISCARD_STATUSES and self.discard_previous in {WorkerStatus.READY, WorkerStatus.COLLECTED}
+                and self.ready is None):
+            raise ClonegrownError("a worker discarded after publication must record when it became ready")
+        if self.lease_released is not None and self.lease != "released":
+            raise ClonegrownError("worker lease release time without a released lease")
+        if self.lease == "released" and self.status in _UNPUBLISHED:
+            raise ClonegrownError("an unpublished worker cannot have a released lease")
+        if self.quarantine_path is not None:
+            expected = quarantine_root(ws, worker_id, str(self.worker_token))
+            if lexical_abs(self.quarantine_path) != lexical_abs(expected):
+                raise ClonegrownError("worker quarantine path does not match its identity")
+        elif (self.quarantine_started is not None or self.quarantine_error is not None
+                or self.quarantine_snapshot is not None):
+            raise ClonegrownError("worker quarantine details without a quarantine path")
+
+
+# --- the validation tables ---------------------------------------------------
+
+def _is_number(value: Any) -> bool:
+    return type(value) in {int, float}
+
+
+def _is_commit_id(value: Any, object_format: str | None) -> bool:
+    expected_len = 64 if object_format == "sha256" else 40
+    return isinstance(value, str) and len(value) == expected_len and re.fullmatch(_HEX, value) is not None
+
+
+def _is_str_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _is_str_int_dict(value: Any) -> bool:
+    return isinstance(value, dict) and all(isinstance(k, str) and type(v) is int for k, v in value.items())
+
+
+_COMMIT_FIELDS = ("base_sha", "candidate_sha", "result_sha", "branch_cleanup_sha")
+_UNPUBLISHED = WorkerStatus.SPAWNING | {WorkerStatus.SPAWN_FAILED}
+_DISCARD_STATUSES = frozenset({WorkerStatus.DISCARDING}) | WorkerStatus.GONE
+# Statuses discard may start from; a tombstone or reset remembers which one.
+_DISCARD_ORIGINS = frozenset({WorkerStatus.READY, WorkerStatus.COLLECTED, WorkerStatus.BROKEN, WorkerStatus.SPAWN_FAILED})
+
+# (field, predicate over a non-None value, description for the error)
+_FIELD_SHAPES: tuple[tuple[str, Callable[[Any], bool], str], ...] = (
+    ("created", _is_number, "a timestamp"),
+    ("heartbeat", _is_number, "a timestamp"),
+    ("ready", _is_number, "a timestamp"),
+    ("failed", _is_number, "a timestamp"),
+    ("collect_started", _is_number, "a timestamp"),
+    ("collected", _is_number, "a timestamp"),
+    ("collection_failed", _is_number, "a timestamp"),
+    ("collection_recovered", _is_number, "a timestamp"),
+    ("discard_started", _is_number, "a timestamp"),
+    ("discarded", _is_number, "a timestamp"),
+    ("lease_released", _is_number, "a timestamp"),
+    ("quarantine_started", _is_number, "a timestamp"),
+    ("owner_pid", lambda v: type(v) is int and v > 0, "a process ID"),
+    ("owner_start", lambda v: isinstance(v, str), "a process fingerprint"),
+    ("error", lambda v: isinstance(v, str), "text"),
+    ("interrupted_error", lambda v: isinstance(v, str), "text"),
+    ("collection_error", lambda v: isinstance(v, str), "text"),
+    ("quarantine_error", lambda v: isinstance(v, str), "text"),
+    ("worktree_admin", lambda v: isinstance(v, str), "a path"),
+    ("worktree_admin_left", lambda v: isinstance(v, str), "text"),
+    ("branch_cleanup_left", lambda v: isinstance(v, str), "text"),
+    ("quarantine_path", lambda v: isinstance(v, str), "a path"),
+    ("pending_spawn_details", lambda v: isinstance(v, dict), "an object"),
+    ("collected_snapshot", lambda v: isinstance(v, dict), "an object"),
+    ("collection_race", lambda v: isinstance(v, dict), "an object"),
+    ("quarantine_snapshot", lambda v: isinstance(v, dict), "an object"),
+    ("source_remote", lambda v: isinstance(v, str), "text"),
+    ("alternates_detached", lambda v: type(v) is bool, "a boolean"),
+    ("copied_local_config", _is_str_list, "a list of config keys"),
+    ("copied_sparse_checkout", lambda v: type(v) is bool, "a boolean"),
+    ("copied_auxiliary_refs", _is_str_int_dict, "ref counts by namespace"),
+    ("compatibility_warnings", _is_str_list, "a list of warnings"),
+    ("allow_rewrite", lambda v: type(v) is bool, "a boolean"),
+)
+
+_CANDIDATE = frozenset({"candidate_sha", "candidate_ref"})
+_RESULT = frozenset({"result_sha", "result_ref"})
+_DISCARD = frozenset({"discard_intent", "discard_previous", "discard_started"})
+_QUARANTINE = frozenset({"quarantine_path", "quarantine_started", "quarantine_snapshot", "quarantine_error"})
+_NOT_YET_PUBLISHED = (frozenset({"ready", "collected", "discarded", "lease_released"})
+                      | _CANDIDATE | _RESULT | _DISCARD | _QUARANTINE)
+
+# Per status: (fields the lifecycle always writes before entering it, fields that
+# would select a path or ref this status has no right to). Fields not named are
+# validated for shape only, so records written by earlier code keep loading.
+_STATUS_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    WorkerStatus.ALLOCATED: (frozenset(), _NOT_YET_PUBLISHED),
+    WorkerStatus.CLONING: (frozenset(), _NOT_YET_PUBLISHED),
+    WorkerStatus.CONFIGURING: (frozenset(), _NOT_YET_PUBLISHED),
+    WorkerStatus.PUBLISHING: (frozenset(), _NOT_YET_PUBLISHED),
+    WorkerStatus.READY: (frozenset({"ready"}), frozenset({"collected", "discarded"}) | _CANDIDATE | _RESULT | _QUARANTINE),
+    WorkerStatus.COLLECTING: (frozenset({"ready", "collect_started"}) | _CANDIDATE,
+                              frozenset({"collected", "discarded"}) | _RESULT | _QUARANTINE),
+    WorkerStatus.COLLECTED: (frozenset({"ready", "collected"}) | _RESULT, frozenset({"discarded"}) | _CANDIDATE | _QUARANTINE),
+    WorkerStatus.DISCARDING: (_DISCARD, frozenset({"discarded"}) | _CANDIDATE),
+    WorkerStatus.DISCARDED: (frozenset({"discarded"}), _CANDIDATE | _QUARANTINE),
+    WorkerStatus.ABANDONED: (frozenset({"discarded"}), _CANDIDATE | _QUARANTINE),
+    WorkerStatus.SPAWN_FAILED: (frozenset({"failed", "error"}), _NOT_YET_PUBLISHED),
+    WorkerStatus.BROKEN: (frozenset({"error"}), frozenset()),
+}
+assert set(_STATUS_FIELDS) == WorkerStatus.ALL

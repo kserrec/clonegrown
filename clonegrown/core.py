@@ -84,12 +84,14 @@ def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
-        env: dict[str, str] | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        env: dict[str, str] | None = None, timeout: float | None = None,
+        input: str | None = None) -> subprocess.CompletedProcess[str]:
     argv = [str(x) for x in cmd]
     actual_env = clean_git_env(env) if argv and Path(argv[0]).name == "git" else (env or os.environ.copy())
     try:
-        p = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE, env=actual_env, timeout=timeout)
+        # Paths in Git's output need not be UTF-8; surrogateescape keeps their bytes intact.
+        p = subprocess.run(argv, cwd=cwd, text=True, errors="surrogateescape", stdout=subprocess.PIPE,
+                           input=input, stderr=subprocess.PIPE, env=actual_env, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise ClonegrownError(f"command timed out: {argv[0]} {argv[1] if len(argv) > 1 else ''}") from exc
     if check and p.returncode:
@@ -100,8 +102,22 @@ def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
 
 
 def git(repo: Path, *args: str | Path, check: bool = True,
-        timeout: float | None = None) -> subprocess.CompletedProcess[str]:
-    return run([GIT_BIN, *args], cwd=repo, check=check, timeout=timeout)
+        timeout: float | None = None, input: str | None = None) -> subprocess.CompletedProcess[str]:
+    return run([GIT_BIN, *args], cwd=repo, check=check, timeout=timeout, input=input)
+
+
+def git_bytes(repo: Path, *args: str | Path, timeout: float | None = None) -> bytes:
+    """Run Git and return its raw stdout, for NUL-delimited listings whose paths need not be UTF-8."""
+    argv = [str(GIT_BIN), *(str(a) for a in args)]
+    try:
+        p = subprocess.run(argv, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           env=clean_git_env(), timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise ClonegrownError(f"command timed out: {argv[0]} {argv[1] if len(argv) > 1 else ''}") from exc
+    if p.returncode:
+        raise ClonegrownError(f"command failed ({p.returncode}): {' '.join(argv)}\nstderr: "
+                              f"{p.stderr.decode('utf-8', 'backslashreplace')}")
+    return p.stdout
 
 
 # --- durable JSON ------------------------------------------------------------
@@ -122,6 +138,40 @@ def atomic_json(path: Path, data: Any) -> None:
             os.fsync(dfd)
         finally:
             os.close(dfd)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+
+
+def atomic_json_create(path: Path, data: Any) -> None:
+    """Write JSON to a path that must not exist yet; an existing file is never replaced.
+
+    The content is written and fsynced to a temporary file, then linked to
+    its final name with ``os.link``, which fails atomically if the name is
+    taken. The directory is fsynced afterwards.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    except OSError as exc:
+        raise ClonegrownError(f"cannot create record {path}: {exc}") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError as exc:
+            raise ClonegrownError(f"record already exists and is never replaced: {path}") from exc
+        dfd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError as exc:
+        raise ClonegrownError(f"cannot create record {path}: {exc}") from exc
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)

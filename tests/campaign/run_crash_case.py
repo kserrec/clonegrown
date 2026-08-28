@@ -21,7 +21,7 @@ try:
         h.git(c,'fsck','--full')
     elif mode=='discard':
         h.cws('collect',w,str(m['id']))
-        p=h.cws('discard',w,str(m['id']),env={'CWS_FAILPOINT':fp},check=False)
+        h.cws('release',w,str(m['id'])); p=h.cws('discard',w,str(m['id']),env={'CWS_FAILPOINT':fp},check=False)
         assert p.returncode==88,(p.returncode,p.stdout,p.stderr)
         reports=h.jload(h.cws('recover',w)); mm=h.meta(w,m['id'])
         if Path(m['path']).exists(): h.cws('discard',w,str(m['id'])); mm=h.meta(w,m['id'])

@@ -10,7 +10,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .core import ClonegrownError, git, git_common_dir, git_dir, git_path
+import subprocess
+
+from .core import ClonegrownError, git, git_common_dir, git_dir, git_path, lexical_abs
 from .state import RESERVED_SOURCE_PREFIX
 
 # Local config that describes *this* repository's shape rather than user intent;
@@ -19,6 +21,8 @@ STRUCTURAL_CONFIG_EXACT = {
     "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
     "core.worktree", "core.ignorecase", "core.precomposeunicode", "core.symlinks",
     "core.sparsecheckout", "core.sparsecheckoutcone", "index.sparse",
+    # A filesystem-monitor hook is a program Git would run on every status inside the worker.
+    "core.fsmonitor", "core.fsmonitorhookversion",
 }
 STRUCTURAL_CONFIG_PREFIXES = ("remote.", "branch.", "extensions.", "include.", "includeif.")
 
@@ -195,14 +199,146 @@ def detach_alternates_if_needed(worker: Path, strong: bool) -> tuple[bool, list[
     return True, []
 
 
-def checkout_without_hooks(repo: Path, branch: str, base_sha: str) -> None:
+def checkout_without_hooks(repo: Path, branch: str, base_sha: str, create: bool = True) -> None:
     """Populate the checkout without running repository hooks.
 
     The worker keeps its configured hooks for the agent's later commands; only
-    this provisioning checkout is suppressed.
+    this provisioning checkout is suppressed. With ``create`` the branch is
+    made here (a clone's private refs); otherwise it must already exist at
+    ``base_sha`` (a worktree's branch lives in the shared refs and is created
+    by :func:`create_task_branch` first).
     """
     with tempfile.TemporaryDirectory(prefix="cws-empty-hooks-") as empty:
-        git(repo, "-c", f"core.hooksPath={empty}", "checkout", "-b", branch, base_sha)
+        if create:
+            git(repo, "-c", f"core.hooksPath={empty}", "checkout", "-b", branch, base_sha)
+        else:
+            git(repo, "-c", f"core.hooksPath={empty}", "checkout", branch)
+
+
+# --- task branches in shared refs (worktree mode) ------------------------------
+
+def _ref_transaction(repo: Path, lines: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run one atomic ``git update-ref --stdin`` transaction; all updates apply or none do.
+
+    Every update is ``no-deref``: a symbolic ref planted under a name we own
+    must never redirect the write onto the branch it points at.
+    """
+    script = "start\n" + "".join(f"option no-deref\n{line}\n" for line in lines) + "prepare\ncommit\n"
+    return git(repo, "update-ref", "--stdin", check=False, input=script)
+
+
+def _refuse_symbolic(repo: Path, ref: str, check: bool) -> bool:
+    """A symbolic ref under one of our names is never ours: neither written through nor deleted."""
+    if not is_symbolic_ref(repo, ref):
+        return False
+    if check:
+        raise ClonegrownError(f"refusing to touch a symbolic ref in Clonegrown's namespace: {ref}")
+    return True
+
+
+def write_ref(repo: Path, ref: str, new_sha: str, old_sha: str | None = None, check: bool = True) -> bool:
+    """Point ``ref`` itself at ``new_sha``; optional compare-and-swap. A symbolic ref is refused."""
+    if _refuse_symbolic(repo, ref, check):
+        return False
+    args = ["update-ref", "--no-deref", ref, new_sha] + ([old_sha] if old_sha is not None else [])
+    return git(repo, *args, check=check).returncode == 0
+
+
+def delete_ref(repo: Path, ref: str, old_sha: str | None = None, check: bool = True) -> bool:
+    """Delete ``ref`` itself; optional compare-and-swap. A symbolic ref is refused."""
+    if _refuse_symbolic(repo, ref, check):
+        return False
+    args = ["update-ref", "--no-deref", "-d", ref] + ([old_sha] if old_sha is not None else [])
+    return git(repo, *args, check=check).returncode == 0
+
+
+def is_symbolic_ref(repo: Path, ref: str) -> bool:
+    return git(repo, "symbolic-ref", "-q", ref, check=False).returncode == 0
+
+
+def create_task_branch(canonical: Path, branch: str, owner_ref: str, base_sha: str) -> None:
+    """Create the task branch and this worker's private ownership ref together, or neither.
+
+    Both use create-only semantics (expected old value zero): a branch that
+    already exists under the deterministic name aborts the whole transaction
+    untouched. The ownership ref is what later proves this worker created the
+    branch, even if the process dies before the record is updated.
+    """
+    outcome = _ref_transaction(canonical, [
+        f"create refs/heads/{branch} {base_sha}",
+        f"create {owner_ref} {base_sha}",
+    ])
+    if outcome.returncode:
+        raise ClonegrownError(
+            f"could not create task branch {branch}: it or its ownership ref already exists "
+            f"({outcome.stderr.strip()})")
+
+
+def absent_marker(like_sha: str) -> str:
+    """The all-zero object id of the repository's format: how Git itself spells "no such ref"."""
+    return "0" * len(like_sha)
+
+
+def is_absent_marker(sha: str) -> bool:
+    return bool(sha) and set(sha) == {"0"}
+
+
+def resolve_ref(repo: Path, ref: str) -> str | None:
+    """The commit ``ref`` names, or None if it does not exist."""
+    got = git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False)
+    return got.stdout.strip() if got.returncode == 0 and got.stdout.strip() else None
+
+
+def branch_checkouts(canonical: Path, branch: str) -> list[str]:
+    """Working trees of ``canonical`` (itself included) that currently have ``branch`` checked out.
+
+    The NUL-delimited listing is unambiguous for any path; an older Git
+    without ``-z`` falls back to the line form, where a newline in a path
+    cannot be told apart from a record boundary.
+    """
+    listing = git(canonical, "worktree", "list", "--porcelain", "-z", check=False)
+    if listing.returncode == 0:
+        records = [record.split("\0") for record in listing.stdout.split("\0\0") if record]
+    else:
+        records = [record.split("\n") for record in git(canonical, "worktree", "list", "--porcelain").stdout.split("\n\n")
+                   if record]
+    paths: list[str] = []
+    for lines in records:
+        path = next((line[len("worktree "):] for line in lines if line.startswith("worktree ")), None)
+        if path is not None and f"branch refs/heads/{branch}" in lines:
+            paths.append(path)
+    return paths
+
+
+def release_task_branch(canonical: Path, branch: str, owner_ref: str, owner_sha: str,
+                        expected_sha: str | None, own_paths: set[Path] = frozenset()) -> str | None:
+    """Delete the task branch only while it still points where we recorded, and only if we own it.
+
+    Nothing of ours is deleted when the branch was recorded as absent, or is
+    absent now: only the ownership ref goes, and any branch someone else has
+    since put under the name is left alone. Otherwise one transaction deletes
+    the branch at its recorded tip and the ownership ref at its recorded
+    value; each ``delete`` with an old value is itself a compare-and-swap. A
+    branch that moved, or that some working tree other than the worker's own
+    (``own_paths``) has checked out, is retained and the conflict is returned
+    as text.
+    """
+    current = resolve_ref(canonical, f"refs/heads/{branch}")
+    ours = expected_sha is not None and not is_absent_marker(expected_sha) and current is not None
+    lines = []
+    if ours:
+        elsewhere = [path for path in branch_checkouts(canonical, branch) if lexical_abs(path) not in own_paths]
+        if elsewhere:
+            return f"task branch retained: checked out at {', '.join(elsewhere)}"
+        lines.append(f"delete refs/heads/{branch} {expected_sha}")
+    lines.append(f"delete {owner_ref} {owner_sha}")
+    outcome = _ref_transaction(canonical, lines)
+    if outcome.returncode == 0:
+        return None
+    if ours and resolve_ref(canonical, f"refs/heads/{branch}") != expected_sha:
+        return (f"task branch retained: expected {expected_sha}, found "
+                f"{resolve_ref(canonical, f'refs/heads/{branch}') or 'no branch'}")
+    return f"task branch retained: ownership ref changed ({outcome.stderr.strip()})"
 
 
 # --- linked worktrees --------------------------------------------------------
@@ -229,8 +365,3 @@ def ref_points_at(repo: Path, ref: str | None, sha: str | None) -> bool:
         return False
     got = git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}", check=False)
     return got.returncode == 0 and got.stdout.strip() == sha
-
-
-def delete_branch(canonical: Path, branch: str) -> bool:
-    """Remove a worker's task branch from the shared refs; False if it was already gone."""
-    return git(canonical, "branch", "-D", branch, check=False).returncode == 0

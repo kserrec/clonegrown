@@ -42,21 +42,34 @@ workspace path.
 
 Before using this skill, account for these verified current limits:
 
-- Collection and drift checks omit Git-ignored paths. Do not discard a worker
-  that may contain valuable ignored content.
-- Clonegrown has no durable work lease. Stop every agent, watcher, editor,
-  server, and other process that can write to the worker before collection or
-  discard.
-- Recursive deletion can currently suppress a filesystem error and record the
-  worker as gone without proving its path is absent. Verify the result after a
-  destructive command.
+- Collection and drift checks omit Git-ignored paths. Discarding a collected
+  worker that holds ignored paths is refused until `--discard-ignored` is
+  given; the refusal lists a count and a few names. Do not pass that flag
+  unless the user has authorized destroying that ignored content.
+- Every published worker holds a cooperative work lease from spawn until an
+  explicit `clonegrown release <worker-id>`. Discard, including `--abandon` and
+  `--force`, refuses a leased worker, and recovery never treats a dead process
+  as a release. The lease is a handoff protocol between cooperating callers,
+  not an operating-system sandbox: a process that ignores it, or keeps file
+  descriptors open, can still write after the final check. Stop every agent,
+  watcher, editor, server, and other process that can write to the worker
+  before releasing it.
+- Discard moves the worker to `.cws/quarantine/`, rechecks it, deletes it
+  with errors enabled, and proves it absent before recording it gone. If the
+  worker changed after the custody check or deletion failed, the worker stays
+  preserved in quarantine and `status` shows `quarantine_path` and
+  `quarantine_error`; report that to the user rather than deleting anything
+  by hand. Running `clonegrown recover` resumes an interrupted deletion.
 - Recovery covers recorded lifecycle checkpoints, not every possible
-  filesystem interruption. In particular, interrupted spawn recovery can
-  delete an authenticated published worker that changed after publication,
-  and worktree rollback can delete a same-named branch without proving the
-  failed spawn created it. Treat interrupted-spawn recovery as destructive.
+  filesystem interruption. A published worker whose spawn was interrupted is
+  promoted to `ready` if it is untouched and otherwise preserved in place as
+  `broken`, with `error` saying how it differs; it is deleted only by an
+  explicit release and `discard --abandon`. A worktree task branch is deleted
+  only when Clonegrown proves it created it and it has not moved; a retained
+  branch is reported, never forced.
 - A collected worker is one-shot. An unchanged repeat collection is a no-op;
-  new commits after collection are rejected. Spawn a new worker for new work.
+  new commits after collection are rejected; `--abandon` and `claim` are
+  refused for it. Spawn a new worker for new work.
 - Worktrees share broad Git state. Default clones can share existing object
   files through hard links. Neither mode is an operating-system sandbox.
 - The clone's invalid canonical-source push URL is an accident guard, not a
@@ -65,11 +78,13 @@ Before using this skill, account for these verified current limits:
   configuration values or credential-bearing remote URLs. Do not paste error
   output into a public channel without reviewing it for secrets.
 
-Do not run `discard --abandon` unless the user has explicitly authorized
-destroying all content in that uncollected worker. Do not run `discard --force`
-unless the user has explicitly authorized destroying the detected
-post-collection changes. Never inspect dotenv files while assessing ignored
-content; ask the user to handle those files themselves.
+Do not run `clonegrown release` until every process you started in the worker
+has stopped; release is your statement that the worker is quiet. Do not run
+`discard --abandon` unless the user has explicitly authorized destroying all
+content in that uncollected worker. Do not run `discard --force` unless the
+user has explicitly authorized destroying the detected post-collection
+changes. Neither flag overrides the lease. Never inspect dotenv files while
+assessing ignored content; ask the user to handle those files themselves.
 
 ## Workspace lifecycle
 
@@ -104,12 +119,24 @@ content; ask the user to handle those files themselves.
 6. Report the preserved commit and result ref. Integration is a separate,
    explicit Git operation chosen by the user; collection does not perform it.
 
-7. Only when the worker contains no needed ignored content and no writer can
-   race cleanup, remove the collected worker:
+7. Once every process you started in the worker has stopped, release the
+   lease:
+
+   `clonegrown release <worker-id>`
+
+   Collection does not require release; release is the handoff that permits
+   deletion. A released worker that is still `ready` can be taken over again
+   with `clonegrown claim <worker-id>`; a collected worker cannot.
+
+8. Remove the collected worker:
 
    `clonegrown discard <worker-id>`
 
-8. If an operation was interrupted or durable state is unclear, reconcile the
+   If it refuses because of ignored paths, report them to the user; only with
+   their authorization add `--discard-ignored`. If it refuses because of
+   changes after collection, that is `--force`, separately authorized.
+
+9. If an operation was interrupted or durable state is unclear, reconcile the
    checkpoints Clonegrown can represent:
 
    `clonegrown recover`
@@ -131,16 +158,14 @@ content; ask the user to handle those files themselves.
   alter a stash you did not create.
 - Do not treat Clonegrown as an operating-system security boundary.
 
-## Target custody contract — planned, not implemented
+## Target custody contract — implemented
 
-The accepted next protocol adds a durable cooperative work lease, requires an
-explicit lease release before deletion, detects ignored paths and requires a
-separate `--discard-ignored` acknowledgement for a collected worker,
-quarantines an authenticated worker before checked deletion, keeps workers
-one-shot after collection, and leaves integration explicit. Current releases
-do not provide the lease/release or `--discard-ignored` commands or the
-quarantine protocol. Do not instruct a user to run those planned operations
-yet.
+The accepted protocol adds a durable cooperative work lease with an explicit
+release before deletion (`release`, `claim`), detects ignored paths and
+requires a separate `--discard-ignored` acknowledgement for a collected
+worker, quarantines an authenticated worker before checked deletion, keeps
+workers one-shot after collection, and leaves integration explicit. All of it
+is implemented.
 
 ## Installation ownership
 

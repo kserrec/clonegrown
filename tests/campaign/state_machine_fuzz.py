@@ -111,6 +111,7 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
                     changed=bool(git(repo,'status','--porcelain').stdout.strip())
                     bp=git(repo,'rev-parse','--verify',f"refs/heads/{ms[wid]['branch']}",check=False)
                     changed=changed or bp.returncode!=0 or bp.stdout.strip()!=ms[wid]['result_sha']
+                cws.release(w,wid)
                 try:
                     cws.discard(w,wid)
                     assert not changed
@@ -119,17 +120,16 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
                     assert changed
                     record('discard_refused_changed',wid)
             elif op=='abandon' and (ready or collected):
-                wid=rng.choice(ready+collected); m=ms[wid]; repo=Path(m['path']); changed=False
-                if m['status']=='collected' and repo.exists():
-                    changed=bool(git(repo,'status','--porcelain').stdout.strip())
-                    bp=git(repo,'rev-parse','--verify',f"refs/heads/{m['branch']}",check=False)
-                    changed=changed or bp.returncode!=0 or bp.stdout.strip()!=m['result_sha']
-                try:
-                    cws.discard(w,wid,abandon=True); assert not changed; record('abandon',wid)
-                except cws.ClonegrownError:
-                    assert changed; record('abandon_refused_changed',wid)
-                    if rng.random()<0.5:
-                        cws.discard(w,wid,abandon=True,force=True); record('abandon_forced',wid)
+                wid=rng.choice(ready+collected); m=ms[wid]; repo=Path(m['path'])
+                # The lease blocks every deletion path until it is released; a collected worker is one-shot.
+                try: cws.discard(w,wid,abandon=True); raise AssertionError('abandon accepted a leased worker')
+                except cws.ClonegrownError as exc: assert 'leased' in str(exc) or 'one-shot' in str(exc), exc
+                cws.release(w,wid)
+                if m['status']=='collected':
+                    try: cws.discard(w,wid,abandon=True); raise AssertionError('abandon accepted a collected worker')
+                    except cws.ClonegrownError as exc: assert 'one-shot' in str(exc), exc; record('abandon_refused_collected',wid)
+                else:
+                    cws.discard(w,wid,abandon=True); record('abandon',wid)
             elif op=='retry' and ms:
                 m=rng.choice(list(ms.values()))
                 try:
@@ -163,7 +163,7 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
             elif op=='post_collect_change' and collected:
                 wid=rng.choice(collected); repo=Path(ms[wid]['path'])
                 if repo.exists():
-                    clean(repo); commit(repo,f'post-collected-{seed}-{step}',step)
+                    clean(repo); commit(repo,f'post-collected-{seed}-{step}',step); cws.release(w,wid)
                     try: cws.discard(w,wid); raise AssertionError('discard accepted post-collection commit')
                     except cws.ClonegrownError: record('post_collect_guard',wid)
             else:
