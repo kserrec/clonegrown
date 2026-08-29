@@ -5,9 +5,13 @@ workers or records. The spawn transaction calls them in a fixed order.
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import re
+import secrets
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import subprocess
@@ -27,97 +31,276 @@ STRUCTURAL_CONFIG_EXACT = {
 STRUCTURAL_CONFIG_PREFIXES = ("remote.", "branch.", "extensions.", "include.", "includeif.")
 
 _FETCH_FLAGS = ("fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance")
+_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_CONFIG_SECTION = re.compile(r"[A-Za-z0-9.-]+")
+_CONFIG_VARIABLE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 
 
-def local_config_items(repo: Path, includes: bool = False) -> dict[str, list[str]]:
+@dataclass(frozen=True)
+class ConfigOccurrence:
+    """One ordered Git-config occurrence; ``None`` means valueless, not empty."""
+
+    key: str
+    value: str | None
+
+
+@dataclass(frozen=True)
+class CloneConfigPlan:
+    """The complete, validated remote and local-config intent for one clone."""
+
+    source_remote: str
+    remote_names: tuple[str, ...]
+    occurrences: tuple[ConfigOccurrence, ...]
+    copied_local_config: tuple[str, ...]
+    compatibility_warnings: tuple[str, ...]
+
+    def validate(self) -> None:
+        if not self.source_remote or self.source_remote in self.remote_names:
+            raise ClonegrownError("clone config plan has a colliding source remote")
+        if len(set(self.remote_names)) != len(self.remote_names):
+            raise ClonegrownError("clone config plan contains duplicate remote names")
+        if any(not occurrence.key or "\0" in occurrence.key or "\n" in occurrence.key
+               for occurrence in self.occurrences):
+            raise ClonegrownError("clone config plan contains an invalid config key")
+        for occurrence in self.occurrences:
+            _split_config_key(occurrence.key)
+        if any(occurrence.value is not None and "\0" in occurrence.value
+               for occurrence in self.occurrences):
+            raise ClonegrownError("clone config plan contains an invalid config value")
+
+        remote_occurrences = {name: 0 for name in self.remote_names}
+        local_keys: list[str] = []
+        seen_local: set[str] = set()
+        for occurrence in self.occurrences:
+            remote = _remote_name_for_key(occurrence.key, self.remote_names)
+            if occurrence.key.lower().startswith("remote.") and remote is None:
+                raise ClonegrownError("clone config plan contains config for an unknown remote")
+            if remote is not None:
+                remote_occurrences[remote] += 1
+            elif occurrence.key not in seen_local:
+                seen_local.add(occurrence.key)
+                local_keys.append(occurrence.key)
+        if any(count == 0 for count in remote_occurrences.values()):
+            raise ClonegrownError("canonical repository has an empty remote section that cannot be reproduced")
+        if tuple(local_keys) != self.copied_local_config:
+            raise ClonegrownError("clone config plan's local-key summary is inconsistent")
+
+
+def local_config_occurrences(repo: Path, includes: bool = False) -> tuple[ConfigOccurrence, ...]:
+    """Read local config exactly once, preserving order, repeats, empty, and valueless entries."""
     include_flag = "--includes" if includes else "--no-includes"
-    p = git(repo, "config", "--local", include_flag, "--null", "--list", check=False)
-    if p.returncode:
-        return {}
-    out: dict[str, list[str]] = {}
+    p = git(repo, "config", "--local", include_flag, "--null", "--list")
+    out: list[ConfigOccurrence] = []
     for item in p.stdout.split("\0"):
         if not item:
             continue
         if "\n" in item:
             key, value = item.split("\n", 1)
-        elif "=" in item:
-            key, value = item.split("=", 1)
         else:
-            key, value = item, ""
-        out.setdefault(key, []).append(value)
-    return out
+            key, value = item, None
+        out.append(ConfigOccurrence(key, value))
+    return tuple(out)
 
 
-def _set_config_values(repo: Path, key: str, values: list[str]) -> None:
-    git(repo, "config", "--local", "--unset-all", key, check=False)
-    for value in values:
-        git(repo, "config", "--local", "--add", key, value)
+def _remote_name_for_key(key: str, remote_names: tuple[str, ...]) -> str | None:
+    if not key.lower().startswith("remote."):
+        return None
+    remainder = key[len("remote."):]
+    for name in sorted(remote_names, key=len, reverse=True):
+        if remainder.startswith(name + "."):
+            return name
+    return None
 
 
-def copy_local_config(canonical: Path, worker: Path) -> tuple[list[str], list[str]]:
-    """Copy user-intent local config; return (copied keys, compatibility warnings)."""
-    copied: list[str] = []
+def _split_config_key(key: str) -> tuple[str, str]:
+    section, separator, variable = key.rpartition(".")
+    if (not separator or not section or not _CONFIG_VARIABLE.fullmatch(variable)):
+        raise ClonegrownError("clone config plan contains an invalid config key")
+    if not _CONFIG_SECTION.fullmatch(section):
+        # A subsection may contain any character except newline or NUL. In a
+        # fully qualified key it follows the first dot; the leading section
+        # name itself retains Git's restricted grammar.
+        leading_section, subsection_separator, _subsection = section.partition(".")
+        if (not subsection_separator
+                or not _CONFIG_SECTION.fullmatch(leading_section)):
+            raise ClonegrownError("clone config plan contains an invalid config key")
+    if "\0" in section or "\n" in section:
+        raise ClonegrownError("clone config plan contains an invalid config key")
+    return section, variable
+
+
+def _remote_key_suffix(key: str, remote: str) -> str:
+    return key[len("remote.") + len(remote) + 1:].lower()
+
+
+def _canonicalize_remote_url(canonical: Path, value: str) -> str:
+    """Anchor only relative local-path syntax; transports retain their exact spelling."""
+    if not value or os.path.isabs(value) or _URL_SCHEME.match(value):
+        return value
+    colon = value.find(":")
+    slash = value.find("/")
+    if colon > 0 and (slash < 0 or colon < slash):
+        return value  # scp-like ``host:path`` or ``user@host:path`` syntax
+    return str((canonical / value).resolve())
+
+
+def build_clone_config_plan(canonical: Path) -> CloneConfigPlan:
+    """Read canonical once into a mutation-free, self-validating clone plan."""
+    canonical = canonical.resolve()
+    raw = local_config_occurrences(canonical, includes=False)
+    effective = local_config_occurrences(canonical, includes=True)
+    remote_names = tuple(line for line in git(canonical, "remote").stdout.splitlines() if line)
+
+    source = RESERVED_SOURCE_PREFIX
+    n = 2
+    while source in remote_names:
+        source = f"{RESERVED_SOURCE_PREFIX}-{n}"
+        n += 1
+
+    grouped: dict[str, list[str | None]] = {}
+    for occurrence in effective:
+        grouped.setdefault(occurrence.key, []).append(occurrence.value)
+
+    copied_keys: list[str] = []
     warnings: list[str] = []
-    raw = local_config_items(canonical, includes=False)
-    effective = local_config_items(canonical, includes=True)
-    for key, values in effective.items():
+    eligible_local: set[str] = set()
+    for key, values in grouped.items():
         lower = key.lower()
         if lower in STRUCTURAL_CONFIG_EXACT or lower.startswith(STRUCTURAL_CONFIG_PREFIXES):
             continue
-        if lower == "core.hookspath" and any(os.path.isabs(v) for v in values):
+        strings = [value for value in values if value is not None]
+        if lower == "core.hookspath" and any(os.path.isabs(value) for value in strings):
             # Relative tracked hook paths are portable. Absolute ones stay shared; the
             # value is still copied for compatibility and the warning makes that explicit.
             warnings.append("absolute core.hooksPath remains an external shared dependency")
-        if any(str(canonical) in value for value in values):
+        if any(str(canonical) in value for value in strings):
             warnings.append(f"path-bound local config omitted: {key}")
             continue
-        _set_config_values(worker, key, values)
-        copied.append(key)
-    # Include directives are not copied. Their *effective* values were flattened in
-    # above, so a relative or conditional include cannot bind the worker back to
-    # canonical. Values are not put in durable Clonegrown metadata, although a
-    # failing Git command can currently repeat them in its public error text.
-    if any(k.lower().startswith(("include.", "includeif.")) for k in raw):
+        eligible_local.add(key)
+        copied_keys.append(key)
+
+    planned: list[ConfigOccurrence] = []
+    for occurrence in effective:
+        remote = _remote_name_for_key(occurrence.key, remote_names)
+        if remote is not None:
+            value = occurrence.value
+            if value is not None and _remote_key_suffix(occurrence.key, remote) in {"url", "pushurl"}:
+                value = _canonicalize_remote_url(canonical, value)
+            planned.append(ConfigOccurrence(occurrence.key, value))
+        elif occurrence.key in eligible_local:
+            planned.append(occurrence)
+
+    # Include directives are not copied. Their effective values are represented
+    # directly in ``planned``, so no include can bind the worker back to canonical.
+    if any(occurrence.key.lower().startswith(("include.", "includeif.")) for occurrence in raw):
         warnings.append("repo-local config includes were flattened into private worker config")
-    return copied, sorted(set(warnings))
+
+    plan = CloneConfigPlan(
+        source_remote=source,
+        remote_names=remote_names,
+        occurrences=tuple(planned),
+        copied_local_config=tuple(copied_keys),
+        compatibility_warnings=tuple(sorted(set(warnings))),
+    )
+    plan.validate()
+    return plan
 
 
-def copy_remote_config(canonical: Path, worker: Path) -> str:
-    """Rename the clone's source remote out of the way, then mirror canonical's remotes.
+def _normalize_valueless_config(repo: Path, sentinel: str, expected: int) -> None:
+    """Turn Git-serialized sentinel values into genuinely valueless entries atomically."""
+    config_path = git_path(repo, "config")
+    original = config_path.read_bytes()
+    needle = f" = {sentinel}\n".encode()
+    if original.count(needle) != expected:
+        raise ClonegrownError("could not preserve valueless Git-config occurrences")
+    replacement = original.replace(needle, b"\n")
+    fd, temporary = tempfile.mkstemp(prefix="config.clonegrown-", dir=config_path.parent)
+    try:
+        os.fchmod(fd, config_path.stat().st_mode & 0o7777)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(replacement)
+            handle.flush()
+            os.fsync(handle.fileno())
+        fd = -1
+        os.replace(temporary, config_path)
+        directory_fd = os.open(config_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
 
-    Returns the name given to the canonical-source remote. Its push URL uses an
-    invalid transport as an accident guard; this is not a security boundary.
-    """
-    canonical_remotes = set(git(canonical, "remote").stdout.split())
-    source = RESERVED_SOURCE_PREFIX
-    n = 2
-    while source in canonical_remotes:
-        source = f"{RESERVED_SOURCE_PREFIX}-{n}"
-        n += 1
-    if "origin" not in set(git(worker, "remote").stdout.split()):
+
+def apply_clone_config_plan(worker: Path, plan: CloneConfigPlan) -> tuple[str, list[str], list[str]]:
+    """Apply one validated plan to the staged clone through a single imperative path."""
+    plan.validate()
+    for name in (plan.source_remote, *plan.remote_names):
+        valid = git(worker, "check-ref-format", f"refs/remotes/{name}", check=False)
+        if valid.returncode:
+            raise ClonegrownError(f"clone config plan contains an invalid remote name: {name!r}")
+    if "origin" not in set(git(worker, "remote").stdout.splitlines()):
         raise ClonegrownError("local clone did not create its source remote")
-    git(worker, "remote", "rename", "origin", source)
-    git(worker, "remote", "set-url", "--push", source, "cws-disabled://canonical")
+    git(worker, "remote", "rename", "origin", plan.source_remote)
+    disabled_push = "cws-disabled://canonical"
+    git(worker, "remote", "set-url", "--push", plan.source_remote, disabled_push,
+        sensitive=(disabled_push,))
 
-    config = local_config_items(canonical, includes=True)
-    for name in sorted(canonical_remotes):
-        urls = git(canonical, "remote", "get-url", "--all", name, check=False).stdout.splitlines()
-        if not urls:
-            continue
-        git(worker, "remote", "add", name, urls[0])
-        for url in urls[1:]:
-            git(worker, "remote", "set-url", "--add", name, url)
-        push_urls = git(canonical, "remote", "get-url", "--push", "--all", name, check=False).stdout.splitlines()
-        if push_urls and push_urls != urls:
-            git(worker, "remote", "set-url", "--delete", "--push", name, ".*", check=False)
-            for url in push_urls:
-                git(worker, "remote", "set-url", "--add", "--push", name, url)
-        prefix = f"remote.{name}.".lower()
-        for key, values in config.items():
-            low = key.lower()
-            if low.startswith(prefix) and low not in {prefix + "url", prefix + "pushurl"}:
-                _set_config_values(worker, key, values)
-    return source
+    # Let Git validate and create each named remote. The exact planned config is
+    # written immediately afterwards, replacing any default fetch refspec it adds.
+    for name in plan.remote_names:
+        first_url = next((occurrence.value for occurrence in plan.occurrences
+                          if _remote_name_for_key(occurrence.key, plan.remote_names) == name
+                          and _remote_key_suffix(occurrence.key, name) == "url"), None)
+        if any(_remote_name_for_key(occurrence.key, plan.remote_names) == name
+               and _remote_key_suffix(occurrence.key, name) == "url"
+               for occurrence in plan.occurrences):
+            initial_url = first_url or ""
+            git(worker, "remote", "add", "--", name, initial_url, sensitive=(initial_url,))
+
+    existing = local_config_occurrences(worker, includes=False)
+    planned_keys = {occurrence.key for occurrence in plan.occurrences}
+    keys_to_clear = set(planned_keys)
+    for occurrence in existing:
+        if _remote_name_for_key(occurrence.key, plan.remote_names) is not None:
+            keys_to_clear.add(occurrence.key)
+    existing_keys = {occurrence.key for occurrence in existing}
+    for key in sorted(keys_to_clear):
+        if key in existing_keys:
+            git(worker, "config", "--local", "--unset-all", key)
+
+    valueless_count = sum(occurrence.value is None for occurrence in plan.occurrences)
+    sentinel = "clonegrown-valueless-" + secrets.token_hex(24)
+    existing_sections = {occurrence.key.rpartition(".")[0] for occurrence in existing}
+    while (any(occurrence.value == sentinel for occurrence in plan.occurrences)
+           or any(f"clonegrown-plan.{sentinel}-" in section for section in existing_sections)):
+        sentinel = "clonegrown-valueless-" + secrets.token_hex(24)
+    for index, occurrence in enumerate(plan.occurrences):
+        section, variable = _split_config_key(occurrence.key)
+        # Keeping the source section in this transient key makes a failed Git
+        # command identify the setting being applied while each unique section
+        # still preserves the plan's cross-key occurrence order.
+        temporary_section = f"clonegrown-plan.{sentinel}-{index}-{section}"
+        applied = sentinel if occurrence.value is None else occurrence.value
+        git(worker, "config", "--local", "--add", f"{temporary_section}.{variable}", applied,
+            sensitive=(applied,) if occurrence.value is not None else ())
+        git(worker, "config", "--local", "--rename-section", temporary_section, section,
+            sensitive=(section,))
+    if valueless_count:
+        _normalize_valueless_config(worker, sentinel, valueless_count)
+
+    applied = local_config_occurrences(worker, includes=False)
+    actual = tuple(occurrence for occurrence in applied if occurrence.key in planned_keys)
+    if actual != plan.occurrences:
+        raise ClonegrownError("applied clone config does not match its validated plan")
+    installed_remotes = set(git(worker, "remote").stdout.splitlines())
+    if not set(plan.remote_names).issubset(installed_remotes) or plan.source_remote not in installed_remotes:
+        raise ClonegrownError("applied clone remotes do not match their validated plan")
+    return (plan.source_remote, list(plan.copied_local_config),
+            list(plan.compatibility_warnings))
 
 
 def copy_auxiliary_refs(canonical: Path, worker: Path) -> dict[str, int]:
@@ -136,7 +319,8 @@ def copy_auxiliary_refs(canonical: Path, worker: Path) -> dict[str, int]:
                 if r.startswith(prefix)]
         counts[label] = len(refs)
         if refs:
-            git(worker, *_FETCH_FLAGS, str(canonical), f"+{prefix}*:{prefix}*")
+            git(worker, *_FETCH_FLAGS, str(canonical), f"+{prefix}*:{prefix}*",
+                sensitive=(canonical,))
     return counts
 
 
@@ -168,11 +352,12 @@ def copy_sparse_policy(canonical: Path, worker: Path) -> bool:
     """For a clone: replicate canonical's sparse-checkout config and patterns. False if not sparse."""
     if not sparse_checkout_enabled(canonical):
         return False
-    git(worker, "config", "core.sparseCheckout", "true")
+    git(worker, "config", "core.sparseCheckout", "true", sensitive=("true",))
     for key in ("core.sparseCheckoutCone", "index.sparse"):
         value = git(canonical, "config", "--get", key, check=False)
         if value.returncode == 0 and value.stdout.strip():
-            git(worker, "config", key, value.stdout.strip())
+            copied_value = value.stdout.strip()
+            git(worker, "config", key, copied_value, sensitive=(copied_value,))
     copy_sparse_patterns(canonical, worker)
     return True
 
@@ -209,10 +394,12 @@ def checkout_without_hooks(repo: Path, branch: str, base_sha: str, create: bool 
     by :func:`create_task_branch` first).
     """
     with tempfile.TemporaryDirectory(prefix="cws-empty-hooks-") as empty:
+        hook_override = f"core.hooksPath={empty}"
         if create:
-            git(repo, "-c", f"core.hooksPath={empty}", "checkout", "-b", branch, base_sha)
+            git(repo, "-c", hook_override, "checkout", "-b", branch, base_sha,
+                sensitive=(empty,))
         else:
-            git(repo, "-c", f"core.hooksPath={empty}", "checkout", branch)
+            git(repo, "-c", hook_override, "checkout", branch, sensitive=(empty,))
 
 
 # --- task branches in shared refs (worktree mode) ------------------------------

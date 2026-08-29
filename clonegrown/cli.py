@@ -13,10 +13,12 @@ import datetime as dt
 import json
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence, TypeVar
 
 from . import __version__
-from .core import ClonegrownError, validate_primary_repo
+from .core import (
+    ClonegrownError, operation_boundary, operation_checkpoint, validate_primary_repo,
+)
 from .lifecycle import claim, collect, discard, init_workspace, release, spawn
 from .recovery import recover, status
 
@@ -33,6 +35,7 @@ _BOOKKEEPING_KEYS = {
 }
 _TIMESTAMP_KEYS = {"created", "ready", "failed", "collected", "discarded", "collection_failed", "collection_recovered",
                    "lease_released"}
+_T = TypeVar("_T")
 
 
 def _iso(seconds: float) -> str:
@@ -79,6 +82,21 @@ def resolve_workspace(explicit: str | None) -> Path:
     if explicit:
         return Path(explicit).expanduser().resolve()
     return discover_workspace()
+
+
+def _resolve_operation_input(operation: str, resolver: Callable[[], _T]) -> _T:
+    """Give CLI-only path/workspace discovery the same safety context as its operation."""
+    @operation_boundary(operation)
+    def resolve() -> _T:
+        operation_checkpoint(
+            stage="input and workspace resolution",
+            durable_state=f"no durable mutation from this {operation} attempt has begun",
+            work_preservation="believed preserved — only paths and repository identity are being inspected",
+            recovery=f"not required; correct the input or Git setup and retry {operation}",
+        )
+        return resolver()
+
+    return resolve()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -155,27 +173,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "init":
-            canonical = validate_primary_repo(Path(args.canonical or "."))
-            workspace = Path(args.workspace).expanduser().resolve() if args.workspace else default_workspace(canonical)
+            def init_inputs() -> tuple[Path, Path]:
+                canonical = validate_primary_repo(Path(args.canonical or "."))
+                workspace = (Path(args.workspace).expanduser().resolve()
+                             if args.workspace else default_workspace(canonical))
+                return canonical, workspace
+
+            canonical, workspace = _resolve_operation_input("init", init_inputs)
             result = init_workspace(canonical, workspace)
         elif args.command == "spawn":
             task = args.task_flag or args.task
             if not task:
                 parser.error("spawn requires a task, e.g. `clonegrown spawn \"fix auth race\"`")
-            result = spawn(resolve_workspace(args.workspace), args.base, task,
+            workspace = _resolve_operation_input("spawn", lambda: resolve_workspace(args.workspace))
+            result = spawn(workspace, args.base, task,
                            args.strong, args.request_id, args.wait_seconds,
                            mode="worktree" if args.worktree else "clone")
         elif args.command == "collect":
-            result = collect(resolve_workspace(args.workspace), args.id, args.allow_rewrite)
+            workspace = _resolve_operation_input("collect", lambda: resolve_workspace(args.workspace))
+            result = collect(workspace, args.id, args.allow_rewrite)
         elif args.command == "release":
             result = release(resolve_workspace(args.workspace), args.id)
         elif args.command == "claim":
             result = claim(resolve_workspace(args.workspace), args.id)
         elif args.command == "discard":
-            result = discard(resolve_workspace(args.workspace), args.id, args.abandon, args.force,
+            workspace = _resolve_operation_input("discard", lambda: resolve_workspace(args.workspace))
+            result = discard(workspace, args.id, args.abandon, args.force,
                              args.discard_ignored)
         elif args.command == "recover":
-            result = recover(resolve_workspace(args.workspace))
+            workspace = _resolve_operation_input("recover", lambda: resolve_workspace(args.workspace))
+            result = recover(workspace)
         else:
             result = status(resolve_workspace(args.workspace))
         print(json.dumps(public_result(result), indent=2, sort_keys=True))

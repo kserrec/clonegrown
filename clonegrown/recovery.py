@@ -23,7 +23,10 @@ from typing import Any
 import os
 import re
 
-from .core import ClonegrownError, file_lock, git, process_alive
+from .core import (
+    ClonegrownError, file_lock, git, operation_boundary, operation_checkpoint, process_alive,
+    public_exception_text, redact_public_text,
+)
 from .audit import (
     NamespaceRefs, _PIN_DROPPED, audit_lock_files, audit_namespace, audit_request_indexes, audit_stages, audit_worker,
 )
@@ -106,7 +109,7 @@ class _Recovery:
 
     def mark_broken(self, error: str, action: str) -> None:
         self.worker.status = WorkerStatus.BROKEN
-        self.worker.error = error[:1000]
+        self.worker.error = redact_public_text(error)[:1000]
         self.save()
         self.report(action)
 
@@ -279,7 +282,7 @@ class _Recovery:
             if self.slot.exists() and intent != WorkerStatus.ABANDONED:
                 self._withdraw_discard()
             else:
-                worker.error = str(exc)[:1000]
+                worker.error = public_exception_text(exc)[:1000]
                 self.save()
             self.report("quarantine-path-occupied")
             return
@@ -325,7 +328,7 @@ class _Recovery:
         try:
             delete_through_quarantine(self.ws, self.state, worker, self.canonical, self.save)
         except Exception as exc:  # noqa: BLE001 - a filesystem error here is a preserved quarantine, not a crash
-            reason = str(exc) if isinstance(exc, ClonegrownError) else f"{type(exc).__name__}: {exc}"
+            reason = public_exception_text(exc)
             if worker.quarantine_path is not None:
                 worker.quarantine_error = reason[:1000]
                 self.save()
@@ -353,7 +356,7 @@ class _Recovery:
             if branch.returncode:
                 raise ClonegrownError("assigned task branch is missing")
         except Exception as exc:
-            self.mark_broken(str(exc), "ready-marked-broken")
+            self.mark_broken(public_exception_text(exc), "ready-marked-broken")
 
     def _recover_collected(self) -> None:
         worker = self.worker
@@ -393,6 +396,7 @@ class _Recovery:
         # The base pin, if any, is handled by drop_stale_base_pin with its ownership rule.
 
 
+@operation_boundary("recover")
 def recover(ws_path: Path) -> list[Report]:
     """Reconcile the lifecycle checkpoints represented by current worker records.
 
@@ -402,6 +406,14 @@ def recover(ws_path: Path) -> list[Report]:
     """
     ws = ws_path.resolve()
     reports: list[Report] = []
+    removed_locks = 0
+    completed_workers = 0
+    operation_checkpoint(
+        stage="workspace recovery inventory",
+        durable_state="no recovery mutation from this attempt is known to have completed",
+        work_preservation="believed preserved — workspace and worker custody are being inspected",
+        recovery="retry recover; manually inspect the workspace only if inventory remains unreadable",
+    )
     with workspace_lock(ws):
         state = WorkspaceState.load(ws)
         canonical = state.verify_canonical()
@@ -425,31 +437,116 @@ def recover(ws_path: Path) -> list[Report]:
             # A lock file is Clonegrown's own advisory control file; one for an id with no record
             # holds nothing and would only block that id's allocation later.
             try:
+                operation_checkpoint(
+                    stage="orphan lock-file cleanup",
+                    durable_state=(f"{removed_locks} orphan lock files were removed; completion of the next "
+                                   "control-file removal is unverified"),
+                    work_preservation="believed preserved — orphan advisory lock files hold no worker content",
+                    recovery="retry recover; manually inspect a lock path only if removal repeatedly fails",
+                )
                 os.unlink(found["path"])
+                removed_locks += 1
                 reports.append({**found, "action": "orphan-lock-file-removed"})
             except OSError as exc:
-                reports.append({**found, "action": "orphan-lock-file-left", "error": str(exc)[:200]})
+                reports.append({**found, "action": "orphan-lock-file-left",
+                                "error": public_exception_text(exc)[:200]})
     for path in record_files:
         worker_id = int(path.stem)
-        with file_lock(worker_lock_path(ws, worker_id), blocking=False) as acquired:
-            if not acquired:
-                reports.append({"id": worker_id, "action": "active-lock-held"})
-                continue
-            with workspace_lock(ws):
-                try:
-                    worker = load_worker_record(ws, state, worker_id)
-                except ClonegrownError as exc:
-                    reports.append({"id": worker_id, "path": str(path), "action": "corrupt-or-unreadable-metadata",
-                                    "error": str(exc)[:1000]})
+        failure_stage = "worker recovery-lock acquisition"
+        failure_durable_state = (
+            f"{removed_locks} orphan lock files and recovery for {completed_workers} workers completed; "
+            "this worker has not been changed in the current stage"
+        )
+        failure_work_preservation = "believed preserved — this worker has not entered recovery mutation"
+        failure_recovery = "retry recover; manually inspect this worker after a repeated recovery failure"
+        operation_checkpoint(
+            stage=f"worker {worker_id} recovery-lock acquisition",
+            durable_state=failure_durable_state,
+            work_preservation=failure_work_preservation,
+            recovery=failure_recovery,
+        )
+        try:
+            with file_lock(worker_lock_path(ws, worker_id), blocking=False) as acquired:
+                if not acquired:
+                    reports.append({"id": worker_id, "action": "active-lock-held"})
                     continue
-                try:
-                    recovery = _Recovery(ws, state, worker, canonical, reports)
-                    recovery.run()
-                    if not any(r.get("id") == worker_id and r.get("action") == "base-ref-ambiguous" for r in reports):
-                        recovery.drop_stale_base_pin()
-                except Exception as exc:  # noqa: BLE001 - one worker's failure must not stop the others
-                    reports.append({"id": worker_id, "action": "recovery-failed",
-                                    "error": f"{type(exc).__name__}: {str(exc)[:900]}"})
+                failure_stage = "worker metadata loading"
+                with workspace_lock(ws):
+                    try:
+                        worker = load_worker_record(ws, state, worker_id)
+                    except ClonegrownError as exc:
+                        reports.append({
+                            "id": worker_id,
+                            "path": str(path),
+                            "action": "corrupt-or-unreadable-metadata",
+                            "error": public_exception_text(exc)[:1000],
+                        })
+                        continue
+                    try:
+                        recovery = _Recovery(ws, state, worker, canonical, reports)
+                        failure_stage = "worker reconciliation"
+                        failure_durable_state = (
+                            f"prior recovery actions completed for {completed_workers} workers; worker "
+                            f"{worker_id}'s next durable mutation is unverified"
+                        )
+                        failure_work_preservation = (
+                            "unverified — this worker may be reset, preserved, repaired, or deleted only "
+                            "according to its recorded custody state"
+                        )
+                        failure_recovery = (
+                            "retry recover; manually inspect the worker if repeated reports cannot reconcile it"
+                        )
+                        operation_checkpoint(
+                            stage=f"worker {worker_id} reconciliation",
+                            durable_state=failure_durable_state,
+                            work_preservation=failure_work_preservation,
+                            recovery=failure_recovery,
+                        )
+                        recovery.run()
+                        if not any(r.get("id") == worker_id and r.get("action") == "base-ref-ambiguous"
+                                   for r in reports):
+                            recovery.drop_stale_base_pin()
+                        completed_workers += 1
+                        failure_stage = f"after worker {worker_id} reconciliation"
+                        failure_durable_state = (
+                            f"{removed_locks} orphan lock files were removed and recovery completed for "
+                            f"{completed_workers} workers"
+                        )
+                        failure_work_preservation = (
+                            "believed handled according to each authenticated record; status remains the "
+                            "authority for preserved or deleted worker content"
+                        )
+                        failure_recovery = (
+                            "retry recover if another stage fails; manually inspect only issues status cannot resolve"
+                        )
+                        operation_checkpoint(
+                            stage=failure_stage,
+                            durable_state=failure_durable_state,
+                            work_preservation=failure_work_preservation,
+                            recovery=failure_recovery,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - one worker's failure must not stop the others
+                        reports.append({
+                            "id": worker_id,
+                            "action": "recovery-failed",
+                            "error": f"{type(exc).__name__}: {public_exception_text(exc)[:900]}",
+                            "stage": "worker reconciliation",
+                            "durable_state": ("the last completed worker checkpoint remains authoritative; "
+                                              "later mutation is unverified"),
+                            "work_preservation": "unverified; inspect this worker and its reported custody paths",
+                            "recovery": ("retry recover; if this worker fails again, inspect it manually before "
+                                         "any deletion"),
+                        })
+        except Exception as exc:  # noqa: BLE001 - a worker-local setup failure must not stop later workers
+            reports.append({
+                "id": worker_id,
+                "action": "recovery-failed",
+                "error": f"{type(exc).__name__}: {public_exception_text(exc)[:900]}",
+                "stage": failure_stage,
+                "durable_state": failure_durable_state,
+                "work_preservation": failure_work_preservation,
+                "recovery": failure_recovery,
+            })
     return reports
 
 
@@ -474,7 +571,7 @@ def status(ws_path: Path) -> dict[str, Any]:
                 worker = load_worker_record(ws, state, worker_id)
             except ClonegrownError as exc:
                 issues.append({"id": worker_id, "path": str(path), "issue": "invalid-worker-metadata",
-                               "error": str(exc)[:200]})
+                               "error": public_exception_text(exc)[:200]})
                 continue
             valid[worker_id] = worker
             item = worker.to_json()
@@ -485,7 +582,7 @@ def status(ws_path: Path) -> dict[str, Any]:
                     if worker.status == WorkerStatus.COLLECTED and snap.head != worker.result_sha:
                         item["drift"] = "changed-after-collection"
                 except Exception as exc:
-                    item["drift"] = str(exc)[:200]
+                    item["drift"] = public_exception_text(exc)[:200]
             workers.append(item)
         known_ids = {int(p.stem) for p in record_files}
         for child in orphan_quarantines(ws, valid):

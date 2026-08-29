@@ -5,15 +5,15 @@ standard library, Git, and Python 3.11+.
 
 ```text
 clonegrown/
-  __init__.py     public Python API: ClonegrownError (plus CWSError compatibility alias), init_workspace, spawn, collect, discard, recover, status
+  __init__.py     public Python API: ClonegrownError plus the init/spawn/collect/release/claim/discard/recover/status operations
   __main__.py     python -m clonegrown
   cli.py          the installed `clonegrown` command (auto-discovery, documented lifecycle output)
   lifecycle.py    the four transactions: init, spawn, collect, discard
   recovery.py     recover at represented lifecycle checkpoints, and status
   worker.py       one worker on disk: marker, authentication, snapshot, allocation, worktree removal
-  repository.py   Git operations only: provisioning a clone, creating and repairing worktrees
+  repository.py   Git operations: pure clone plans, provisioning, and worktree repair
   state.py        WorkspaceState and WorkerRecord (the two JSON records), WorkerStatus (the state machine)
-  core.py         Git runner and environment construction, atomic JSON, failpoints, process liveness, file locks
+  core.py         sanitized Git runner, redacted command failures, public-operation safety context, atomic JSON, locks
 ```
 
 Dependencies point strictly downward: `cli` → `lifecycle`/`recovery` →
@@ -131,31 +131,80 @@ state machine cover both. Their Git isolation and provisioning differ:
 | on discard | delete the directory | delete the directory, then its recorded admin directory and task branch in canonical |
 | request-id digest | base, task, strong | base, task, strong, mode — so a retry cannot silently switch mode |
 
-The CLI defaults to a non-strong clone. The current Python API instead defaults
-`spawn(..., strong=True)`; callers should pass `strong` explicitly until the
-documented mismatch is corrected. A default CLI clone has separate refs, stash,
-local config, and a default private `.git/hooks` location, but Git may hard-link
-its existing object files to the canonical repository. A strong clone uses
-`--no-hardlinks`; a worktree shares the canonical repository's broad Git state
-and object database.
+The CLI and Python API both default to a non-strong clone. That clone has
+separate refs, stash, local config, and a default private `.git/hooks`
+location, but Git may hard-link its existing object files to the canonical
+repository. `strong=True` uses `--no-hardlinks`; `mode="worktree"` shares the
+canonical repository's broad Git state and object database and rejects
+`strong=True`.
 
-Clone provisioning does not copy programs from the canonical repository's
-private `.git/hooks` directory. `copy_local_config()` copies an effective
-`core.hooksPath` value unless any value contains the canonical path's literal
-text, in which case the whole key is omitted by the generic path-bound-config
-guard. This is a substring check, not a filesystem-containment check. The
-function copies only configuration values, never the directories or programs
-they name.
+### Minimum clone-fidelity contract
 
-An absolute `core.hooksPath` value receives the compatibility warning
-`absolute core.hooksPath remains an external shared dependency` before the
-generic omission check. A copied absolute value therefore remains shared, but
-the warning can also accompany a value that the later substring check omitted.
-Values such as `.githooks`, `~/hooks`, and `../../hooks` are not classified as
-absolute and receive no hook-specific warning. Git resolves the first within a
-normal worker checkout, while the latter two can resolve outside it and remain
-shared dependencies. `--strong` changes object-file handling only and does not
-change any of this hook behavior.
+Clone provisioning first builds and validates an immutable remote/config plan;
+that planning step reads canonical state but does not mutate either repository.
+A Git config read failure aborts spawn instead of being treated as an empty
+configuration. Before the apply stage mutates the staged clone, Git validates
+every planned remote name and the plan validates every config key against
+Git's section/subsection/variable grammar. A leading-dash remote is valid and
+is passed literally after `--`; a genuinely invalid remote or config key is
+rejected while the clone's config bytes and `origin` remote are unchanged. The
+apply stage then has these explicit guarantees and limits:
+
+- **Remotes.** Every effective canonical remote name and every ordered
+  repository-local occurrence under its `remote.<name>.*` section are planned,
+  because fetch URLs, push URLs, refspecs, pruning, tag policy, and other
+  remote settings all affect ordinary Git behavior. Repeated occurrences keep
+  their order. A nonempty relative local-path `url` or `pushurl` is made
+  absolute against the canonical working-tree root before it enters the
+  differently located worker. Absolute local paths, URL schemes, scp-like
+  `host:path` syntax, explicit empty strings, and valueless occurrences retain
+  their semantics. The clone's own canonical-source remote is renamed to the
+  first free `cws-source` name and receives an invalid push URL as an accident
+  guard. A remote visible to Git with no effective repository-local config
+  occurrence is refused rather than silently omitted or invented.
+- **Local config.** Effective repository-local occurrences are copied because
+  repository-specific tools, identity, filters, attributes, and similar Git
+  behavior can depend on them. Global and system config are not localized.
+  Exact value form is retained: valueless is distinct from explicit empty,
+  repeated values and cross-key occurrence order are preserved, and spaces,
+  Unicode, and embedded newlines remain data. Repository-shape keys under
+  `core`, sparse/index shape keys, `extensions.*`, `branch.*`, and remote keys
+  are excluded here because the new clone, task branch, remote stage, or sparse
+  stage owns them separately. Repository-local include directives are omitted
+  so their relative paths and conditions cannot bind the worker back to the
+  canonical repository; values effective through them are flattened into the
+  worker. Comments, formatting, include origins, and empty section headers are
+  not part of the contract. If any value for a key contains the canonical
+  path's literal text, the whole key is omitted with a warning. This is a
+  substring guard, not a filesystem-containment analysis.
+- **Auxiliary refs.** Remote-tracking refs are copied so offline comparisons
+  retain their known remote tips; notes refs are copied because review and
+  display tools may consult them; replace refs are copied because they alter
+  history interpretation. Stash, Clonegrown's private refs, and transient
+  operation refs are deliberately omitted to keep user scratch state,
+  lifecycle ownership, and in-progress Git operations private.
+- **Info files.** Existing `info/exclude` and `info/attributes` files are copied
+  so repository-local ignore and attribute behavior remains available. No
+  other file under `.git/info` is promised or copied.
+- **Sparse policy.** When canonical sparse checkout is enabled, its sparse
+  flags and pattern file are copied so the worker materializes the same path
+  subset. A missing required pattern file is an error. Sparse state is handled
+  here rather than by the generic config copy; no other index or worktree state
+  is copied.
+- **Hooks.** Programs in canonical's private `.git/hooks` are never copied, so
+  clone workers retain their private default hook directory without importing
+  executable code. A configured `core.hooksPath` value is copied unless the
+  generic literal-path guard omits its whole key; Clonegrown never copies the
+  programs it names. An absolute value warns that it remains an external shared
+  dependency. `.githooks`, `~/hooks`, and `../../hooks` are not classified as
+  absolute; the latter two can still resolve outside the worker without that
+  warning. `--strong` does not change hook behavior.
+- **Objects.** A default clone may hard-link existing immutable object files
+  for speed and may retain an alternate object database with a warning. A
+  strong clone uses `--no-hardlinks` and repacks/removes any alternate so its
+  object files are physically independent at spawn. Neither choice changes
+  the separate refs, stash, local config, or default hook location guaranteed
+  by clone mode.
 
 Cleanup targets the recorded admin path rather than running
 `git worktree prune`, which could also drop the user's own worktrees whose
@@ -222,6 +271,14 @@ Inside the canonical repository Clonegrown owns refs under
 
 ## Allocation and request indexes
 
+Before allocation advances `next_id` or creates a base pin, record, or request
+index, it constructs the complete deterministic task branch and asks Git to
+validate it with `check-ref-format --branch`. Task text is reduced to at most
+48 lowercase ASCII slug characters; punctuation, Unicode-only text, and shell
+syntax therefore cannot become executable syntax or raw ref metacharacters.
+Git remains authoritative for the complete branch: a surviving invalid form
+such as a component ending in `.lock` is rejected with no allocation evidence.
+
 Allocation is create-only. Before `next_id` advances, nothing may already
 represent that id: a record, a slot directory, a stage or quarantine
 directory, an operation lock file, a base pin, or any worker ref. A stale
@@ -272,20 +329,54 @@ interrupted spawn is preserved as `broken`, as described above.
 
 ## Command output
 
-Successful lifecycle commands (`init`, `spawn`, `collect`, `discard`,
-`recover`, and `status`) print JSON to stdout. Help and `--version` print text
-to stdout. Argument errors and Clonegrown runtime errors print text to stderr,
-leave stdout empty, and exit with status 2.
+Successful lifecycle commands (`init`, `spawn`, `collect`, `release`, `claim`,
+`discard`, `recover`, and `status`) print JSON to stdout. Help and `--version`
+print text to stdout. Argument errors and Clonegrown runtime errors print text
+to stderr, leave stdout empty, and exit with status 2.
 
 For successful structured results, the Python API returns the full value; the
 CLI removes two kinds of field — secrets (`canonical_token`, `worker_token`,
 `params_hash`) and transaction bookkeeping (owner, staging and candidate
 fields, admin paths, snapshots) — and renders timestamps as ISO 8601 UTC
 strings. `tests/test_cli.py::test_output_contract` pins the exact key sets.
-When a Clonegrown runtime error wraps a failed subprocess, its text currently
-includes the complete argument vector, stdout, and stderr. Copied config values
-or credential-bearing remote URLs can therefore appear on stderr despite the
-normal structured-result filtering.
+Failed direct commands raise `CommandFailure`, a `ClonegrownError` carrying a
+return code (or `None` for a timeout or failure to start the process), a named
+operation, and underscore-prefixed raw command/cwd/stdout/stderr/start-error
+diagnostics for deliberate in-process debugging.
+Its normal string and representation contain only a shell-quoted *display* of
+the still-array-executed command and redacted stdout/stderr. Git call sites mark
+copied configuration values and remote URLs sensitive, and the renderer also
+removes URL userinfo. Public and durable failure text also removes the private
+32-hex custody component from Clonegrown's own `.cws/staging` and
+`.cws/quarantine` paths, including quoted `OSError` filenames. Those values
+therefore do not reach CLI errors or durable worker error fields. Successful
+`status` output still shows the literal `quarantine_path`, which is deliberate
+recovery information; its separate `worker_token` field remains hidden. Other
+diagnostic text is retained: this is targeted redaction, not a general-purpose
+secret scanner.
+
+The public `init`, `spawn`, `collect`, `discard`, and `recover` boundaries
+translate every ordinary exception into one `ClonegrownError` with five
+ordered parts: operation and stage, the last known durable mutation, work
+preservation as either `believed preserved` or `unverified`, the required
+recovery/manual-inspection action, and the cause text. A `CommandFailure` cause
+has the targeted redaction described above; arbitrary exception text receives
+the same URL-userinfo and Clonegrown-custody-token filtering but is not a
+general secret-scanning surface. A checkpoint is updated before a write or
+rename, so a failure inside that primitive says its completion is unverified;
+it is advanced only after the primitive returns.
+The original exception remains chained as `__cause__`, preserving a
+`CommandFailure` and its private diagnostics for deliberate in-process
+debugging. `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`, and other
+process-control exceptions are not caught. The CLI prints the contextual
+error once with no traceback and leaves stdout empty.
+
+Recovery continues past an ordinary failure for one worker, including worker
+lock/setup failures and exceptions whose `__str__` renderer itself raises. Its
+`recovery-failed` report carries `stage`, `durable_state`,
+`work_preservation`, and `recovery` fields in addition to the bounded error;
+the other recovery action records retain their existing shapes. Successful
+operation results and durable record schemas are unchanged.
 
 A ready worker:
 
@@ -357,10 +448,10 @@ canonical, object_format, repo_name, created}`.
   before collection and normal deletion trust them. A request-index hit is validated field by
   field and its settled worker authenticated before it is returned. Worktree admin cleanup is targeted
   instead of using blanket pruning.
-- Git commands run without an interactive prompt. Process-level `GIT_*`
-  overrides are stripped when the configured executable's basename is
-  literally `git`; a custom `CLONEGROWN_GIT` executable currently bypasses
-  that detection.
+- Every Git command, including clone operations, raw-byte listings, and a
+  custom `CLONEGROWN_GIT` executable, runs through the same environment that
+  strips process-level `GIT_*` overrides and disables terminal prompts. The
+  generic non-Git runner keeps its caller-supplied environment semantics.
 - The canonical-source remote in each clone worker has an invalid push URL.
   This is a best-effort accident guard, not a security boundary.
 
@@ -476,6 +567,15 @@ The implementation order and compatibility rules are in [`PLAN.md`](PLAN.md).
 harnesses and comparative probes that produced the evidence in `research/`.
 
 - `tests/test_cli.py` — unit tests for the installed command.
+- `tests/test_api.py` — CLI/Python default parity, public exports, branch-name
+  validation timing, sanitization edges, and hostile literal task text.
+- `tests/test_safety_errors.py` — low-level failure translation, causal
+  chaining, CLI rendering, process-control passthrough without rollback,
+  custody assertions before and after durable lifecycle boundaries, and
+  per-worker recovery continuation across rendering and lock/setup failures.
+- `tests/test_repository.py` — pure clone planning and exact remote/config
+  fidelity, including valueless entries, relocated relative URLs, literal
+  leading-dash remotes, and Git key/name rejection before mutation.
 - `tests/test_worktree.py` — worktree-mode lifecycle, guards, tampering, and
   crash recovery.
 - `tests/campaign/hardening_suite.py` — 56 deterministic and adversarial cases, including

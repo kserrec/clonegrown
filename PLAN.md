@@ -19,17 +19,18 @@ part.
 
 ## Status
 
-### 2026-08-28 — Phases 1, 2, and 3 of the remediation roadmap are complete
+### 2026-08-28 — Phases 1 through 4 of the remediation roadmap are complete
 
 Kyle chose to run the remediation phases rather than the earlier
-simulate/find-users/stop product choice. All three closed Phases were each
+simulate/find-users/stop product choice. Phases 1 through 3 were each
 cold-reviewed by a fresh agent and then bughunted, with every confirmed
-finding fixed and re-reviewed in the same pass; the records sit under each
-Phase below. The working state is on `main`: 147 unit tests
+finding fixed and re-reviewed in the same pass; Phase 4 closed with the same
+fix-and-fresh-review discipline in Step 4.5. The records sit under each Phase
+below. The working state is on `main`: 187 unit tests
 (`python3 -m unittest discover -s tests`), the 56-case hardening campaign in
-clone and worktree modes, state-machine fuzz, random-kill, direct CLI probes,
-`sh -n install.sh`, and `git diff --check` all pass. The next `$next` pass is
-the first unfinished Step of Phase 4. Nothing needs Kyle.
+clone and worktree modes, out-of-checkout byte compilation, `sh -n install.sh`,
+trailing-whitespace checks, and `git diff --check` all pass. The next `$next`
+pass is Phase 5 Step 5.1. Nothing needs Kyle.
 
 **The refactor is complete** (2026-08-22). The implementation is the
 `clonegrown/` package described in `ARCHITECTURE.md`; the seven flat modules
@@ -1406,7 +1407,7 @@ finding settled as real, and four edge cases, all fixed with regressions:
 
 ## Phase 4 — Restore exact Git semantics and safe operational errors
 
-### Step 4.1 — Make Git execution explicit, sanitized, structured, and redacted
+### Step 4.1 — Make Git execution explicit, sanitized, structured, and redacted — complete 2026-08-28
 
 - Make `git()` always use `clean_git_env`, regardless of the configured
   executable's basename; keep generic non-Git `run()` semantics separate.
@@ -1420,7 +1421,31 @@ finding settled as real, and four edge cases, all fixed with regressions:
   credential-bearing URLs/config values, timeouts, and ordinary useful Git
   stderr. Sentinel secrets must not appear in CLI output or stored errors.
 
-### Step 4.2 — Build a pure remote/config copy plan, then apply it imperatively
+Completion record (2026-08-28): `git()` now supplies `clean_git_env()`
+unconditionally, independent of the configured executable's filename, while
+generic `run()` preserves its caller's environment semantics. Clone
+provisioning also goes through `git()`, so every package-owned Git execution,
+including raw-byte listings and a renamed `CLONEGROWN_GIT`, strips the
+process-level `GIT_*` overrides and sets `GIT_TERMINAL_PROMPT=0`.
+`CommandFailure` is a structured `ClonegrownError` with return code (or
+`None` for a timeout), named operation, safe public command/stdout/stderr, and
+underscore-prefixed raw in-memory diagnostics. Its public rendering replaces
+caller-marked values and URL userinfo while retaining unrelated diagnostic
+text. Every write of a copied configuration value and remote URL, plus clone
+and fetch source locations, marks the value sensitive; lifecycle persistence
+continues to store only `str(error)`, so the raw values do not enter worker
+records. Direct argument arrays remain in use and no shell, runtime package,
+or subprocess wrapper hierarchy was added. `tests/test_core.py` adds nine
+regressions for literal `CLONEGROWN_GIT` selection, exact and prefix hostile
+Git variables, generic-run separation, nonzero and timeout structure,
+raw-byte output, literal hostile arguments, useful ordinary stderr, and
+end-to-end copied-config/remote failures; the sentinel values are absent from
+both CLI stderr and the durable worker `error`. Verification: focused tests
+9/9; unit suite 156/156; hardening campaign 56/56 in clone mode and 56/56 in
+worktree mode; out-of-checkout byte compilation, retired-claim search, direct
+Git-path search, and `git diff --check` all pass.
+
+### Step 4.2 — Build a pure remote/config copy plan, then apply it imperatively — complete 2026-08-28
 
 - Represent a config occurrence as valueless or string-valued, preserving an
   explicit empty string separately. Preserve occurrence order and current
@@ -1440,7 +1465,36 @@ finding settled as real, and four edge cases, all fixed with regressions:
   relative fetch/push paths, spaces and Unicode, credential redaction, remote
   name collision, and a worker moved far from canonical.
 
-### Step 4.3 — Align the Python API and reject invalid generated branches early
+Completion record (2026-08-28): `ConfigOccurrence` now represents every
+ordered config entry as either `None` (genuinely valueless) or a string (with
+`""` remaining explicitly empty). `build_clone_config_plan()` reads raw and
+include-expanded repository-local config with checked Git commands, calculates
+the source-remote collision name, applies the existing structural/path-bound
+exclusions, flattens effective include values, and validates the complete
+immutable plan without mutation. `apply_clone_config_plan()` is the sole
+imperative remote/config stage: it validates before touching the staged clone,
+uses Git to validate remote names, clears Git-generated defaults, writes every
+source value through the redacting runner, preserves cross-key and repeated
+occurrence order with temporary sections, atomically restores genuinely
+valueless syntax, and verifies the applied config and remote set. Relative
+nonempty `url`/`pushurl` local paths are resolved against canonical before the
+worker moves; absolute paths, schemes, scp-like syntax, empty strings, and
+valueless entries are not reinterpreted. A config read error now aborts rather
+than becoming `{}`. `ARCHITECTURE.md` records the minimum fidelity contract and
+the compatibility reason and omission boundary for remotes, local config,
+auxiliary refs, info files, sparse policy, hooks, and objects; README and the
+installed skill summarize the user-facing behavior. `tests/test_repository.py`
+adds four regressions covering pure planning, exact value/order/include
+semantics, read failure and pre-mutation validation, relocated relative fetch
+and push paths with spaces/Unicode, unchanged transports and canonical config,
+and `cws-source` collision. The Step 4.1 credential-failure tests continue to
+exercise both config and remote apply paths. Verification: repository tests
+4/4; command/redaction tests 9/9; unit suite 160/160; hardening campaign 56/56
+in clone mode and 56/56 in worktree mode; out-of-checkout byte compilation,
+retired-function search, and `git diff --check` all pass. No dependency or
+external protocol changed.
+
+### Step 4.3 — Align the Python API and reject invalid generated branches early — complete 2026-08-28
 
 - Change the Python `spawn` default to `strong=False` and pin CLI/API parity in
   tests and examples. Preserve explicit `strong=True` and worktree rejection.
@@ -1452,7 +1506,33 @@ finding settled as real, and four edge cases, all fixed with regressions:
   imports/docs while retaining the on-disk `cws` protocol and test-variable
   names until their separately planned gate exists.
 
-### Step 4.4 — Give every public operation safety-context errors
+Completion record (2026-08-28): the public `spawn()` signature now defaults to
+`strong=False`, matching the unchanged CLI default; `strong=True` still makes
+a physically independent clone, and worktree mode still rejects that flag.
+The README Python example and architecture now state the shared default and
+show default clone, explicit strong clone, and default worktree calls.
+Allocation computes the complete deterministic branch and calls Git's
+`check-ref-format --branch` after resolving the base but before the collision
+scan or any durable allocation write: an invalid branch cannot advance
+`next_id` or create a base pin, worker record, request index, stage, or slot.
+Valid branch naming and `sanitize_task()` are unchanged; focused cases pin the
+48-character slug bound, 10,000-character input, Unicode-only and
+mixed-Unicode input, leading/trailing/doubled dots, `@{`, slash and backslash
+syntax, `.lock`, and literal shell punctuation. `CWSError` was removed from
+`core.py`, the package namespace, and `__all__`; `ClonegrownError` remains the
+sole public error type. Every on-disk `.cws` directory, `refs/cws` namespace,
+and campaign test variable remains unchanged. The six regressions in
+`tests/test_api.py` cover actual CLI/API default parity, explicit isolation
+modes, the public export boundary, and pre-mutation rejection with
+metadata/ref snapshots; sanitizer and Git ref edges; and hostile task text
+without shell execution. Verification: focused
+API tests 6/6; allocation 10/10; CLI 4/4; worktree 24/24; unit suite 166/166;
+hardening campaign 56/56 in clone mode and 56/56 in worktree mode;
+out-of-checkout byte compilation, retired-alias/stale-default searches, and
+`git diff --check` all pass. No dependency, output key, valid branch name,
+lifecycle transition, or durable protocol changed.
+
+### Step 4.4 — Give every public operation safety-context errors — complete 2026-08-28
 
 - At init/spawn/collect/discard/recover boundaries, translate low-level
   filesystem, JSON, subprocess, and conversion errors into `ClonegrownError`
@@ -1465,13 +1545,103 @@ finding settled as real, and four edge cases, all fixed with regressions:
 - Regressions inject failures before/after irreversible boundaries and assert
   both custody state and exact safety context.
 
-### Step 4.5 — Cold-review Phase 4
+Completion record (2026-08-28): `operation_boundary()` now catches ordinary
+`Exception` at the public `init`, `spawn`, `collect`, `discard`, and `recover`
+boundaries while deliberately leaving process-control `BaseException`
+subclasses untouched. Every translated `ClonegrownError` has ordered
+operation/stage, durable-state, work-preservation, recovery, and cause fields;
+the original exception remains chained as `__cause__`. The active context is
+local to the call and advances before and after allocation, metadata/ref
+writes, fetch, publication, quarantine, authorized deletion, terminal cleanup,
+and recovery reconciliation. A primitive that raised is therefore reported as
+unverified rather than guessed complete or absent. Existing `CommandFailure`
+targeted redaction remains in its cause text and its private diagnostics remain
+available through the chain; arbitrary exception text is still not claimed to
+be secret-scanned. The unchanged CLI catches the translated error, writes it
+once to stderr with no traceback, and leaves stdout empty.
+
+Recovery continues past one worker's ordinary failure; its existing
+`recovery-failed` action now adds stage, durable-state, work-preservation, and
+next-action fields. `tests/test_safety_errors.py` adds eight regressions for
+filesystem, JSON, subprocess, conversion, and even unrenderable exception
+causes; process-control passthrough; causal chaining and CLI redaction; and
+real failures after initializing-state commit, publication, candidate fetch,
+and quarantine rename with custody checked before recovery. The first full
+run exposed one compatibility regression: contextual text made the bounded
+large-ignore refusal 608 characters. The cause was the verbose pre-deletion
+checkpoint, which was shortened without removing a required field; the single
+test then passed before the full rerun. Verification: focused safety tests 8/8;
+allocation 10/10; quarantine 32/32; worktree 24/24; CLI 4/4; command/redaction
+9/9; API 6/6; state 11/11; lease 10/10; unit suite 174/174; hardening campaign
+56/56 in clone mode and 56/56 in worktree mode; out-of-checkout byte
+compilation and `git diff --check` pass. No dependency, public signature,
+successful result shape, durable schema/ref protocol, lifecycle transition, or
+custody behavior changed. `claim`, `release`, `status`, and direct low-level
+`CommandFailure` behavior remain unchanged.
+
+### Step 4.5 — Cold-review Phase 4 — complete 2026-08-28
 
 - A fresh agent probes custom Git execution, relative URLs, valueless config,
   secret-bearing failures, branch generation, API defaults, and low-level error
   conversion. It verifies that redaction does not erase the information needed
   to diagnose a failure.
 - Run focused compatibility tests, unit tests, and both hardening modes.
+
+Completion record (2026-08-28): fresh, read-only reviewers probed every named
+Phase 4 surface and proved ten defect classes that the completed Step-level
+tests had not covered. Each cause was confirmed before modification, fixed
+within this pass's ten-fix ceiling, given focused regression coverage, and
+re-read by a fresh agent after the final edit:
+
+1. Process-level `GIT_NO_REPLACE_OBJECTS` and `GIT_REPLACE_REF_BASE` could
+   change the history Clonegrown saw; both now leave every package Git process
+   with the rest of the hostile `GIT_*` environment.
+2. Internal staging/quarantine worker tokens could enter contextual and
+   durable error text; failure construction and persistence now apply one
+   targeted custody-token redactor while retaining ordinary diagnostics.
+3. `GeneratorExit` reached lifecycle rollback code even though the public
+   boundary propagated it; rollback now runs only for ordinary `Exception`,
+   so all process-control exceptions leave the in-flight durable state alone.
+4. An exception whose `__str__` raised could abort recovery before later
+   workers; exception rendering is bounded and recovery records the failed
+   worker before continuing.
+5. CLI-only input/workspace discovery sat outside the five operation
+   boundaries, and a missing custom Git executable leaked `FileNotFoundError`;
+   discovery now has the named operation context and process-launch `OSError`
+   becomes a structured `CommandFailure` with its original cause chained.
+6. A Git-invalid remote name was rejected only after the staged clone changed;
+   all names are now checked before mutation, while valid leading-dash names
+   remain literal through `--`.
+7. Redacting a one-character copied value such as `a` erased unrelated key and
+   diagnostic text; marked argv values redact exactly and short values in
+   output redact only as standalone tokens.
+8. A worker lock/setup failure escaped the per-worker recovery handler and
+   prevented later workers from being reconciled; setup, locking, record load,
+   reconciliation, and context-manager exit now report per worker and continue.
+9. A hand-built plan could carry a Git-invalid config key past validation and
+   mutate the clone before `git config` refused it; section/subsection/variable
+   grammar is now validated before the first Git call, without rejecting legal
+   spaces and URL punctuation in subsection names.
+10. The first custody-token regex missed a real quoted `PermissionError`
+    filename because a quote followed the 32-hex component; the specific
+    Clonegrown path pattern now redacts the token independent of that delimiter.
+
+The first full-suite run then caught a compatibility regression introduced by
+the token hardening: recursively redacting every successful CLI string hid the
+documented `status.quarantine_path`. The cause was isolated before editing;
+successful result filtering again preserves that recovery path and hides its
+separate token field, while public and durable failure text remains redacted.
+The exact status and quoted-error tests passed, and a final fresh read-only
+review found no open finding in the corrected output flow.
+
+Final verification: command/redaction tests 12/12; repository fidelity tests
+8/8; safety/error tests 14/14; API tests 6/6; CLI tests 4/4; unit suite 187/187;
+hardening campaign 56/56 in clone mode and 56/56 in worktree mode;
+out-of-checkout byte compilation, `sh -n install.sh`, trailing-whitespace
+search, and `git diff --check` pass. No dependency, public signature,
+successful result key set, durable schema/ref protocol, or successful
+lifecycle behavior changed in this cold-review Step. Phase 4 is complete; the
+next unfinished work is Phase 5 Step 5.1.
 
 ## Phase 5 — Separate correctness from benchmarks and close validation gaps
 

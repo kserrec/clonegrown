@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from .core import (
     PROTOCOL_NAME, ClonegrownError, atomic_json, atomic_json_create, failpoint, git, git_bytes, git_common_dir,
-    git_dir, git_path, lexical_abs, load_json, object_format, repo_root,
+    git_dir, git_path, lexical_abs, load_json, object_format, operation_checkpoint, public_exception_text, repo_root,
 )
 from .repository import (
     absent_marker, delete_ref, is_symbolic_ref, ref_points_at, release_task_branch, repair_worktree, resolve_ref,
@@ -352,19 +352,54 @@ def delete_through_quarantine(ws: Path, state: WorkspaceState, worker: WorkerRec
         worker.quarantine_started = time.time()
         worker.quarantine_snapshot = custody_fingerprint(repo)
         worker.quarantine_error = None
+        operation_checkpoint(
+            stage="quarantine custody-record commit",
+            durable_state=(f"worker {worker_id} remains in its slot; completion of the quarantine path and "
+                           "custody-fingerprint write is unverified"),
+            work_preservation="believed preserved — deletion has not begun and the worker slot remains in place",
+            recovery="run `clonegrown recover`; manually inspect only if it reports ambiguous or changed content",
+        )
         persist()
+        operation_checkpoint(
+            stage="quarantine rename",
+            durable_state=(f"worker {worker_id}'s quarantine path and custody fingerprint are recorded; "
+                           "the worker still occupies its slot"),
+            work_preservation="believed preserved — no worker content has been deleted",
+            recovery="run `clonegrown recover`; it resumes only against the recorded custody evidence",
+        )
     if worker.quarantine_path is not None:
         quarantine = Path(worker.quarantine_path)
         if not os.path.lexists(quarantine) and slot.exists():
             # Intent was recorded but the rename never happened (or failed): do it now. The
             # recheck below then compares the moved slot with the recorded fingerprint.
             failpoint("discard.before_delete")
+            operation_checkpoint(
+                stage="quarantine rename",
+                durable_state=(f"worker {worker_id}'s quarantine metadata is recorded; completion of the "
+                               "slot-to-quarantine rename is unverified"),
+                work_preservation=("unverified — the worker may be in its slot or quarantine, so neither "
+                                   "may be assumed"),
+                recovery="run `clonegrown recover`; manually inspect if both paths are reported occupied",
+            )
             try:
                 rename_into_quarantine(slot, quarantine)
             except ClonegrownError:
                 clear_quarantine(worker)  # nothing moved; the caller returns the worker to its status
                 persist()
+                operation_checkpoint(
+                    stage="quarantine rename refusal",
+                    durable_state=f"worker {worker_id} remains in its slot and its quarantine metadata was cleared",
+                    work_preservation="believed preserved — the worker was not moved or deleted",
+                    recovery="not required; resolve the reported path problem and retry discard",
+                )
                 raise
+            operation_checkpoint(
+                stage="quarantine custody recheck",
+                durable_state=f"worker {worker_id} was moved to its recorded quarantine path",
+                work_preservation=("believed preserved — the complete worker is held in quarantine and not "
+                                   "yet deleted"),
+                recovery="run `clonegrown recover`; it rechecks the recorded custody fingerprint before deletion",
+            )
             failpoint("discard.after_quarantine")
         if os.path.lexists(quarantine) and slot.exists():
             raise ClonegrownError(
@@ -394,15 +429,66 @@ def delete_through_quarantine(ws: Path, state: WorkspaceState, worker: WorkerRec
                 # custody question of a half-deleted directory. The path itself is derived from the
                 # record's identity, so finishing the deletion needs no further authentication.
                 worker.quarantine_snapshot = DELETION_AUTHORIZED
+                operation_checkpoint(
+                    stage="deletion-authorization commit",
+                    durable_state=(f"worker {worker_id} is intact in quarantine; completion of its durable "
+                                   "deletion-authorization write is unverified"),
+                    work_preservation="believed preserved — destructive deletion has not started",
+                    recovery=("run `clonegrown recover`; it will preserve or finish only the explicitly "
+                              "authorized worker"),
+                )
                 persist()
+                operation_checkpoint(
+                    stage="verified quarantine deletion",
+                    durable_state=f"worker {worker_id}'s quarantine is durably authorized for deletion",
+                    work_preservation="unverified — authorized deletion may be partial if this operation fails",
+                    recovery="run `clonegrown recover`; do not move or edit a partially deleted quarantine",
+                )
                 failpoint("discard.after_recheck")
+            operation_checkpoint(
+                stage="verified quarantine deletion",
+                durable_state=(f"worker {worker_id}'s quarantine is authorized; completion of recursive deletion "
+                               "is unverified"),
+                work_preservation="unverified — explicitly authorized worker content may already be partly deleted",
+                recovery="run `clonegrown recover`; do not move or edit the quarantine while deletion is incomplete",
+            )
             delete_verified(quarantine, "quarantined worker")
+            operation_checkpoint(
+                stage="post-deletion metadata commit",
+                durable_state=(f"worker {worker_id}'s quarantined content was proved absent; clearing its "
+                               "quarantine record is unverified"),
+                work_preservation=("believed preserved — nothing outside the explicitly authorized worker path "
+                                   "was selected for deletion"),
+                recovery="run `clonegrown recover`; it finishes stage and canonical cleanup before terminal status",
+            )
         elif slot.exists():
             raise ClonegrownError(f"worker {worker_id} slot reappeared after quarantine; nothing deleted")
         clear_quarantine(worker)
         persist()
+        operation_checkpoint(
+            stage="post-deletion cleanup",
+            durable_state=(f"worker {worker_id}'s content is absent and its quarantine fields are cleared; "
+                           "terminal metadata is not yet confirmed"),
+            work_preservation=("believed preserved — deletion was confined to the explicitly authorized worker; "
+                               "any collected result ref is separate"),
+            recovery="run `clonegrown recover`; it finishes remaining stage and canonical cleanup",
+        )
     if worker.stage_root and os.path.lexists(worker.stage_root):
+        operation_checkpoint(
+            stage="staging-residue deletion",
+            durable_state=(f"worker {worker_id}'s published/quarantined content is absent; stage deletion "
+                           "is unverified"),
+            work_preservation="believed preserved — the authenticated worker stage is not a published work location",
+            recovery="run `clonegrown recover`; inspect only stage residue it reports unable to remove",
+        )
         delete_verified(Path(str(worker.stage_root)), "worker stage")
+    operation_checkpoint(
+        stage="canonical cleanup pending",
+        durable_state=f"worker {worker_id}'s content and authenticated stage are absent; terminal cleanup remains",
+        work_preservation=("believed preserved — deletion was confined to the explicitly authorized worker; "
+                           "any collected result ref is separate"),
+        recovery="run `clonegrown recover`; it completes canonical cleanup and terminal metadata",
+    )
     failpoint("discard.after_delete")
 
 
@@ -560,6 +646,13 @@ def authenticate_settled(ws: Path, state: WorkspaceState, worker: WorkerRecord, 
             raise ClonegrownError(f"worker {worker_id} is recorded as gone but content sits at its quarantine path")
 
 
+def validate_generated_branch(canonical: Path, branch: str) -> None:
+    """Reject a deterministic task branch before allocation creates any durable evidence."""
+    valid = git(canonical, "check-ref-format", "--branch", branch, check=False)
+    if valid.returncode:
+        raise ClonegrownError(f"generated task branch is invalid for Git: {branch}")
+
+
 def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str | None,
                    mode: str = "clone") -> tuple[WorkerRecord, bool]:
     """Reserve a worker ID, pin its base commit, and write the ``allocated`` record.
@@ -581,6 +674,13 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
         if request_id:
             existing = load_request_index(ws, state, request_id, digest)
             if existing is not None and existing.status not in WorkerStatus.RETRYABLE:
+                operation_checkpoint(
+                    stage="existing request authentication",
+                    durable_state=("this spawn attempt made no mutation; the existing request record remains "
+                                   "authoritative"),
+                    work_preservation="believed preserved — the existing worker was only inspected",
+                    recovery="not required; inspect status if the existing request cannot be returned",
+                )
                 return existing, False
             # A failed incomplete spawn may be retried under the same idempotency key.
         resolved = git(canonical, "rev-parse", "--verify", f"{base}^{{commit}}", check=False)
@@ -588,6 +688,8 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
             raise ClonegrownError(f"base does not resolve to a commit: {base}")
         base_sha = resolved.stdout.strip()
         worker_id = int(state.next_id)
+        branch = state.worker_branch(worker_id, task)
+        validate_generated_branch(canonical, branch)
         evidence = allocation_evidence(ws, state, canonical, worker_id)
         if evidence:
             raise ClonegrownError(
@@ -595,10 +697,30 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
                 f"{', '.join(evidence)}; nothing was changed. Inspect with `clonegrown status` and repair "
                 "the workspace state by hand")
         state.next_id = worker_id + 1
+        operation_checkpoint(
+            stage="allocation counter commit",
+            durable_state=f"the counter write for worker {worker_id} is unverified; no worker record is confirmed",
+            work_preservation="believed preserved — existing workers were not selected or modified",
+            recovery=("run `clonegrown status`; an unused worker-ID gap is safe, but unreadable metadata "
+                      "needs manual inspection"),
+        )
         state.save(ws)
+        operation_checkpoint(
+            stage="base-pin creation",
+            durable_state=f"worker ID {worker_id} was consumed; creation of its base pin is unverified",
+            work_preservation="believed preserved — no worker directory has been created or published",
+            recovery="run `clonegrown status`; inspect an orphan base pin manually if it is reported",
+        )
         failpoint("allocate.after_state")
         token = secrets.token_hex(16)
         write_ref(canonical, state.base_ref(worker_id), base_sha, "0" * len(base_sha))
+        operation_checkpoint(
+            stage="worker-record creation",
+            durable_state=(f"worker ID {worker_id} was consumed and its base pin was written; record creation "
+                           "is unverified"),
+            work_preservation="believed preserved — no worker directory has been created or published",
+            recovery="run `clonegrown status`; a base pin without a worker record requires manual inspection",
+        )
         failpoint("allocate.after_base_ref")
         worker = WorkerRecord(
             schema=SCHEMA,
@@ -608,7 +730,7 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
             worker_token=token,
             path=str(worker_slot(ws, worker_id) / str(state.repo_name)),
             stage_root=str(staging_root(ws, worker_id, token)),
-            branch=state.worker_branch(worker_id, task),
+            branch=branch,
             base=base,
             base_sha=base_sha,
             strong=bool(strong),
@@ -624,7 +746,23 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
         except Exception:
             # The ID stays consumed (a visible gap); only the pin this call made is withdrawn.
             delete_ref(canonical, state.base_ref(worker_id), base_sha, check=False)
+            operation_checkpoint(
+                stage="worker-record creation rollback",
+                durable_state=(f"worker ID {worker_id} was consumed, no worker record was created, and "
+                               "base-pin cleanup was attempted but is unverified"),
+                work_preservation="believed preserved — no worker directory was created or published",
+                recovery="run `clonegrown status`; inspect any retained base pin manually before retrying spawn",
+            )
             raise
+        operation_checkpoint(
+            stage="request-index commit" if request_id else "completed allocation",
+            durable_state=(
+                f"worker {worker_id} has an allocated record and base pin; "
+                + ("request-index creation is unverified" if request_id else "no request index was requested")
+            ),
+            work_preservation="believed preserved — the worker has no published directory yet",
+            recovery="run `clonegrown recover`, then inspect `clonegrown status` before retrying spawn",
+        )
         failpoint("allocate.after_record")
         if request_id:
             atomic_json(request_path(ws, request_id), {
@@ -633,6 +771,12 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
                 "worker_id": worker_id,
                 "created": time.time(),
             })
+            operation_checkpoint(
+                stage="completed allocation",
+                durable_state=f"worker {worker_id} has an allocated record, base pin, and request index",
+                work_preservation="believed preserved — the worker has no published directory yet",
+                recovery="run `clonegrown recover`, then inspect `clonegrown status` before retrying spawn",
+            )
         return worker, True
 
 
@@ -816,7 +960,7 @@ def forget_worktree(canonical: Path, worker: WorkerRecord, persist: Callable[[],
         try:
             ours = remove_worktree_admin(canonical, Path(worker.worktree_admin), worker)
         except ClonegrownError as exc:
-            worker.worktree_admin_left = str(exc)[:1000]
+            worker.worktree_admin_left = public_exception_text(exc)[:1000]
         else:
             # Ours and gone, or recycled by Git for another worker (then nothing of ours is
             # left there to clean): either way the recorded path is finished with.

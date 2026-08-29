@@ -238,9 +238,22 @@ not repository corruption.
 Choose `--strong` only when physical object independence matters. It copies the
 object database, so histories with many objects cost more time and disk.
 
+Clone workers receive a validated snapshot of canonical's effective
+repository-local configuration. Valueless entries remain distinct from empty
+strings, repeated occurrences retain their order, and repository-local include
+values are flattened without copying the include directives. Relative local
+fetch and push paths are anchored to canonical before the worker is relocated;
+absolute paths, URL schemes, and scp-like remotes keep their spelling. The full
+copied and omitted state boundary is the
+[minimum clone-fidelity contract](ARCHITECTURE.md#minimum-clone-fidelity-contract).
+
 ## Implemented safeguards
 
 - Workers start from an explicitly resolved and pinned commit.
+- The complete generated task branch is validated by Git before allocation
+  advances its counter or creates a ref, record, request index, stage, or
+  worker slot. An invalid result such as a `.lock` suffix leaves no allocation
+  evidence behind.
 - Worker allocation and lifecycle metadata updates use workspace and worker
   locks.
 - Collection and normal deletion authenticate the published worker path and
@@ -301,10 +314,27 @@ not hypothetical platform concerns:
 - The deletion unit is the slot directory `<workspace>/<id>/`. Anything
   placed beside the repository inside it is fingerprinted but never
   inspected for ignored-content or drift acknowledgement.
-- Command-failure output currently includes the full Git argument vector and
-  stderr. Copied configuration values or credential-bearing remote URLs can
-  therefore appear in an error even though successful CLI records redact
-  secret and transaction fields.
+- Git command failures redact copied configuration values, remote URLs, and
+  URL userinfo from the displayed command, stdout, and stderr before the text
+  reaches CLI output or a durable worker error field. Failure text also hides
+  the private token component of Clonegrown's own staging and quarantine
+  paths, including paths quoted by operating-system errors. Successful
+  `status` output deliberately keeps the full `quarantine_path` so it can guide
+  recovery while hiding the separate `worker_token` field. Other diagnostic
+  text remains visible; this is targeted redaction, not general secret
+  detection, so review an error before publishing it outside a trusted
+  channel.
+- Failures from `init`, `spawn`, `collect`, `discard`, and `recover` name the
+  exact operation stage, the last known durable mutation, whether work is
+  believed preserved or unverified, and whether to retry, run `recover`, or
+  inspect manually. A write or rename that raised is reported as unverified,
+  never assumed complete or absent. The Python exception keeps the original
+  low-level cause chained for debugging; the CLI prints one contextual
+  `clonegrown:` error with no traceback. Command causes retain the targeted
+  redaction described above. Arbitrary exception text receives the same
+  URL-userinfo and Clonegrown-custody-token filtering but is not generally
+  secret-scanned. Process-control exceptions such as `KeyboardInterrupt`,
+  `SystemExit`, and `GeneratorExit` pass through untouched.
 - A collected worker is one-shot: collecting the same unchanged tip is a
   no-op, while new commits after collection are rejected. Start a new worker
   for new work.
@@ -368,13 +398,20 @@ library:
 from clonegrown import ClonegrownError, claim, collect, discard, init_workspace, recover, release, spawn, status
 ```
 
+The Python API and CLI both default to a non-strong clone:
+
+```python
+worker = spawn(workspace, "HEAD", "fix auth race")
+strong_worker = spawn(workspace, "HEAD", "isolate object files", strong=True)
+worktree_worker = spawn(workspace, "HEAD", "quick comparison", mode="worktree")
+```
+
 The API returns full internal dictionaries; successful CLI results remove
 secret and transaction-bookkeeping fields before printing JSON. Error output
-has the exposure described in the alpha safety boundary. The current Python
-API default `spawn(..., strong=True)` differs from the CLI's default
-non-strong clone; this verified mismatch is scheduled for correction in
-[`PLAN.md`](PLAN.md). Pass `strong=False` or `strong=True` explicitly until
-then. `spawn(..., mode="worktree", strong=False)` selects a worktree worker.
+has the exposure described in the alpha safety boundary. Pass `strong=True`
+only for a clone whose object files must be physically independent;
+`mode="worktree"` uses the default `strong=False`, and the API rejects the
+incompatible combination of worktree mode with `strong=True`.
 
 [`ARCHITECTURE.md`](ARCHITECTURE.md) describes the package layout, durable
 state, current recovery behavior, and planned custody contract.

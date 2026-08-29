@@ -10,10 +10,10 @@ Public Python API::
 """
 from __future__ import annotations
 
-from .core import ClonegrownError, CWSError
+from .core import ClonegrownError
 from .lifecycle import claim, collect, discard, init_workspace, release, spawn
 from .recovery import recover, status
 
 __version__ = "0.1.0a1"
-__all__ = ["ClonegrownError", "CWSError", "init_workspace", "spawn", "collect", "release", "claim", "discard",
+__all__ = ["ClonegrownError", "init_workspace", "spawn", "collect", "release", "claim", "discard",
            "recover", "status", "__version__"]

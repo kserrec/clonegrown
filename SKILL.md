@@ -20,6 +20,12 @@ separate object files.
 Choose a worktree when repository history is very large, tasks are short, or
 workers are created and destroyed rapidly. Choose a clone when separate Git
 refs, local config, stash, and the default private hook location matter.
+Clone mode preserves ordered repository-local config occurrences, including
+the semantic difference between valueless and explicitly empty entries. It
+flattens effective repository-local includes without copying their directives,
+and anchors relative local fetch and push paths to canonical before installing
+them in a relocated worker. Absolute paths, URL schemes, and scp-like remotes
+are left unchanged.
 Clonegrown does not copy hook programs from canonical `.git/hooks`. It can copy
 a configured `core.hooksPath` value, not the programs it names; any copied value
 that resolves outside the worker remains shared. Absolute values receive a
@@ -74,9 +80,25 @@ Before using this skill, account for these verified current limits:
   files through hard links. Neither mode is an operating-system sandbox.
 - The clone's invalid canonical-source push URL is an accident guard, not a
   security boundary.
-- Command failures can include full Git arguments and stderr, including copied
-  configuration values or credential-bearing remote URLs. Do not paste error
-  output into a public channel without reviewing it for secrets.
+- Git command failures redact copied configuration values, remote URLs, and
+  URL userinfo from their displayed command, stdout, and stderr. Other Git
+  diagnostic text remains visible; this is targeted redaction rather than a
+  general secret scanner, so review error output before putting it in a public
+  channel.
+- Failure text also hides the private token component of Clonegrown's own
+  staging and quarantine paths, including quoted operating-system filenames.
+  Successful `status` output deliberately retains the full `quarantine_path`
+  as recovery evidence while hiding the separate `worker_token` field.
+- An `init`, `spawn`, `collect`, `discard`, or `recover` failure states its
+  operation stage, last known durable mutation, work-preservation confidence,
+  and required recovery or manual inspection. Treat `unverified` literally:
+  do not infer that a write, rename, publication, or deletion did or did not
+  happen. Follow the stated recovery action, then use `clonegrown status` as
+  the authority. The CLI prints one contextual error without a traceback;
+  command causes keep the targeted redaction above. Arbitrary exception text
+  receives the same URL-userinfo and Clonegrown-custody-token filtering but is
+  not generally secret-scanned. Process-control exceptions are deliberately
+  not converted.
 
 Do not run `clonegrown release` until every process you started in the worker
 has stopped; release is your statement that the worker is quiet. Do not run

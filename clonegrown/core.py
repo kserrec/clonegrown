@@ -1,23 +1,28 @@
 """Process, Git, filesystem, and locking primitives shared by every layer.
 
 Nothing in this module knows about workspaces or workers. It owns the error
-type, the Git runner, atomic JSON I/O, test failpoints, repository
-path discovery, and the advisory file lock.
+type, generic public-operation safety context, the Git runner, atomic JSON
+I/O, test failpoints, repository path discovery, and the advisory file lock.
 """
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import errno
 import fcntl
+import functools
 import json
 import os
+import re
+import shlex
 import shutil
 import stat
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterable, Iterator, ParamSpec, TypeVar
 
 # The on-disk protocol name. Workspace control dirs (.cws/), canonical refs
 # (refs/cws/...), marker files (cws-worker.json), the reserved remote name and
@@ -54,6 +59,7 @@ GIT_ENV_EXACT = {
     "GIT_QUARANTINE_PATH", "GIT_SHALLOW_FILE", "GIT_EXEC_PATH", "GIT_TEMPLATE_DIR",
     "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_NOSYSTEM", "GIT_ATTR_NOSYSTEM", "GIT_ALLOW_PROTOCOL",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE",
     "GIT_PROTOCOL_FROM_USER", "GIT_PROTOCOL", "GIT_SSH", "GIT_SSH_COMMAND",
     "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXTERNAL_DIFF",
     "GIT_DIFF_OPTS", "GIT_OPTIONAL_LOCKS", "GIT_FLUSH", "GIT_CONFIG_COUNT",
@@ -65,18 +71,217 @@ class ClonegrownError(RuntimeError):
     """Any failure Clonegrown reports to its caller; the CLI prints it and exits 2."""
 
 
-CWSError = ClonegrownError  # name used by the original prototype; kept as an alias
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+@dataclass
+class _OperationContext:
+    """The last trustworthy safety statement for one public operation."""
+
+    operation: str
+    stage: str
+    durable_state: str
+    work_preservation: str
+    recovery: str
+
+    def checkpoint(self, *, stage: str, durable_state: str,
+                   work_preservation: str, recovery: str) -> None:
+        self.stage = stage
+        self.durable_state = durable_state
+        self.work_preservation = work_preservation
+        self.recovery = recovery
+
+    def failure(self, cause: Exception) -> ClonegrownError:
+        cause_text = public_exception_text(cause)
+        error = ClonegrownError(
+            f"{self.operation} failed during {self.stage}. "
+            f"Durable state: {self.durable_state}. "
+            f"Work preservation: {self.work_preservation}. "
+            f"Recovery: {self.recovery}. Cause: {cause_text}"
+        )
+        # Useful to an in-process developer without expanding the public error hierarchy.
+        error.operation = self.operation  # type: ignore[attr-defined]
+        error.stage = self.stage  # type: ignore[attr-defined]
+        error.durable_state = self.durable_state  # type: ignore[attr-defined]
+        error.work_preservation = self.work_preservation  # type: ignore[attr-defined]
+        error.recovery = self.recovery  # type: ignore[attr-defined]
+        return error
+
+
+_CURRENT_OPERATION: contextvars.ContextVar[_OperationContext | None] = contextvars.ContextVar(
+    "clonegrown_operation_context", default=None,
+)
+
+
+def operation_boundary(operation: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Translate ordinary failures at a public boundary with explicit safety context.
+
+    The wrapped operation advances the context with ``operation_checkpoint``.
+    Catching ``Exception`` deliberately excludes process-control exceptions
+    such as ``KeyboardInterrupt``, ``SystemExit``, and ``GeneratorExit``.
+    """
+    def decorate(function: Callable[_P, _R]) -> Callable[_P, _R]:
+        @functools.wraps(function)
+        def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            context = _OperationContext(
+                operation=operation,
+                stage="validation",
+                durable_state=f"no durable mutation from this {operation} attempt is known to have completed",
+                work_preservation="believed preserved — no write boundary has been entered",
+                recovery=f"not required; correct the cause and retry {operation}",
+            )
+            token = _CURRENT_OPERATION.set(context)
+            try:
+                return function(*args, **kwargs)
+            except Exception as exc:
+                raise context.failure(exc) from exc
+            finally:
+                _CURRENT_OPERATION.reset(token)
+
+        return wrapped
+
+    return decorate
+
+
+def operation_checkpoint(*, stage: str, durable_state: str,
+                         work_preservation: str, recovery: str) -> None:
+    """Replace the active public operation's safety statement, if there is one."""
+    context = _CURRENT_OPERATION.get()
+    if context is not None:
+        context.checkpoint(
+            stage=stage,
+            durable_state=durable_state,
+            work_preservation=work_preservation,
+            recovery=recovery,
+        )
 
 
 # --- processes ---------------------------------------------------------------
+
+_REDACTED = "<redacted>"
+_URL_USERINFO = re.compile(r"(?P<scheme>\b[A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
+_INTERNAL_CUSTODY_TOKEN = re.compile(
+    r"(?P<prefix>(?:^|[/\\])\.cws[/\\](?:staging|quarantine)[/\\][0-9]+-)"
+    r"[0-9a-f]{32}",
+)
+
+
+def _diagnostic_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "backslashreplace")
+    return value
+
+
+def _redact(text: str, sensitive: Iterable[str | Path]) -> str:
+    """Remove caller-known values and URL userinfo from public diagnostics."""
+    known = {str(value) for value in sensitive if str(value)}
+    for value in sorted(known, key=len, reverse=True):
+        if len(value) < 4:
+            # A one-character config value must not turn every matching letter
+            # in an unrelated command name or diagnostic into noise. Treat a
+            # short value as sensitive only when it appears as its own token.
+            text = re.sub(rf"(?<!\w){re.escape(value)}(?!\w)", _REDACTED, text)
+        else:
+            text = text.replace(value, _REDACTED)
+    text = _INTERNAL_CUSTODY_TOKEN.sub(r"\g<prefix><redacted>", text)
+    return _URL_USERINFO.sub(r"\g<scheme><redacted>@", text)
+
+
+def _redact_argument(argument: str, sensitive: Iterable[str | Path]) -> str:
+    """Redact a marked argv value exactly while preserving unrelated arguments."""
+    known = {str(value) for value in sensitive if str(value)}
+    if argument in known:
+        return _REDACTED
+    return _redact(argument, known)
+
+
+def redact_public_text(text: str) -> str:
+    """Remove Clonegrown-owned path tokens and URL userinfo from public text."""
+    return _redact(text, ())
+
+
+def public_exception_text(error: BaseException) -> str:
+    """Render an exception without letting its renderer or internal path tokens escape."""
+    try:
+        text = str(error).strip() or type(error).__name__
+    except Exception:
+        text = f"{type(error).__name__} (message unavailable)"
+    return redact_public_text(text)
+
+
+def _git_operation(args: tuple[str | Path, ...]) -> str:
+    """Name the Git subcommand without mistaking a global-option value for it."""
+    takes_value = {"-c", "-C", "--exec-path", "--git-dir", "--namespace", "--work-tree"}
+    skip = False
+    for raw in args:
+        arg = str(raw)
+        if skip:
+            skip = False
+            continue
+        if arg in takes_value:
+            skip = True
+            continue
+        if arg.startswith(("--exec-path=", "--git-dir=", "--namespace=", "--work-tree=")):
+            continue
+        if not arg.startswith("-"):
+            return f"git {arg}"
+    return "git"
+
+
+class CommandFailure(ClonegrownError):
+    """A failed direct command with a safe public rendering and private diagnostics.
+
+    ``str(error)`` and ``repr(error)`` contain only the redacted rendering used
+    by the CLI and durable worker error fields. The underscore-prefixed values
+    retain the original process diagnostics for an in-process developer who
+    deliberately inspects them; Clonegrown never serializes those values.
+    """
+
+    def __init__(self, *, returncode: int | None, operation: str,
+                 command: list[str], cwd: Path | None,
+                 stdout: str | bytes | None, stderr: str | bytes | None,
+                 sensitive: Iterable[str | Path] = (), timed_out: bool = False,
+                 timeout: float | None = None, start_error: OSError | None = None) -> None:
+        known = tuple(str(value) for value in sensitive if str(value))
+        self.returncode = returncode
+        self.operation = operation
+        self.timed_out = timed_out
+        self.timeout = timeout
+        self.start_failed = start_error is not None
+        self._private_command = tuple(command)
+        self._private_cwd = cwd
+        self._private_stdout = stdout
+        self._private_stderr = stderr
+        self._private_start_error = start_error
+
+        public_args = [_redact_argument(arg, known) for arg in command]
+        self.public_command = shlex.join(public_args)
+        self.public_stdout = _redact(_diagnostic_text(stdout), known)
+        self.public_stderr = _redact(_diagnostic_text(stderr), known)
+        if timed_out:
+            duration = f" after {timeout:g} seconds" if timeout is not None else ""
+            first = f"{operation} timed out{duration}: {self.public_command}"
+        elif start_error is not None:
+            first = f"{operation} could not start: {self.public_command}"
+        else:
+            first = f"{operation} failed (exit {returncode}): {self.public_command}"
+        lines = [first]
+        if self.public_stdout:
+            lines.append(f"stdout: {self.public_stdout.rstrip()}")
+        if self.public_stderr:
+            lines.append(f"stderr: {self.public_stderr.rstrip()}")
+        super().__init__("\n".join(lines))
+
 
 def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     for key in list(env):
         if key in GIT_ENV_EXACT or key.startswith(GIT_ENV_PREFIXES):
             env.pop(key, None)
-    # When callers use this sanitized environment, disable terminal prompts.
-    # A custom executable whose basename is not `git` currently bypasses it.
+    # Every Git runner uses this environment, including a custom executable.
     env["GIT_TERMINAL_PROMPT"] = "0"
     if extra:
         env.update(extra)
@@ -85,38 +290,68 @@ def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
         env: dict[str, str] | None = None, timeout: float | None = None,
-        input: str | None = None) -> subprocess.CompletedProcess[str]:
+        input: str | None = None, operation: str | None = None,
+        sensitive: Iterable[str | Path] = ()) -> subprocess.CompletedProcess[str]:
+    """Run a generic non-Git command with the caller's environment semantics."""
     argv = [str(x) for x in cmd]
-    actual_env = clean_git_env(env) if argv and Path(argv[0]).name == "git" else (env or os.environ.copy())
+    actual_env = env if env is not None else os.environ.copy()
+    label = operation or (Path(argv[0]).name if argv else "command")
     try:
         # Paths in Git's output need not be UTF-8; surrogateescape keeps their bytes intact.
         p = subprocess.run(argv, cwd=cwd, text=True, errors="surrogateescape", stdout=subprocess.PIPE,
                            input=input, stderr=subprocess.PIPE, env=actual_env, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        raise ClonegrownError(f"command timed out: {argv[0]} {argv[1] if len(argv) > 1 else ''}") from exc
+        raise CommandFailure(
+            returncode=None, operation=label, command=argv, cwd=cwd,
+            stdout=exc.stdout, stderr=exc.stderr, sensitive=sensitive,
+            timed_out=True, timeout=timeout,
+        ) from exc
+    except OSError as exc:
+        raise CommandFailure(
+            returncode=None, operation=label, command=argv, cwd=cwd,
+            stdout=None, stderr=str(exc), sensitive=sensitive, start_error=exc,
+        ) from exc
     if check and p.returncode:
-        # stderr and argv are kept for diagnosis. Callers must currently treat
-        # command arguments as potentially visible in this public error text.
-        raise ClonegrownError(f"command failed ({p.returncode}): {' '.join(argv)}\nstdout: {p.stdout}\nstderr: {p.stderr}")
+        raise CommandFailure(
+            returncode=p.returncode, operation=label, command=argv, cwd=cwd,
+            stdout=p.stdout, stderr=p.stderr, sensitive=sensitive,
+        )
     return p
 
 
 def git(repo: Path, *args: str | Path, check: bool = True,
-        timeout: float | None = None, input: str | None = None) -> subprocess.CompletedProcess[str]:
-    return run([GIT_BIN, *args], cwd=repo, check=check, timeout=timeout, input=input)
+        timeout: float | None = None, input: str | None = None,
+        sensitive: Iterable[str | Path] = ()) -> subprocess.CompletedProcess[str]:
+    """Run the configured Git executable with a sanitized, noninteractive environment."""
+    return run(
+        [GIT_BIN, *args], cwd=repo, check=check, env=clean_git_env(), timeout=timeout,
+        input=input, operation=_git_operation(args), sensitive=sensitive,
+    )
 
 
-def git_bytes(repo: Path, *args: str | Path, timeout: float | None = None) -> bytes:
+def git_bytes(repo: Path, *args: str | Path, timeout: float | None = None,
+              sensitive: Iterable[str | Path] = ()) -> bytes:
     """Run Git and return its raw stdout, for NUL-delimited listings whose paths need not be UTF-8."""
     argv = [str(GIT_BIN), *(str(a) for a in args)]
     try:
         p = subprocess.run(argv, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            env=clean_git_env(), timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        raise ClonegrownError(f"command timed out: {argv[0]} {argv[1] if len(argv) > 1 else ''}") from exc
+        raise CommandFailure(
+            returncode=None, operation=_git_operation(args), command=argv, cwd=repo,
+            stdout=exc.stdout, stderr=exc.stderr, sensitive=sensitive,
+            timed_out=True, timeout=timeout,
+        ) from exc
+    except OSError as exc:
+        raise CommandFailure(
+            returncode=None, operation=_git_operation(args), command=argv, cwd=repo,
+            stdout=None, stderr=str(exc), sensitive=sensitive, start_error=exc,
+        ) from exc
     if p.returncode:
-        raise ClonegrownError(f"command failed ({p.returncode}): {' '.join(argv)}\nstderr: "
-                              f"{p.stderr.decode('utf-8', 'backslashreplace')}")
+        raise CommandFailure(
+            returncode=p.returncode, operation=_git_operation(args), command=argv, cwd=repo,
+            stdout=p.stdout, stderr=p.stderr, sensitive=sensitive,
+        )
     return p.stdout
 
 
