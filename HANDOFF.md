@@ -1,16 +1,18 @@
 # Session handoff
 
-Written 2026-08-28 (updated 2026-08-29 after the local Phase 5 Step 5.7 repair
-pass). This handoff becomes stale when Step 5.7's hosted gate is completed,
-`PLAN.md` changes the next unfinished Step, or this checkout moves away from
-`main`.
+Written 2026-08-28 (updated 2026-08-29 after the Phase 5 Step 5.7 hosted
+completion gate). This handoff becomes stale when `PLAN.md` changes the next
+unfinished Step or this checkout moves away from `main`.
 
 ## Exact stop point
 
-- Work is on `main` at `17bb42a`, tracking `origin/main`. Phases 1 through 4
-  and their handoff are committed. Phase 5 Steps 5.1 through 5.6 are complete
-  but uncommitted. Step 5.7's cold review and local repair are also uncommitted;
-  Step 5.7 remains incomplete until its hosted CI/artifact/replay gate passes.
+- Work is on `main` at `a2ae7793b5a3653435fde988f716558f74ce6b88`, tracking
+  the same revision on `origin/main`. Phases 1 through 5 are complete. Commit
+  `a2ae779` published the exact 24-path combined Phase 5 tree; hosted
+  deterministic CI and the randomized artifact/replay gate passed. Only
+  `PLAN.md` and this handoff are now modified locally to record that hosted
+  completion; no executable, test, workflow, or research artifact changed
+  after the published commit.
   Step 5.1 changed `tests/campaign/hardening_suite.py`, created
   `tests/campaign/spawn_benchmark.py` and
   `.github/workflows/spawn-benchmark.yml`, and changed
@@ -36,15 +38,15 @@ pass). This handoff becomes stale when Step 5.7's hosted gate is completed,
   `research/REAL_REPOSITORY_QUALIFICATION.json`, and
   `research/REAL_REPOSITORY_QUALIFICATION.md`; it changed
   `research/REPRODUCE.md`, `PLAN.md`, and this handoff, and changed no product
-  or workflow file. All 24 current paths belong to the combined Steps.
+  or workflow file. All 24 committed paths belong to the combined Steps.
   Step 5.7 changed `.github/workflows/ci.yml`,
   `.github/workflows/randomized-campaigns.yml`, `README.md`, `ARCHITECTURE.md`,
   `research/REPRODUCE.md`, `PLAN.md`, this handoff,
   `tests/campaign/campaign_record.py`, `tests/campaign/hardening_suite.py`,
   `tests/campaign/random_kill.py`, `tests/campaign/state_machine_fuzz.py`, and
   `tests/test_campaign_records.py`. It created no path and changed no
-  `clonegrown/` product file, so the combined checkout still has 24 changed or
-  untracked paths.
+  `clonegrown/` product file, so the combined Phase 5 commit contains exactly
+  24 paths.
 - Phase 1 (Steps 1.1 through 1.13) is complete and closed by the Step 1.13
   fresh review, which found no open Phase 1 finding.
 - Phase 2 Step 2.1 is complete: `WorkerRecord.validate` is the one
@@ -131,19 +133,20 @@ pass). This handoff becomes stale when Step 5.7's hosted gate is completed,
   worktree modes; the exact machine record and bounded interpretation are
   preserved under `research/`, and no product code, workflow, protocol, or
   dependency changed.
-- Phase 5 Step 5.7's local cold review confirmed and repaired seven
-  test/workflow weaknesses: missed-SIGKILL false greens, untested artifact
+- Phase 5 Step 5.7 is complete. Its local cold review confirmed and repaired
+  seven test/workflow weaknesses: missed-SIGKILL false greens, untested artifact
   wiring/allowlisting, swallowed corrupt records, skip-as-pass accounting,
   campaign/product Git-selection disagreement, no early durable artifact, and
   cancellable hardening evidence. A post-repair review then found and repaired
   nonzero-child false greens, three missing end-to-end assertions, inaccurate
   timeout arithmetic, and absent hardening-result uploads. Fifteen focused
   tests and all current local gates pass. No product file changed in this Step.
-- The next `$next` pass remains **Phase 5 Step 5.7 — hosted gate**. Do not start
-  Phase 6. Completion requires an explicit commit/push authorization from Kyle,
-  green hosted deterministic CI for that revision, a hosted manual randomized
-  run, validation of all eight retained artifacts, and one literal replay from
-  each artifact.
+  Commit `a2ae779` published the combined Phase 5 tree; hosted CI run
+  33276649643 passed all seven jobs, and randomized run 33277111128 passed all
+  eight jobs. All eight retained artifacts validated, and one row from each
+  replayed literally and passed.
+- The next `$next` pass is **Phase 6 Step 6.1 — delete the legacy test surface**.
+  No Phase 6 work has started.
 
 ## Completed through this stop point
 
@@ -217,8 +220,7 @@ pass). This handoff becomes stale when Step 5.7's hosted gate is completed,
   fail-fast without permitting campaign errors, and configures always-run
   uploads with 30-day retention. Job cancellation or runner loss can still
   prevent an upload. PR CI and the informational benchmark are unchanged. The
-  workflow is not yet live because the combined working tree is uncommitted;
-  Step 5.7 retains the gate to replay an actual hosted artifact.
+  published workflow and all eight hosted artifacts passed the Step 5.7 gate.
 - Phase 5 Step 5.4 changed one product compatibility path after direct
   minimum-version evidence. Git 2.29 copied the sparse pattern file for a
   linked worker but did not copy the main worktree's worktree-local sparse
@@ -228,9 +230,8 @@ pass). This handoff becomes stale when Step 5.7's hosted gate is completed,
   behavior remain intact. The CI endpoint matrix adds latest-stable Python to
   both Linux and macOS, and an exact-minimum job builds the digest-pinned Git
   2.29.0 archive and runs the full unit plus both hardening modes with the
-  binary selected through `PATH` and `CLONEGROWN_GIT`. The expanded uncommitted
-  workflow has not produced hosted results for the Phase 5 additions or its
-  latest-stable jobs; Step 5.7 retains that green-CI gate. A separate Git 2.29
+  binary selected through `PATH` and `CLONEGROWN_GIT`. Hosted CI run
+  33276649643 passed the expanded Phase 5 matrix. A separate Git 2.29
   probe proved the unchanged shared-config worktree branch still inherits
   sparse flags and excludes the omitted path.
 - Phase 5 Step 5.5 added four blocking tests and no product behavior. The real
@@ -366,18 +367,23 @@ pass). This handoff becomes stale when Step 5.7's hosted gate is completed,
   defined, 56 exercised passes, one conditional reftable skip, zero failures;
   generated results stayed under `/tmp`. Earlier `57/57` records were the old
   reporter counting that skip as a pass, not 57 exercised checks.
-- Hosted CI run 33234743380 at committed revision `17bb42a` passed the Python
-  3.11 full-suite jobs on both Ubuntu and macOS. It predates the uncommitted
-  Phase 5 tests and expanded latest-stable matrix; Step 5.7 retains their
-  hosted green-CI gate.
+- Hosted CI run 33276649643 at committed revision
+  `a2ae7793b5a3653435fde988f716558f74ce6b88` passed all seven jobs: Python
+  3.11 and latest stable on Ubuntu and macOS, exact Git 2.29.0, and both
+  hardening modes with their artifact uploads. GitHub emitted non-failing
+  Node.js 20 deprecation annotations for the existing CI checkout/setup
+  actions, which it forced onto Node.js 24.
 - Workflow-default randomized campaign: 12/12 random-kill seeds across three
   operations and two worker modes, all with a killed process; 4/4 state-machine
   seeds × 50 steps across both modes. All eight JSON results passed exact
   schema, provenance, and replay assertions.
-- One recorded random-kill command and one recorded state-machine command were
-  executed literally and passed. Workflow validation proved eight bounded
-  jobs, nightly/manual triggers only, artifact retention after failures, no
-  permissive error flag, and no push/pull-request trigger.
+- Hosted manual randomized run 33277111128 passed all eight jobs at the same
+  revision. Its eight downloaded artifacts each reported two executed/two
+  passed/zero pending/zero failed rows and passed exact schema, allowlisted
+  provenance, run/SHA identity, status, and replay-command validation. The
+  first row from each artifact was executed literally and passed; their eight
+  replay result files each reported one executed/one passed/zero pending/zero
+  failed row.
 - Post-Step-5.7 interruption characterization passed 18/18 rows: seeds 0–2 for
   spawn, collect, and discard in clone and worktree modes, all with
   `killed: true` and `rc: -9`. Four state-machine seeds × 50 steps passed across
@@ -413,7 +419,6 @@ pass). This handoff becomes stale when Step 5.7's hosted gate is completed,
   changed-file trailing-whitespace search, executable-helper validation, and
   `git diff --check`: passed.
 - No session-owned Python, Git, shell, or reviewer process remains running.
-- The hosted Step 5.7 gate is pending because the combined Phase 5 tree is
-  uncommitted. Kyle must explicitly authorize committing and pushing all 24
-  current paths before GitHub can run the new CI and randomized workflows. No
-  commit or push has been authorized; Phase 6 must not start.
+- Phase 5's hosted gate is complete. The only local changes are this completion
+  record and the matching `PLAN.md` update; they are not committed or pushed.
+  Phase 6 Step 6.1 is the next unfinished work.

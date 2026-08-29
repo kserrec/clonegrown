@@ -19,7 +19,7 @@ part.
 
 ## Status
 
-### 2026-08-29 — Phase 5 Step 5.7 is locally repaired; its hosted gate is pending
+### 2026-08-29 — Phase 5 is complete
 
 Kyle chose to run the remediation phases rather than the earlier
 simulate/find-users/stop product choice. Phases 1 through 3 were each
@@ -41,13 +41,16 @@ pinned curl-history, Git-ref, and Git sparse/submodule profiles in both worker
 modes and preserved the exact evidence under `research/`. Step 5.7 then
 cold-reviewed the Phase 5 test and workflow layer, proved and repaired
 false-green campaign behavior without changing product code, and passed its
-local gates. The current local tree has 212 passing unit tests; each
+local gates. The published tree has 212 passing unit tests; each
 current-Git hardening mode reports 57 defined checks as 56 exercised passes,
-one conditional reftable skip, and zero failures. Phase 5 is not closed: the
-combined 24-path tree is still uncommitted, so the new deterministic CI and
-scheduled workflows do not exist on GitHub yet. The next `$next` pass remains
-Step 5.7's hosted gate. It requires Kyle's explicit authorization to commit
-and push this combined Phase 5 tree; Phase 6 must not start first.
+one conditional reftable skip, and zero failures. Commit
+`a2ae7793b5a3653435fde988f716558f74ce6b88` published all 24 Phase 5 paths.
+Hosted deterministic CI run 33276649643 passed all seven jobs, and manually
+dispatched randomized run 33277111128 passed all eight jobs at that exact
+revision. All eight retained artifacts passed exact schema, provenance,
+completion-status, and replay-command validation; the first recorded row from
+each artifact replayed literally and passed. Phase 5 is closed. The next
+unfinished work is Phase 6 Step 6.1.
 
 **The refactor is complete** (2026-08-22). The implementation is the
 `clonegrown/` package described in `ARCHITECTURE.md`; the seven flat modules
@@ -1660,7 +1663,7 @@ successful result key set, durable schema/ref protocol, or successful
 lifecycle behavior changed in this cold-review Step. Phase 4 is complete; the
 next unfinished work is Phase 5 Step 5.1.
 
-## Phase 5 — Separate correctness from benchmarks and close validation gaps
+## Phase 5 — Separate correctness from benchmarks and close validation gaps — complete 2026-08-29
 
 ### Step 5.1 — Make concurrency correctness deterministic and benchmarking nonblocking — complete 2026-08-29
 
@@ -2023,7 +2026,7 @@ artifact/harness SHA-256 checks, new-file trailing-whitespace inspection,
 executable-helper mode, and combined `git diff --check` passed. Phase 5 Step
 5.7 is next.
 
-### Step 5.7 — Cold-review Phase 5
+### Step 5.7 — Cold-review Phase 5 — complete 2026-08-29
 
 - A fresh agent audits the workflows for test theater, machine-sensitive gates,
   missing replay data, unsupported-platform overclaims, and failures hidden by
@@ -2272,12 +2275,31 @@ to its recorded hash. The final total is 83 proved regressions across ten
 batches. All 15 focused tests passed, and the exact final 16-module discovery
 suite passed 212/212 in 538.210 seconds.
 
-Step 5.7 and Phase 5 remain **incomplete** because none of this uncommitted tree
-has run on GitHub. Completion requires explicit authorization to commit and
-push, a green hosted deterministic CI run for the published revision, a hosted
-manual randomized run, download and validation of all eight retained
-artifacts, and literal replay of at least one row from each artifact. No commit
-or push is authorized by `$next`; Phase 6.1 remains out of scope.
+#### 2026-08-29 hosted completion record
+
+Kyle explicitly authorized committing and pushing the exact 24-path Phase 5
+tree. Commit `a2ae7793b5a3653435fde988f716558f74ce6b88` contains 4,199 insertions
+and 113 deletions across those 24 paths and was pushed to `origin/main`.
+Deterministic CI run 33276649643 passed all seven jobs at that exact SHA: the
+Python 3.11 and latest-stable unit/destructive jobs on Ubuntu and macOS, the
+exact Git 2.29.0 unit/adversarial job, and the clone/worktree hardening jobs
+with both artifact uploads. GitHub emitted non-failing deprecation annotations
+because the existing CI checkout/setup actions target Node.js 20 and were
+forced onto Node.js 24; no job failed, skipped, or was cancelled.
+
+Manual randomized run 33277111128 used seed start 0, two seeds per random-kill
+case, two seeds per state-machine mode, and 50 steps per state-machine seed at
+the same SHA. All six random-kill and two state-machine jobs and their uploads
+passed. The eight non-expired artifacts were downloaded outside the checkout.
+Every artifact had the exact expected top-level schema and allowlisted
+environment/GitHub provenance, identified the published SHA and run, reported
+two executed and two passed rows with zero pending or failed rows, and carried
+the exact one-seed replay command for each row. The first row from every
+artifact was then executed literally: all six interruption replays passed with
+an actual `SIGKILL` and return code -9, and both state-machine replays passed 50
+events with the public invariant active. Their eight generated replay results
+also passed one-executed/one-passed/zero-pending/zero-failed validation. Phase
+5 is complete; no Phase 6 work began, and Phase 6 Step 6.1 is next.
 
 ## Phase 6 — Remove residue and optimize only from measurements
 
