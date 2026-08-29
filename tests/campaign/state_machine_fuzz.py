@@ -7,18 +7,19 @@ HERE=Path(__file__).resolve().parent
 sys.path.insert(0,str(HERE.parents[1]))
 import clonegrown as cws
 from clonegrown.state import WorkspaceState
+from campaign_record import GIT_BIN, campaign_environment, state_machine_replay, write_json_atomic
 def summary_ref(st,wid): return WorkspaceState.from_json(st).summary_ref(wid)
 
 ROOT=Path(os.environ.get('CWS_FUZZ_ROOT','/tmp/cws-final-state-machine-fuzz'))
 WORKTREE=os.environ.get('CWS_SUITE_MODE')=='worktree'; MODE='worktree' if WORKTREE else 'clone'
 
-def run(cmd,cwd=None,check=True):
-    p=subprocess.run([str(x) for x in cmd],cwd=cwd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+def run(cmd,cwd=None,check=True,timeout=120):
+    p=subprocess.run([str(x) for x in cmd],cwd=cwd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout)
     if check and p.returncode:
         raise RuntimeError(f"command failed {cmd}: {p.stdout}\n{p.stderr}")
     return p
 
-def git(repo,*args,check=True): return run(['git',*args],repo,check)
+def git(repo,*args,check=True): return run([GIT_BIN,*args],repo,check)
 
 def setup(seed:int):
     b=ROOT/f'seed-{seed}'; shutil.rmtree(b,ignore_errors=True); b.mkdir(parents=True)
@@ -33,8 +34,7 @@ def metas(w:Path):
     out={}
     for p in (w/'.cws/workers').glob('*.json'):
         if not p.stem.isdigit(): continue
-        try: out[int(p.stem)]=json.loads(p.read_text())
-        except Exception: pass
+        out[int(p.stem)]=json.loads(p.read_text())
     return out
 
 def commit(repo:Path,label:str,step:int):
@@ -48,7 +48,8 @@ def invariant(c:Path,w:Path,origin_url:str,full=False):
     if full: git(c,'fsck','--full')
     if not WORKTREE: assert git(c,'config','fuzz.sentinel').stdout.strip()=='canonical'  # worktrees share config by design
     assert git(c,'remote','get-url','origin').stdout.strip()==origin_url
-    st=json.loads((w/'.cws/state.json').read_text()); ms=metas(w)
+    audit=cws.status(w); assert audit['issues']==[],f'workspace audit found {audit["issues"]}'
+    st=json.loads((w/'.cws/state.json').read_text()); ms=metas(w); assert {m['id'] for m in audit['workers']}==set(ms),f'audit/record mismatch: audit={[m["id"] for m in audit["workers"]]}, records={sorted(ms)}'
     agent_heads=[l.split()[1] for l in git(c,'show-ref','--heads').stdout.splitlines() if '/agent/' in l]
     if WORKTREE:
         # Task branches live in canonical's shared refs; each must belong to a worker that still has a directory.
@@ -178,10 +179,15 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--start',type=int,default=0); ap.add_argument('--seeds',type=int,default=10); ap.add_argument('--steps',type=int,default=100); ap.add_argument('--output',required=True); a=ap.parse_args()
-    ROOT.mkdir(parents=True,exist_ok=True); rows=[]; t=time.perf_counter()
-    for seed in range(a.start,a.start+a.seeds):
-        r=one(seed,a.steps); rows.append(r); print(('PASS' if r['ok'] else 'FAIL'),seed,json.dumps(r,sort_keys=True),flush=True)
+    if a.seeds < 1: ap.error('--seeds must be positive')
+    if a.steps < 1: ap.error('--steps must be positive')
+    ROOT.mkdir(parents=True,exist_ok=True); t=time.perf_counter(); environment=campaign_environment()
+    rows=[{'seed':seed,'steps':a.steps,'ok':None,'status':'pending','replay_command':state_machine_replay(MODE,seed,a.steps)} for seed in range(a.start,a.start+a.seeds)]
+    def payload():
+        return {'schema_version':1,'campaign':'state-machine','worker':MODE,'start':a.start,'requested_seeds':a.seeds,'steps_per_seed':a.steps,'environment':environment,'executed':sum(x['ok'] is not None for x in rows),'pending':sum(x['ok'] is None for x in rows),'passed':sum(x['ok'] is True for x in rows),'failed':sum(x['ok'] is False for x in rows),'seconds':time.perf_counter()-t,'results':rows}
+    write_json_atomic(a.output,payload())
+    for index,seed in enumerate(range(a.start,a.start+a.seeds)):
+        r=one(seed,a.steps); r['status']='passed' if r['ok'] else 'failed'; r['replay_command']=state_machine_replay(MODE,seed,a.steps); rows[index]=r; write_json_atomic(a.output,payload()); print(('PASS' if r['ok'] else 'FAIL'),seed,json.dumps(r,sort_keys=True),flush=True)
         if not r['ok']: break
-    out={'start':a.start,'requested_seeds':a.seeds,'steps_per_seed':a.steps,'passed':sum(x['ok'] for x in rows),'failed':sum(not x['ok'] for x in rows),'seconds':time.perf_counter()-t,'results':rows}
-    Path(a.output).write_text(json.dumps(out,indent=2)+'\n'); return 1 if out['failed'] else 0
+    out=payload(); return 1 if out['failed'] else 0
 if __name__=='__main__': sys.exit(main())

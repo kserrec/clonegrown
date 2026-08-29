@@ -1,7 +1,7 @@
 # Architecture
 
 Clonegrown is a single Python package with no runtime dependencies beyond the
-standard library, Git, and Python 3.11+.
+standard library, Git 2.29.0+, and Python 3.11+.
 
 ```text
 clonegrown/
@@ -18,6 +18,84 @@ clonegrown/
 
 Dependencies point strictly downward: `cli` → `lifecycle`/`recovery` →
 `worker` → `repository`/`state` → `core`. Every import is explicit.
+
+## Supported execution envelope
+
+Clonegrown 0.x supports Linux and macOS. Its blocking CI matrix is configured
+to run the full unit suite—including installer replacement, lease, quarantine,
+worktree cleanup, and real parent-interruption destructive paths—on both
+operating systems with the oldest supported Python series (3.11) and
+setup-python's latest stable Python 3.x selection. Intermediate Python 3.x
+releases remain inside the declared `>=3.11` package range, but the blocking
+boundary jobs are the two endpoints.
+
+Git 2.29.0 is the minimum. The product invokes both `git fetch
+--no-write-fetch-head` and `git worktree repair`; Git's 2.29 release introduced
+both, while 2.28 had neither. The other version-sensitive calls used by
+Clonegrown are available in 2.29: explicit `update-ref --stdin` transactions,
+`fetch --no-auto-maintenance`, and `rev-parse --show-object-format`. The
+NUL-delimited `git worktree list --porcelain -z` form is newer, so
+`branch_checkouts` deliberately retries the stable line-oriented porcelain
+form when `-z` is rejected.
+
+The `minimum-git` CI job downloads the official Git 2.29.0 source archive,
+verifies its pinned SHA-256 digest, builds it with optional HTTP/OpenSSL
+components omitted, and runs the complete unit and clone/worktree adversarial
+suites with both
+`PATH` and `CLONEGROWN_GIT` selecting that exact binary. Tests whose repository
+format requires a newer Git, such as reftable, skip when that Git reports the
+format unavailable; that conditional feature support does not raise the
+minimum.
+
+Sparse checkout has one explicit minimum-version compatibility step. When
+`extensions.worktreeConfig` is active, the main worktree's sparse flags are
+worktree-local. Git 2.29 does not populate them for a newly added linked
+worktree, so Clonegrown copies the effective `core.sparseCheckout`, cone-mode,
+and sparse-index values into the worker's `--worktree` config before checkout,
+then copies the per-worktree pattern file. Repositories without worktree-local
+config continue to use their shared values; clone workers still receive a
+private copy of the same policy.
+
+Native Windows is explicitly unsupported in 0.x. `core.py` imports `fcntl`,
+and the custody protocol depends on POSIX advisory locks, atomic same-filesystem
+renames, and POSIX deletion behavior. Results from the Linux and macOS matrix
+must not be treated as evidence for Windows equivalents.
+
+## Filter and resource boundary
+
+A real repository test covers a required clean/smudge filter whose driver is
+an available external command. A tracked `.gitattributes` rule selects it; Git
+stores the clean representation, clone and worktree checkout both materialize
+the smudged representation, a worker edit is cleaned into its index, and the
+collected commit retains that clean blob. Clone mode receives the effective
+repository-local `filter.*` values through its config plan; worktree mode uses
+the shared canonical config. Clonegrown does not copy, install, sandbox, or
+otherwise manage the external driver.
+
+Git LFS is not a supported dependency in 0.x and is not simulated. Supporting
+it would add a separately installed and updated executable, hook and
+filter-process behavior, credential handling, remote LFS object transfer, and
+another security-advisory surface. The upstream 3.8.0 platform archives at the
+2026-08-29 decision were
+[roughly 5.6–6.2 MB compressed](https://github.com/git-lfs/git-lfs/releases/tag/v3.8.0);
+the project takes none of that dependency.
+Long-running filter-process drivers, delayed checkout, credentialed/network
+filters, and other filter protocols remain unsupported.
+
+The blocking tests inject three deterministic POSIX filesystem failures. An
+`ENOSPC` error at file `fsync` before atomic record publication leaves an
+existing record byte-for-byte unchanged and a create-only record absent, with
+both temporary files removed. An `EXDEV` refusal of the slot-to-quarantine
+rename leaves the complete worker in its slot, clears the unfulfilled
+quarantine metadata, withdraws the discard intent, and permits a later retry.
+An `EIO` after recursive deletion has removed one file leaves the remainder in
+the durably authorized quarantine, records the failure as `discarding`, and
+allows `recover` to finish without reclassifying partial residue as intact.
+
+Those injections cover Clonegrown's represented failure transitions; they are
+not actual disk or inode exhaustion and do not reproduce filesystem-specific
+ordering or durability behavior. Genuine disk/inode exhaustion and network or
+distributed filesystems remain unvalidated and unsupported.
 
 ## Installer transaction
 
@@ -177,6 +255,12 @@ apply stage then has these explicit guarantees and limits:
   not part of the contract. If any value for a key contains the canonical
   path's literal text, the whole key is omitted with a warning. This is a
   substring guard, not a filesystem-containment analysis.
+- **Clean/smudge filters.** Eligible repository-local `filter.*` values follow
+  the local-config rule above, and tracked attributes arrive through the Git
+  commit. The tested contract requires the named external driver to be
+  independently available during checkout and later Git commands. Clonegrown
+  does not copy driver programs or generalize this result to Git LFS or the
+  filter-process protocol.
 - **Auxiliary refs.** Remote-tracking refs are copied so offline comparisons
   retain their known remote tips; notes refs are copied because review and
   display tools may consult them; replace refs are copied because they alter
@@ -578,17 +662,49 @@ harnesses and comparative probes that produced the evidence in `research/`.
   leading-dash remotes, and Git key/name rejection before mutation.
 - `tests/test_worktree.py` — worktree-mode lifecycle, guards, tampering, and
   crash recovery.
-- `tests/campaign/hardening_suite.py` — 56 deterministic and adversarial cases, including
-  its deterministic failpoint cases. The harnesses write the original prototype's positional
-  command form; `tests/campaign/legacy_cli.py` translates it onto the real CLI. `CWS_SUITE_MODE=worktree`
-  runs the same cases with worktree workers; the ten cases that assert clone
-  isolation assert the documented sharing instead (and that the spawn warned
-  about it). CI runs both modes.
-- `tests/campaign/run_crash_case.py`, `tests/campaign/random_kill.py` — single failpoint and
-  SIGKILL campaigns (`CWS_SUITE_MODE=worktree` for worktree workers).
-- `tests/campaign/state_machine_fuzz.py` — randomized lifecycle sequences against the
-  Python API (`CWS_SUITE_MODE=worktree` switches the invariants to the
-  worktree contract, including "no task branch outlives its worktree").
+- `tests/test_parent_interruption.py` — six real-process cases that kill only
+  the Python parent, let the configured Git child finish, inspect its exit plus
+  pre-recovery filesystem/ref state, and then verify recovery. They cover clone
+  provisioning, worktree add and repair, collection fetch, quarantined repair,
+  and task-branch cleanup.
+- `tests/test_filters_and_resources.py` — a real required clean/smudge driver
+  across complete clone and worktree lifecycles, plus deterministic atomic
+  write, quarantine-rename, and partial recursive-deletion fault injection.
+- `tests/campaign/hardening_suite.py` — 57 defined deterministic and
+  adversarial cases, including deterministic failpoint matrices for lease,
+  quarantine, and cleanup boundaries. Unsupported repository formats are
+  reported separately as skips instead of passes; on the current Git 2.43.0
+  host, each worker mode exercises 56 cases and conditionally skips reftable.
+  The harnesses write the original prototype's positional command form;
+  `tests/campaign/legacy_cli.py` translates it onto the real CLI.
+  `CWS_SUITE_MODE=worktree` runs the same cases with worktree workers; the ten
+  cases that assert clone isolation assert the documented sharing instead (and
+  that the spawn warned about it). CI runs both modes without matrix
+  cancellation and configures an always-run upload for each structured JSON
+  result; a missing result keeps the job failed, while job cancellation or
+  runner loss can still prevent the upload step from completing.
+- `tests/campaign/run_crash_case.py`, `tests/campaign/random_kill.py` — single
+  failpoint and SIGKILL campaigns (`CWS_SUITE_MODE=worktree` for worktree
+  workers). A random-kill row passes only when the child was actually sent
+  `SIGKILL` and returned the corresponding signal status. Its artifact is
+  prewritten, atomically updated after each row, and records the selected Git
+  executable plus Python/Git/platform/commit provenance and one exact replay
+  command for every requested seed, including seeds still pending.
+- `tests/campaign/state_machine_fuzz.py` — randomized lifecycle sequences
+  against the Python API (`CWS_SUITE_MODE=worktree` switches the invariants to
+  the worktree contract, including "no task branch outlives its worktree"). Its
+  invariant includes the public non-mutating workspace audit, so corrupt
+  worker records and audit/record disagreement cannot disappear from the
+  checked state. Its artifacts use the same prewritten provenance and exact
+  seed/step replay contract.
+- `.github/workflows/randomized-campaigns.yml` — eight nightly/manual,
+  bounded Ubuntu jobs: random kill for three operations × two worker modes and
+  state-machine fuzzing for both modes. Each job stays visibly failed when its
+  campaign fails. Checkout, Python setup, campaign execution, and artifact
+  upload have respective 5-, 5-, 25-, and 5-minute step limits: at most 40
+  step-minutes inside a 45-minute job, leaving five minutes for between-step
+  overhead. The upload is still best-effort if GitHub cancels the job or loses
+  the runner; no same-runner design can retain an artifact after runner loss.
 - The remaining `tests/campaign/*.py` files are comparative probes (scaling, concurrency,
   GC, shared state, I/O faults).
 

@@ -19,18 +19,35 @@ part.
 
 ## Status
 
-### 2026-08-28 — Phases 1 through 4 of the remediation roadmap are complete
+### 2026-08-29 — Phase 5 Step 5.7 is locally repaired; its hosted gate is pending
 
 Kyle chose to run the remediation phases rather than the earlier
 simulate/find-users/stop product choice. Phases 1 through 3 were each
 cold-reviewed by a fresh agent and then bughunted, with every confirmed
 finding fixed and re-reviewed in the same pass; Phase 4 closed with the same
-fix-and-fresh-review discipline in Step 4.5. The records sit under each Phase
-below. The working state is on `main`: 187 unit tests
-(`python3 -m unittest discover -s tests`), the 56-case hardening campaign in
-clone and worktree modes, out-of-checkout byte compilation, `sh -n install.sh`,
-trailing-whitespace checks, and `git diff --check` all pass. The next `$next`
-pass is Phase 5 Step 5.1. Nothing needs Kyle.
+fix-and-fresh-review discipline in Step 4.5. Phase 5 opened by separating its
+machine-sensitive spawn measurements from deterministic concurrency
+correctness in Step 5.1, then added real parent-only interruption coverage and
+completed the lease/quarantine/cleanup crash matrices in Step 5.2. Step 5.3
+put bounded randomized campaigns in a separate nightly/manual artifact lane
+with exact seed replay. Step 5.4 defined the Linux/macOS,
+Python 3.11-through-latest-stable, Git 2.29.0+ execution envelope, tested both
+version endpoints locally on Linux, and kept native Windows explicitly
+unsupported. Step 5.5 pinned one ordinary external clean/smudge-filter case
+and the atomic-write, quarantine-rename, and partial-deletion failure
+transitions while keeping Git LFS and genuine resource/filesystem failures
+outside support. Step 5.6 passed six lifecycle/recovery scenarios across
+pinned curl-history, Git-ref, and Git sparse/submodule profiles in both worker
+modes and preserved the exact evidence under `research/`. Step 5.7 then
+cold-reviewed the Phase 5 test and workflow layer, proved and repaired
+false-green campaign behavior without changing product code, and passed its
+local gates. The current local tree has 212 passing unit tests; each
+current-Git hardening mode reports 57 defined checks as 56 exercised passes,
+one conditional reftable skip, and zero failures. Phase 5 is not closed: the
+combined 24-path tree is still uncommitted, so the new deterministic CI and
+scheduled workflows do not exist on GitHub yet. The next `$next` pass remains
+Step 5.7's hosted gate. It requires Kyle's explicit authorization to commit
+and push this combined Phase 5 tree; Phase 6 must not start first.
 
 **The refactor is complete** (2026-08-22). The implementation is the
 `clonegrown/` package described in `ARCHITECTURE.md`; the seven flat modules
@@ -1645,7 +1662,7 @@ next unfinished work is Phase 5 Step 5.1.
 
 ## Phase 5 — Separate correctness from benchmarks and close validation gaps
 
-### Step 5.1 — Make concurrency correctness deterministic and benchmarking nonblocking
+### Step 5.1 — Make concurrency correctness deterministic and benchmarking nonblocking — complete 2026-08-29
 
 - Keep eight-way uniqueness, no-overwrite, request-id, and state-integrity
   assertions blocking. Remove the single-sample wall-time ratio from the
@@ -1657,7 +1674,50 @@ next unfinished work is Phase 5 Step 5.1.
   CI is green only because all deterministic assertions pass, not because the
   threshold was loosened.
 
-### Step 5.2 — Add real parent/child interruption coverage
+Completion record (2026-08-29): the verified starting implementation was
+`t_parallel_spawns_unique` in `tests/campaign/hardening_suite.py`: it divided
+one eight-way elapsed time by one single-spawn elapsed time and failed the
+correctness case when that one ratio reached 8.0. The roadmap records the
+worktree CI failure as that assertion alone, not an ID or state-integrity
+failure. Before editing, ten unchanged local worktree repetitions all kept
+their IDs unique while the timing ratio varied from 4.697 to 6.103, confirming
+that the measured value varies independently of the invariant being tested.
+
+Product executable code did not change. The deterministic hardening case now
+launches exactly eight concurrent, distinct request IDs and blocks on the exact
+ID set, exact create-only worker-record set, record task/request/status
+identity, request-index-to-record agreement, `next_id`, and a clean public
+`status` audit. It records no timing. New executable measurement tooling in
+`tests/campaign/spawn_benchmark.py` creates a fresh fixture for every single
+and parallel sample, records five raw samples per clone/worktree mode plus
+per-worker times, and reports median, median absolute deviation, minimum, and
+maximum for single time, parallel time, and their ratio. Timing has no pass/fail
+threshold; only an invalid command, JSON result, ready state, or worker-ID set
+invalidates a measurement. The script refuses output inside the checkout.
+
+Configuration and documentation changed separately: the new
+`.github/workflows/spawn-benchmark.yml` has only weekly and manual triggers,
+runs the five-sample/eight-way measurement in both modes, and prints its raw
+JSON and summary without adding a package or action dependency;
+`research/REPRODUCE.md` gives the exact local commands and evidence boundary.
+The push/pull-request `ci.yml` remains unchanged, so its hardening result is now
+determined only by deterministic assertions.
+
+Verification on the final code before this completion record: focused clone
+and worktree concurrency cases passed; the formerly red worktree case passed
+10/10 consecutive runs without code changes, each with IDs 1–8, eight records,
+eight request indexes, and zero audit issues. The exact scheduled benchmark
+commands completed five samples in each mode (clone median ratio 4.695, range
+4.170–5.350; worktree median 5.084, range 4.378–5.906), with JSON under
+`/tmp`. The unit suite passed 187/187; the complete hardening campaign passed
+56/56 in clone mode and 56/56 in worktree mode; out-of-checkout byte
+compilation, `sh -n install.sh`, YAML parsing, changed-file trailing-whitespace
+search, and `git diff --check` passed. Public CLI/API behavior, durable state,
+Git refs, lifecycle semantics, existing CI triggers, preserved historical
+evidence, and runtime dependencies are unchanged. The next unfinished work is
+Phase 5 Step 5.2.
+
+### Step 5.2 — Add real parent/child interruption coverage — complete 2026-08-29
 
 - Add real-process cases that kill only the Python parent while a spawned Git
   child may remain alive, including the exact worktree-add/admin-persist
@@ -1667,7 +1727,58 @@ next unfinished work is Phase 5 Step 5.1.
   new failure appears, stop this Step after naming its cause and insert a
   focused fix Step; do not patch the harness around it.
 
-### Step 5.3 — Put bounded randomized campaigns on a scheduled lane
+Completion record (2026-08-29): the verified starting implementation had no
+real parent-only process interruption test. `random_kill.start_and_kill` started
+a process session and sent `SIGKILL` to its whole process group, while the
+production Git runner waited synchronously in `subprocess.run`; consequently,
+those campaigns killed Python and its Git descendant together. The exact
+`claim` and `release` mutations were durable saves with no following crash
+boundary, and `forget_worktree` performed administration-directory cleanup
+followed by task-branch cleanup with no boundary between the two phases. The
+existing discard matrix covered the six discard/quarantine boundaries but
+neither of those internal worktree cleanup phases.
+
+Before product-code edits, six temporary probes under `/tmp` used the existing
+configured-Git seam to pause the direct Git child, kill only its Python parent,
+let the child complete, inspect its exit and resulting record/files/refs, and
+then recover. They covered worktree add before administration-path persistence,
+clone provisioning, collection fetch, published worktree repair, quarantined
+worktree repair, and transactional branch cleanup. All six passed against the
+unchanged lifecycle implementation, so this Step found no product defect and
+did not insert a corrective Step. The first narrow probe had inherited the
+killed parent's output pipes and made the real Git process receive `SIGPIPE`;
+the child result proved that harness artifact, and the temporary probe was
+corrected to capture Git output before any product conclusion was drawn.
+
+Executable product changes are limited to four inactive-by-default test
+boundaries: `lease.after_claim`, `lease.after_release`,
+`discard.after_admin_cleanup`, and `discard.after_branch_cleanup`. They occur
+after the named durable lease mutation or external cleanup phase and do not
+change an ordinary CLI/API path, durable schema, Git protocol, or cleanup
+order. Test changes are separate:
+`tests/campaign/blocking_git.py` and `tests/test_parent_interruption.py` turn the
+six probes into deterministic regressions that prove the direct Git child is
+alive before and after parent death, wait for its successful exit, inspect
+filesystem/ref/record state before recovery, and require a clean recovered
+audit. The hardening campaign adds a lease crash case and now has 57 cases;
+its discard matrix covers six clone boundaries and eight worktree boundaries,
+and the unit quarantine matrix covers the same mode-specific cleanup points.
+`ARCHITECTURE.md` and `research/REPRODUCE.md` document the tests and exact
+commands; no generated result was added to the checkout.
+
+Verification on the final code: the six parent-interruption tests passed in
+24.086 seconds; the focused lease module passed 10/10 and quarantine module
+32/32; both focused lease and discard matrices passed in clone and worktree
+modes. The complete unit suite passed 193/193 in 359.293 seconds, and the
+hardening driver exited zero for all 57 defined rows in both modes with results
+under `/tmp`; Step 5.7 later established that each total was 56 exercised
+passes plus one reftable skip that the old reporter mislabeled `PASS`.
+Out-of-checkout byte compilation, shell syntax
+validation with `sh -n install.sh`, workflow YAML parsing, changed-file
+trailing-whitespace search, executable-helper validation, and a clean
+`git diff --check` passed. Phase 5 Step 5.3 is next.
+
+### Step 5.3 — Put bounded randomized campaigns on a scheduled lane — complete 2026-08-29
 
 - Run bounded random-kill and state-machine seeds for clone and worktree modes
   on a nightly/manual workflow with seed, step count, Python/Git versions, and
@@ -1675,7 +1786,70 @@ next unfinished work is Phase 5 Step 5.1.
 - Make a failed seed directly replayable with one documented command and retain
   no generated output in the checkout.
 
-### Step 5.4 — Test the supported version and operating-system envelope
+Completion record (2026-08-29): the verified starting repository had no
+scheduled randomized workflow. Push/pull-request `ci.yml` ran only unit and
+deterministic hardening checks, while the Step 5.1 workflow was a separate
+weekly/manual timing benchmark. `random_kill.py` and
+`state_machine_fuzz.py` already accepted bounded seed ranges and caller-chosen
+output paths, but exact baseline JSON inspection proved that neither recorded
+Python/Git/commit provenance or a replay command; state-machine output also did
+not identify its worker mode. One pre-change clone seed from each harness
+passed, establishing the runnable baseline before edits.
+
+Product executable code did not change. New test-harness executable
+`tests/campaign/campaign_record.py` records the Python implementation, version,
+and build, Git version, platform, checked-out commit SHA, and an explicit
+allowlist of non-secret GitHub run fields. It constructs validated literal
+commands narrowed to one worker mode, one seed, one operation when applicable,
+and the recorded state-machine step count. Both randomized harnesses now put
+that environment object at the top level, identify their campaign and worker
+mode, and attach the exact `replay_command` to every result row, including a
+row that reports a caught seed failure. Four new unit tests cover exact command
+rendering, injection rejection, bounds, and real environment provenance.
+
+Configuration changed separately: new
+`.github/workflows/randomized-campaigns.yml` has only nightly (09:37 UTC) and
+manual triggers. Six matrix jobs run spawn/collect/discard random-kill cases in
+clone and worktree modes; two run state-machine fuzzing in both modes. Nightly
+runs use the workflow run number as their first seed and default to two seeds
+per job and 50 steps per state-machine seed. Manual counts and steps are finite
+choices (1/2/3/5 seeds and 25/50/75/100 steps), and every job is capped at 30
+minutes at this Step 5.3 checkpoint; Step 5.7 later replaces that bound with 45
+minutes and explicit per-step limits. Matrix fail-fast is disabled so one
+failure cannot cancel other evidence, but no campaign is allowed to continue
+on error. An artifact step uses `if: always()`, 30-day retention, and
+missing-file failure; job cancellation or runner loss can still prevent it
+from completing. Artifact names include mode/operation, run ID, and run
+attempt. The official v7 checkout, Python setup, and artifact actions add no
+project runtime package; artifact upload is the one new scheduled-workflow
+dependency. Existing PR CI and the benchmark workflow are unchanged.
+
+Documentation changed separately in `ARCHITECTURE.md` and
+`research/REPRODUCE.md`, including two complete one-seed example commands and
+the instruction to check out `environment.commit_sha` before running a row's
+literal replay command. Generated fixtures and JSON remained under `/tmp`.
+The new hosted workflow has not been claimed as live evidence because this
+working tree is uncommitted; Step 5.7 still requires replaying a real retained
+artifact before Phase 6.
+
+Verification on the final code: four focused artifact-contract tests passed;
+a post-change worktree collection seed was actually killed with `SIGKILL`,
+recovered, and emitted complete provenance, and its exact recorded command plus
+the fuzzer's exact recorded command both replayed successfully. The workflow's
+full nightly defaults passed locally: 12/12 random-kill seeds (three operations
+× two modes × two seeds), all with an actual killed process, and 4/4
+state-machine seeds × 50 steps (two modes × two seeds). All eight result JSON
+files passed schema/provenance/replay assertions. The full unit suite passed
+197/197 in 369.469 seconds; the hardening driver exited zero for all 57 defined
+rows in each mode (later corrected by Step 5.7 to 56 exercised passes plus one
+reftable skip per mode). Workflow structure validation proved
+eight bounded jobs, both artifact-on-failure steps, no permissive error flag,
+and no push/pull-request trigger. Out-of-checkout byte compilation, shell
+syntax validation with `sh -n install.sh`, YAML parsing, changed-file
+trailing-whitespace search, and a clean `git diff --check` passed. Phase 5
+Step 5.4 is next.
+
+### Step 5.4 — Test the supported version and operating-system envelope — complete 2026-08-29
 
 - Run destructive-path tests on macOS as well as Linux. Test the oldest
   supported Python (3.11) and the latest stable Python at execution time.
@@ -1685,7 +1859,56 @@ next unfinished work is Phase 5 Step 5.1.
 - Keep native Windows explicitly unsupported in 0.x; do not imply POSIX
   `fcntl`, rename, or deletion results transfer to Windows.
 
-### Step 5.5 — Pin filter/resource behavior or state the boundary
+Completion record (2026-08-29): the blocking unit/destructive CI job is now a
+four-job endpoint matrix: Linux and macOS, each on Python 3.11 and
+setup-python's latest stable `3.x` selection. Matrix fail-fast is disabled, and
+the job names the installer, lease, quarantine, worktree-cleanup, and real
+parent-interruption destructive paths included in the full unit suite. Python
+3.14.7 was the latest stable release when the boundary was established. Native
+Windows remains explicitly unsupported because Clonegrown imports `fcntl` and
+depends on POSIX lock, same-filesystem rename, and deletion semantics.
+
+Git 2.29.0 is the derived floor: Git's 2.29 release introduced both directly
+required operations that 2.28 lacks, `fetch --no-write-fetch-head` and
+`worktree repair`. A dedicated CI job downloads the official 2.29.0 source
+archive, verifies its pinned SHA-256 digest, builds it without unused optional
+HTTP/OpenSSL/gettext/Tcl/Tk components, proves that both `PATH` and
+`CLONEGROWN_GIT` select that binary, and runs all 197 unit/destructive tests
+plus both 57-case hardening modes. The hardening harness and parent-only Git
+blocker now honor `CLONEGROWN_GIT`, so the job tests the claimed binary rather
+than only printing its version. The existing line-oriented fallback keeps the
+newer `worktree list --porcelain -z` form out of the minimum.
+
+The exact-minimum worktree campaign exposed one real product compatibility
+failure before completion: on Git 2.29, `git worktree add` copied a sparse
+pattern file but did not populate a new linked worktree's worktree-local
+`core.sparseCheckout` flags when `extensions.worktreeConfig` was enabled. The
+worker therefore materialized an excluded path. `copy_sparse_policy` now
+copies the effective sparse flags into that worktree's local config before
+checkout; shared-config worktrees and clone policy retain their prior behavior.
+The campaign's assertion now reports included and excluded path failures
+separately. A separate exact-Git probe also proved that a linked worktree with
+shared sparse configuration still inherits those flags and excludes the
+omitted path.
+
+Post-change local verification on Linux passed 197/197 tests on Python 3.11.15
+with exact Git 2.29.0 (232.069 seconds) and 197/197 on Python 3.14.7 with Git
+2.43.0 (256.234 seconds). The exact-Git hardening driver exited zero for all 57
+defined rows in both modes; Step 5.7 later corrected each result to 56
+exercised passes plus one reftable skip. The focused sparse case also passed on
+current Git.
+Two earlier full suites run simultaneously each hit the same fixed 20-second
+parent-interruption polling deadline under sustained local contention. No code
+changed during diagnosis: that exact branch passed five serial probes and four
+paired endpoint probes, after which both isolated full endpoint runs passed.
+The CI matrix uses isolated jobs. Hosted run 33234743380 at committed revision
+`17bb42a` supplies a green Python 3.11 full-suite baseline on both Ubuntu and
+macOS. It predates the uncommitted Phase 5 additions, so hosted confirmation of
+those additions and the expanded latest-stable jobs necessarily awaits
+publication of this combined tree and remains an explicit Step 5.7 green-CI
+gate; this completion record does not claim those unrun results.
+
+### Step 5.5 — Pin filter/resource behavior or state the boundary — complete 2026-08-29
 
 - Add real-repository tests for a custom clean/smudge filter and any Git LFS
   behavior that can be exercised reproducibly without credentials. If Git LFS
@@ -1696,7 +1919,51 @@ next unfinished work is Phase 5 Step 5.1.
   genuine disk/inode exhaustion and network/distributed filesystems remain
   outside support until run on those systems.
 
-### Step 5.6 — Run a small real-repository qualification matrix
+Completion record (2026-08-29): the verified starting implementation already
+copied eligible repository-local `filter.*` config into clone workers and
+shared canonical config with worktree workers, but no test executed a real
+filter driver. The local environment had no `git-lfs` command, and the project
+had no LFS dependency. No product runtime change was needed: a new blocking
+real-Git test creates an available external clean/smudge driver, selects it
+through tracked attributes, proves Git stores cleaned bytes, proves clone and
+worktree checkout both materialize smudged bytes, then edits, cleans, commits,
+collects, releases, and discards each worker. It also proves the collected
+commit retains the clean representation. Clonegrown still copies or shares
+eligible config, never the external program itself.
+
+Git LFS remains unsupported rather than simulated. Taking it would add a
+separately installed and updated executable, Git hook and filter-process
+behavior, credential and remote-object-transfer semantics, and an additional
+upstream security-advisory surface. At the decision point, official Git LFS
+3.8.0 Linux/macOS archives were approximately 5.6–6.2 MB compressed. That
+dependency did not earn its place for the narrower clean/smudge behavior
+Clonegrown can test directly, so the runtime and Python dependency trees remain
+unchanged. Long-running filter-process drivers, delayed checkout,
+credentialed/network filters, and other filter protocols remain unsupported.
+
+Three deterministic fault tests pin the represented filesystem transitions.
+An injected `ENOSPC` at file `fsync` before atomic publication leaves an old
+record byte-identical, leaves a create-only record absent, and removes both
+temporary files. Injected `EXDEV` at the slot-to-quarantine rename keeps the
+complete worker in its slot, clears the unfulfilled quarantine metadata,
+withdraws the discard intent, and permits a successful retry. Injected `EIO`
+after recursive deletion removes one file leaves the remaining content in its
+durably authorized quarantine, records `discarding`, and lets `recover` finish
+without pretending the partial tree is intact. These are fault-injection
+equivalents, not actual capacity or filesystem tests; genuine disk/inode
+exhaustion and network or distributed filesystems remain unvalidated and
+unsupported.
+
+Verification on the final tree passed the four focused cases on Python 3.11.15
+with exact Git 2.29.0 (6.914 seconds) and Python 3.14.7 with Git 2.43.0 (7.417
+seconds). The complete suite passed 201/201 at the exact-minimum endpoint
+(268.464 seconds) and 201/201 at the latest-stable endpoint (277.085 seconds).
+No `clonegrown/` file, workflow, on-disk protocol, runtime dependency, or
+normal product behavior changed. Out-of-checkout compilation at both Python
+endpoints, workflow YAML parsing, `sh -n install.sh`, executable-helper and
+trailing-whitespace checks, and `git diff --check` passed.
+
+### Step 5.6 — Run a small real-repository qualification matrix — complete 2026-08-29
 
 - On disposable clones outside this checkout, run lifecycle and recovery
   scenarios against at least: an ordinary history-heavy repository, a
@@ -1706,6 +1973,56 @@ next unfinished work is Phase 5 Step 5.1.
 - Treat this as validation evidence, not a universal performance policy and
   not proof that coding agents make fewer mistakes.
 
+Completion record (2026-08-29): a new standard-library harness created all
+fixtures outside this checkout and ran six scenarios: default clone and linked
+worktree workers against curl/curl at
+`8a2bb9ca241bbd82a0da536f6f39dca9037dd046`, Git's full ref set at
+`c73e85354c275c9d409b26445089bc16940fc527`, and a second checkout of that Git
+commit narrowed to `Documentation`, `.gitmodules`, and the
+`sha1collisiondetection` gitlink. The curl profile had 39,564 commits reachable
+from `HEAD`; the Git ref profile had 1,019 refs, including 1,008 tags; and the
+feature profile retained the mode-`160000` gitlink while excluding `Makefile`.
+
+Every public source clone began with `--no-checkout`. Before materialization,
+the harness applied non-cone sparse rules excluding all `.env`, `*.env`,
+`.env.*`, and `*.env.*` filename patterns at every depth. It never searched
+for, listed, opened, or read an excluded file, made no claim about whether one
+exists in public history, and did not initialize the public submodule. The
+history/ref roles concern their full cloned histories and ref/object sets; the
+only worktree omissions in those two profiles were the mandatory safety
+patterns.
+
+Each scenario required an intentional exit 88 after worker publication,
+`spawn-publish-finished` recovery, an idempotent retry returning worker 1 at
+the exact public base, preserved sparse materialization, a new committed and
+collected result, release and discard, a removed worker path, a persistent
+immutable result ref, an empty `status` audit, and a passing connectivity-only
+Git check. All 6/6 passed on CPython 3.12.3 and Git 2.43.0 on Linux in 168.309
+observed seconds; timing did not affect pass/fail. The executed package tree
+and harness hashes, exact source/result commits, versions, counts, modes,
+warnings, raw timings, and assertions are preserved in
+`research/REAL_REPOSITORY_QUALIFICATION.json` (SHA-256
+`7d0e36fd68bcb8d6b22af5e88d5c7f248147c81e1c09d5cd773a190e0928cb6c`),
+with interpretation in `research/REAL_REPOSITORY_QUALIFICATION.md` and the
+exact rerun command in `research/REPRODUCE.md`.
+
+The run added no product behavior, workflow, protocol, or dependency. Its
+477,078 KiB of recorded packed public-source objects and all worker fixtures
+were disposable; the successful run proved its temporary root removed. This
+is bounded evidence for the exact matrix, not a performance policy, broader
+platform/repository support, or evidence about coding-agent mistake rates.
+
+Post-record close verification passed the explicitly filtered complete unit
+suite, 201/201 in 271.144 seconds on the local CPython 3.12.3/Git 2.43.0
+environment. An initial explicit-file invocation imported tests as
+`tests.test_*` without putting `tests/` on the import path: four independent
+tests passed and 15 modules stopped at `ModuleNotFoundError: support` before
+their test bodies. No file changed; the corrected explicit-module runner added
+that path, matching normal discovery, and passed all 201. JSON assertions,
+artifact/harness SHA-256 checks, new-file trailing-whitespace inspection,
+executable-helper mode, and combined `git diff --check` passed. Phase 5 Step
+5.7 is next.
+
 ### Step 5.7 — Cold-review Phase 5
 
 - A fresh agent audits the workflows for test theater, machine-sensitive gates,
@@ -1713,6 +2030,254 @@ next unfinished work is Phase 5 Step 5.1.
   `continue-on-error` or permissive shell behavior.
 - Require green deterministic CI and replay at least one artifact from every
   scheduled campaign before Phase 6.
+
+#### 2026-08-29 local cold-review and repair checkpoint — hosted gate pending
+
+A fresh read-only reviewer audited the Phase 5 workflows and harnesses, and
+the main pass reproduced every confirmed issue before editing. The audit found
+no `continue-on-error`, permissive-shell failure suppression, timing-based
+correctness gate, or unsupported native-Windows claim. It did confirm seven
+test/workflow weaknesses:
+
+1. Random-kill spawn rows could exit zero after the target had already exited;
+   seed 0 in both worker modes and a fresh seed-2 probe recorded
+   `killed: false, rc: 0` while printing `PASS`.
+2. The four campaign-record tests covered helper return values but not the
+   artifacts produced by either campaign. Mutations that recorded the entire
+   process environment or removed either harness's replay assignment still
+   passed all four tests.
+3. State-machine metadata loading swallowed every JSON/read exception. A
+   corrupted numeric worker record left zero visible records and the invariant
+   returned true.
+4. The hardening driver labeled conditional format skips as passes and added
+   them to `passed`; local Git 2.43.0 therefore printed 57 passes although it
+   exercised 56 and skipped reftable.
+5. Campaign provenance and fixture setup invoked PATH's literal `git` while
+   Clonegrown selected `clonegrown.core.GIT_BIN`; a controlled
+   `CLONEGROWN_GIT=/bin/false` probe made the artifact describe Git 2.43.0 even
+   though the product had selected `/bin/false`.
+6. Both campaign artifacts were written only after the seed loop. Process or
+   job termination could therefore leave no provenance or replay data, and the
+   state-machine subprocess wrapper had no timeout.
+7. The hardening matrix retained GitHub Actions' default fail-fast behavior,
+   so one mode could cancel the other mode's diagnostic evidence. The README
+   also retained the obsolete claim that the Step 5.1 timing failure was still
+   undiagnosed.
+
+The repair changes only test harnesses, tests, workflows, and documentation.
+Random-kill uses short seeded interruption windows and refuses success unless
+the process was actually sent `SIGKILL` and returned `-SIGKILL`. Both campaigns
+use the same selected Git executable as Clonegrown, prewrite every requested
+seed and replay command with `pending` status, atomically replace the artifact
+after each result, and report executed/pending/pass/fail counts. Campaign
+execution is bounded to 25 minutes; checkout, Python setup, and always-run
+upload are each bounded to five minutes. Those 40 maximum step-minutes sit
+inside a 45-minute job, leaving five minutes for between-step overhead without
+claiming that runner loss can guarantee artifact retention. State-machine Git
+subprocesses have a 120-second bound, and every invariant runs the public
+non-mutating audit and requires exact agreement with readable worker records.
+Hardening now reports skips separately, rejects a nonzero child even if it
+emitted success JSON, disables matrix fail-fast, and configures an always-run
+upload for each mode's structured result. Job cancellation or runner loss can
+still prevent that upload. Fifteen focused tests cover these contracts,
+including the exact GitHub provenance allowlist and last-complete-document
+behavior.
+
+A controlled five-part mutation batch then recreated the environment leak,
+missed kill, absent initial artifact, swallowed corrupt metadata, and
+skip-as-pass behaviors. The five corresponding tests all failed; all four
+mutated source files were restored byte-for-byte to their recorded SHA-256
+values, and the 12 focused tests passed. Post-repair local verification passed
+209/209 unit tests in 249.502 seconds; 18/18 randomized interruption rows
+(seeds 0–2, three operations, two worker modes), each with `killed: true` and
+`rc: -9`; four state-machine seeds × 50 steps across both modes; and both
+57-row hardening campaigns as 56 passed, one skipped, zero failed. The first
+row from each of the eight local campaign artifacts replayed literally and
+passed, and all eight replay outputs passed schema/provenance/status checks.
+Official `actionlint` 1.7.12 accepted all three workflows; shell syntax
+(`sh -n install.sh`), executable-helper checks, and `git diff --check` passed.
+
+The first fresh post-repair cold review then proved four residual issues in the
+test/workflow layer and no product defect: a hardening child could emit success
+JSON and exit 137 while the driver returned zero; the documented 25/30-minute
+timeout arithmetic ignored checkout/setup time; the executed state-machine
+replay, kill ownership, and hardening aggregate wiring lacked end-to-end
+mutation protection; and deterministic hardening JSON was not uploaded. The
+repair added child-exit rejection, explicit 5/5/25/5-minute step bounds inside
+a 45-minute job, always-run hardening uploads, and direct artifact/workflow
+contract assertions. Six controlled regressions—one for each of those three
+test seams plus nonzero-child handling, timeout arithmetic, and hardening
+retention—made their named tests fail. The five source/workflow files were
+restored to their recorded post-repair hashes, and all 15 focused tests passed.
+A second fresh final review found no current implementation or workflow defect,
+but proved that the contract suite still permitted three workflow regressions:
+timeout values could move to the wrong steps while preserving the same counts,
+the randomized matrices could regain default fail-fast cancellation, and
+campaign failures could be hidden with `|| true`. The tests now bind every
+timeout to its exact step, require randomized `fail-fast: false`, and reject
+`continue-on-error`, `|| true`, `set +e`, or a custom shell in the audited jobs.
+Three one-at-a-time controlled mutations made the named tests fail; both
+workflows were then restored byte-for-byte to their recorded SHA-256 values and
+all 15 focused tests passed. The initial, follow-up, and final-review batches
+therefore cover 14 distinct mutations; the earlier broad “mutation-proven”
+claim is replaced by this literal record. The explicit 16-module suite at that
+checkpoint passed 212/212 in 281.760 seconds.
+
+A terminal fresh review again found no current harness, workflow, or product
+defect and no Phase 6 leakage, but proved four remaining test/documentation
+gaps. Either campaign main could bypass the atomic writer while its tests
+stayed green; the mocked random-kill test did not require a new process session
+or the exact process group and `SIGKILL`; workflow tests did not protect the
+no-push/no-pull-request trigger boundary or exact 30-day retention; and one
+handoff timeout plus two upload sentences overstated current behavior. The
+existing main tests now require two atomic-writer calls with the expected
+pending/executed transitions. The signal test requires
+`start_new_session=True` and exact `killpg(pid, SIGKILL)` calls. Workflow tests
+require scheduled/manual-only triggers and one 30-day retention setting per
+audited job. Documentation now says uploads are always-run but can still be
+prevented by job cancellation or runner loss, and the stale bound is 45
+minutes. Eight one-at-a-time mutations—two direct writers, omitted session,
+wrong process group, wrong signal, two retention regressions, and a
+pull-request trigger—made the named tests fail. All four temporarily mutated
+source/workflow files were restored byte-for-byte to their recorded hashes,
+and the 15 focused tests passed. Across all four mutation batches, 22 distinct
+regressions were proved at that checkpoint; its explicit 16-module suite passed
+212/212 in 257.084 seconds.
+
+A subsequent fresh re-review confirmed all eight terminal repairs, then proved
+one deeper workflow-test weakness while again finding the current workflows
+correct. Raw-text assertions treated commented-out YAML as active, named only
+two forbidden triggers instead of requiring the exact allowed trigger set, and
+rejected `|| true` but not the equivalent `|| :`. The test helper now removes
+YAML comments before inspecting jobs, extracts active two-space trigger keys,
+requires exactly `workflow_dispatch` plus `schedule`, and rejects every `||`
+fallback in the audited jobs. The historical Step 5.3 record now labels its
+30-minute bound as a superseded checkpoint and does not promise upload after
+cancellation or runner loss. Ten one-at-a-time mutations—three extra triggers,
+commented-out job timeout, fail-fast, randomized retention, CI retention, and
+CI always-run settings, plus randomized and CI `|| :` masking—made the named
+tests fail. Both workflows were restored byte-for-byte to their recorded
+hashes, and the 15 focused tests passed. Across the first five mutation batches,
+32 distinct regressions were proved at that checkpoint; its explicit 16-module
+suite passed 212/212 in 283.646 seconds.
+
+The next fresh semantic review confirmed all ten preceding repairs, then found
+three remaining test-protection gaps while again finding the current workflows
+and harnesses correct. Job timeout, strategy fail-fast, upload always-run, and
+retention values were still free-form substrings that active text under the
+wrong YAML owner could shadow. Neither randomized job's actual campaign command
+was bound to its upload path. The selected-Git test omitted the hardening
+harness, allowing a hardcoded runner Git to evade it. Workflow assertions now
+extract unique indentation-owned job, strategy, step, and `with` blocks and
+require their direct values; each randomized run block is exact and its output
+path equals the upload path. The hardening helper must invoke its patched
+`GIT_BIN`. Eight one-at-a-time mutations—five misplaced active controls, two
+no-op campaign commands that wrote `{}`, and hardcoded hardening Git—made the
+named tests fail. Both workflows and the hardening harness were restored
+byte-for-byte to their recorded hashes, and the 15 focused tests passed. Across
+all six mutation batches, 40 distinct regressions are proved. The final explicit
+16-module suite passed 212/212 in 283.846 seconds.
+
+A further fresh ownership review confirmed all eight preceding repairs and
+again found the current harnesses and workflows correct, but identified four
+remaining test-protection gaps. The randomized workflow's six-job random-kill
+matrix, two-job state-machine matrix, and per-job worker-mode environment were
+not bound; the CI hardening worker mode was likewise unasserted. Replay tests
+covered only one random-kill mode/operation pair and one state-machine mode.
+The nightly cron, four manual-input environment expressions, and uploaded
+artifact identities were also unprotected. The tests now require the complete
+eight-job matrices and mode wiring, every replay-helper mode/operation
+dimension, the exact scheduled/manual controls, and run-attempt-scoped
+artifact names.
+Sixteen one-at-a-time mutations—six matrix/mode regressions, three collapsed
+replay dimensions, five scheduled/manual-control regressions, and two constant
+artifact names—made their owning tests fail. Every temporarily mutated
+source/workflow file was restored byte-for-byte to its recorded hash, and the
+15 focused tests passed. Across seven mutation batches, 56 distinct
+regressions are now proved. A preliminary direct-module full-suite command was
+invalid because it omitted `tests/` from Python's import path; 15 modules
+stopped at `ModuleNotFoundError: support`, the campaign-record module alone
+ran, and no file changed. The corrected 16-module discovery suite passed
+212/212 in 275.558 seconds.
+
+The next fresh semantic review confirmed all 16 seventh-batch mutations, then
+proved two broader false-green classes while again finding the current
+harnesses and workflows correct. Complete helper tests did not protect the two
+artifact call sites: random-kill artifacts could collapse their recorded mode
+or operation, and state-machine artifacts could collapse their recorded mode.
+The workflow parser also ignored quoted event keys, while job-level `if`
+conditions or `env` mappings could silently skip scheduled jobs or override
+the tested workflow-level campaign controls. Artifact integration now runs
+both worker modes and every random-kill operation and checks exact pending and
+completed replay rows. Workflow tests recognize quoted event keys, forbid an
+audited job-level condition in both randomized jobs and CI hardening, and
+forbid job-level environment shadowing in either randomized job. Twelve
+one-at-a-time mutations—six pending/completed replay call-site substitutions,
+one quoted push trigger, three job-disabling conditions, and two job-level
+environment overrides—made their owning tests fail. Every temporarily mutated
+source/workflow file was restored byte-for-byte to its recorded hash, and the
+15 focused tests passed. Across eight mutation batches, 68 distinct
+regressions are now proved. The corrected 16-module discovery suite passed
+212/212 in 277.604 seconds.
+
+A fresh closing review caught all 28 requested seventh/eighth-batch mutations
+and found no current workflow or product defect, but proved one final parser
+false-green class. YAML permits separation whitespace before a mapping colon;
+the constrained key parser ignored that form. Six active variants—a quoted
+push trigger, job-level disabling conditions on both randomized jobs and CI
+hardening, and job-level environment shadows on both randomized jobs—therefore
+survived. Accepting legal separator whitespace made all six fail, and the
+16-module discovery suite passed 212/212 in 277.105 seconds. Before recording
+that as final, a direct probe showed the value parser still disagreed with YAML
+on a later duplicate key written with the same separator whitespace: YAML
+resolved the later value while the test reported only the earlier expected
+value. Key and value inspection now share one fail-closed direct-mapping
+parser for plain or quoted simple keys, legal separator whitespace, duplicate
+visibility, and rejection of unsupported active direct-key syntax. Two
+additional duplicate timeout/retention mutations made the owning test fail.
+Every temporarily mutated workflow was restored byte-for-byte to its recorded
+hash, and all 15 focused tests passed. Across nine mutation batches, 76
+distinct regressions are now proved. The final corrected 16-module discovery
+suite passed 212/212 in 277.763 seconds.
+
+The next fresh closing review caught all eight ninth-batch mutations, confirmed
+that unsupported direct-key syntax fails closed, and found no current product,
+workflow, or documentation defect. It did prove one last consumer gap: the
+parser exposed duplicate direct block keys, but callers could collapse them to
+a set or select only the earlier exact block. A later `schedule : []` therefore
+disabled the effective nightly schedule while the trigger test stayed green;
+a later `strategy :` block similarly replaced fail-fast and the matrix without
+failing its owning test. The shared direct-mapping parser now rejects every
+duplicate key before any caller consumes it. Both demonstrated block-override
+mutations made the owning test fail, and the workflow was restored
+byte-for-byte to its recorded hash. Across ten mutation batches, 78 distinct
+regressions are now proved. All 15 focused tests passed. The final corrected
+16-module discovery suite passed 212/212 in 535.241 seconds; the longer observed
+duration did not affect pass/fail and is not a timing gate.
+
+After that full pass, the same duplicate-key rejection was applied at the
+workflow document root and `jobs` mapping boundaries rather than only inside a
+selected job. Four additional later-override mutations—duplicate top-level
+`on`, duplicate top-level `jobs`, duplicate randomized `random-kill`, and
+duplicate CI `hardening`—made their owning tests fail. Both workflows were
+restored byte-for-byte to their recorded hashes. That checkpoint brought the
+total to 82 proved regressions across ten batches. All 15 focused tests passed,
+and the corrected 16-module discovery suite passed 212/212 in 539.069 seconds;
+this longer observed duration likewise did not affect pass/fail.
+
+The nested `workflow_dispatch` mapping now passes through the same duplicate-key
+rejection before its `inputs` block is selected. A later `inputs : {}` mutation
+made the owning test fail, and the randomized workflow was restored byte-for-byte
+to its recorded hash. The final total is 83 proved regressions across ten
+batches. All 15 focused tests passed, and the exact final 16-module discovery
+suite passed 212/212 in 538.210 seconds.
+
+Step 5.7 and Phase 5 remain **incomplete** because none of this uncommitted tree
+has run on GitHub. Completion requires explicit authorization to commit and
+push, a green hosted deterministic CI run for the published revision, a hosted
+manual randomized run, download and validation of all eight retained
+artifacts, and literal replay of at least one row from each artifact. No commit
+or push is authorized by `$next`; Phase 6.1 remains out of scope.
 
 ## Phase 6 — Remove residue and optimize only from measurements
 

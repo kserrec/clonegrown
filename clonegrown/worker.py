@@ -966,7 +966,9 @@ def forget_worktree(canonical: Path, worker: WorkerRecord, persist: Callable[[],
             # left there to clean): either way the recorded path is finished with.
             worker.worktree_admin_left = None
             worker.worktree_admin = None
+    failpoint("discard.after_admin_cleanup")
     _release_task_branch(canonical, worker, persist)
+    failpoint("discard.after_branch_cleanup")
 
 
 def _release_task_branch(canonical: Path, worker: WorkerRecord, persist: Callable[[], None] | None) -> None:

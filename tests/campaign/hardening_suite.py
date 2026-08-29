@@ -10,6 +10,7 @@ ROOT=Path(os.environ.get('CWS_TEST_ROOT','/tmp/cws-v2-hardening-suite'))
 OUT=Path(os.environ.get('CWS_RESULTS_PATH',str(HERE/'hardening-results.json')))
 # CWS_SUITE_MODE selects the kind of worker every non-strong spawn creates: 'clone' (default) or 'worktree'.
 MODE=os.environ.get('CWS_SUITE_MODE','clone'); WORKTREE=(MODE=='worktree'); ISOLATION_FLAG='--worktree' if WORKTREE else '--fast'
+GIT_BIN=os.environ.get('CLONEGROWN_GIT','/usr/bin/git')
 
 
 def run(cmd,cwd=None,check=True,env=None,timeout=45):
@@ -20,7 +21,7 @@ def run(cmd,cwd=None,check=True,env=None,timeout=45):
         raise AssertionError(f"command failed rc={p.returncode}: {cmd}\nout={p.stdout}\nerr={p.stderr}")
     return p
 
-def git(repo,*args,check=True,env=None,timeout=30): return run(['/usr/bin/git',*args],cwd=repo,check=check,env=env,timeout=timeout)
+def git(repo,*args,check=True,env=None,timeout=30): return run([GIT_BIN,*args],cwd=repo,check=check,env=env,timeout=timeout)
 def cws(*args,check=True,env=None,timeout=90): return run(['python3',CWS,*args],check=check,env=env,timeout=timeout)
 def jload(p): return json.loads(p.stdout)
 def gitdir(repo):
@@ -155,14 +156,17 @@ def t_status_reports_post_collect_drift():
 
 # ----- Concurrency / transaction -----
 def t_parallel_spawns_unique():
-    b,c,w,_=mkcase('parallel'); t=time.perf_counter(); one=spawn(w,request='single'); single=time.perf_counter()-t
+    b,c,w,_=mkcase('parallel')
     def f(i): return spawn(w,task=f't{i}',request=f'r{i}')
-    t=time.perf_counter();
     with cf.ThreadPoolExecutor(max_workers=8) as ex: ms=list(ex.map(f,range(8)))
-    elapsed=time.perf_counter()-t; ids=[m['id'] for m in ms]; assert_true(len(set(ids))==8); ratio=elapsed/max(single,0.001)
-    # A single-sample timing ratio; only full serialization (8 workers, 8x one spawn) is a failure. Typical: clone ~4x, worktree ~5-6x (lock-held metadata phases dominate when creation is cheap).
-    assert_true(ratio<8.0,f'fully serialized ratio={ratio}')
-    return result(single_seconds=single,eight_seconds=elapsed,ratio=ratio,ids=ids)
+    ids=[m['id'] for m in ms]; expected=set(range(1,9)); assert_true(len(ms)==8 and set(ids)==expected,f'parallel IDs were {ids}')
+    records={int(p.stem):json.loads(p.read_text()) for p in (w/'.cws'/'workers').glob('*.json')}; assert_true(set(records)==expected,f'worker records were {sorted(records)}')
+    for i,m in enumerate(ms):
+        wid=m['id']; request=f'r{i}'; record=records[wid]; index=json.loads((w/'.cws'/'requests'/f'{hashlib.sha256(request.encode()).hexdigest()}.json').read_text())
+        assert_true(record['id']==wid and record['task']==f't{i}' and record['request_id']==request and record['status']=='ready',f'worker {wid} record was overwritten or mismatched')
+        assert_true(index['request_id']==request and index['worker_id']==wid and index['params_hash']==record['params_hash'],f'request index {request} did not map to worker {wid}')
+    audit=jload(cws('status',w)); assert_true(audit['issues']==[],f'workspace audit found {audit["issues"]}'); assert_true({item['id'] for item in audit['workers']}==expected); assert_true(state(w)['next_id']==9)
+    return result(ids=sorted(ids),records=len(records),requests=8,issues=audit['issues'])
 
 def t_same_request_concurrent():
     b,c,w,_=mkcase('same-request')
@@ -225,8 +229,15 @@ def t_collect_crash_matrix():
         assert_true(mm['status']=='collected' and mm['result_sha']==sha); rows.append([fp,rep])
     return result(cases=rows)
 
+def t_lease_crash_matrix():
+    b,c,w,_=mkcase('lease-crash'); m=spawn(w,request='r')
+    released=cws('release',w,str(m['id']),env={'CWS_FAILPOINT':'lease.after_release'},check=False); assert_true(released.returncode==88); after_release=meta(w,m['id']); assert_true(after_release['status']=='ready' and after_release['lease']=='released' and after_release.get('lease_released') is not None)
+    release_reports=jload(cws('recover',w)); claimed=cws('claim',w,str(m['id']),env={'CWS_FAILPOINT':'lease.after_claim'},check=False); assert_true(claimed.returncode==88); after_claim=meta(w,m['id']); assert_true(after_claim['status']=='ready' and after_claim['lease']=='active' and 'lease_released' not in after_claim)
+    claim_reports=jload(cws('recover',w)); blocked=cws('discard',w,str(m['id']),'--abandon',check=False); assert_true(blocked.returncode!=0 and 'leased' in blocked.stderr and Path(m['path']).exists()); cws('release',w,str(m['id'])); gone=jload(cws('discard',w,str(m['id']),'--abandon')); assert_true(gone['status']=='abandoned' and not Path(m['path']).exists() and jload(cws('status',w))['issues']==[])
+    return result(release_reports=release_reports,claim_reports=claim_reports,final=gone['status'])
+
 def t_discard_crash_matrix():
-    fps=('discard.after_mark','discard.before_delete','discard.after_quarantine','discard.after_recheck','discard.after_delete','discard.after_metadata'); rows=[]
+    fps=('discard.after_mark','discard.before_delete','discard.after_quarantine','discard.after_recheck','discard.after_delete')+(('discard.after_admin_cleanup','discard.after_branch_cleanup') if WORKTREE else ())+('discard.after_metadata',); rows=[]
     for i,fp in enumerate(fps):
         b,c,w,_=mkcase(f'discard-crash-{i}'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r); cws('collect',w,str(m['id'])); cws('release',w,str(m['id'])); p=cws('discard',w,str(m['id']),env={'CWS_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,m['id']);
         if mm['status']=='collected': cws('discard',w,str(m['id'])); mm=meta(w,m['id'])
@@ -249,7 +260,7 @@ def t_fast_object_sharing_is_explicit():
     shared=set(object_inodes(c))&set(object_inodes(r)); assert_true(len(shared)>0); return result(shared_inodes=len(shared),mode='known tradeoff')
 
 def t_alternates_detached_strong():
-    b=ROOT/'alternates'; shutil.rmtree(b,ignore_errors=True); b.mkdir(parents=True); source=b/'source'; git(b,'init','-b','main',source); git(source,'config','user.name','U'); git(source,'config','user.email','u@e'); (source/'a').write_text('a'); git(source,'add','.'); git(source,'commit','-m','i'); c=b/'canon'; run(['/usr/bin/git','clone','--shared',source,c]); git(c,'config','user.name','U'); git(c,'config','user.email','u@e'); w=b/'ws'; cws('init',c,w); m=spawn(w,request='r',strong=True); r=Path(m['path']); alt=r/'.git'/'objects'/'info'/'alternates'; assert_true(not alt.exists()); shutil.rmtree(source); assert_true(git(r,'fsck','--full').returncode==0); return result(detached=m['alternates_detached'])
+    b=ROOT/'alternates'; shutil.rmtree(b,ignore_errors=True); b.mkdir(parents=True); source=b/'source'; git(b,'init','-b','main',source); git(source,'config','user.name','U'); git(source,'config','user.email','u@e'); (source/'a').write_text('a'); git(source,'add','.'); git(source,'commit','-m','i'); c=b/'canon'; run([GIT_BIN,'clone','--shared',source,c]); git(c,'config','user.name','U'); git(c,'config','user.email','u@e'); w=b/'ws'; cws('init',c,w); m=spawn(w,request='r',strong=True); r=Path(m['path']); alt=r/'.git'/'objects'/'info'/'alternates'; assert_true(not alt.exists()); shutil.rmtree(source); assert_true(git(r,'fsck','--full').returncode==0); return result(detached=m['alternates_detached'])
 
 def t_sha256_repository():
     p=git(ROOT,'init','--object-format=sha256','-b','main',ROOT/'sha256-probe',check=False)
@@ -264,13 +275,13 @@ def t_reftable_repository():
 def t_shallow_repository():
     b=ROOT/'shallow'; shutil.rmtree(b,ignore_errors=True); b.mkdir(parents=True); bare=b/'up.git'; git(b,'init','--bare',bare); src=b/'src'; git(b,'clone',bare,src); git(src,'config','user.name','U'); git(src,'config','user.email','u@e')
     for i in range(6): (src/'a').write_text(str(i)); git(src,'add','a'); git(src,'commit','-m',f'c{i}')
-    git(src,'branch','-M','main'); git(src,'push','-u','origin','main'); c=b/'canon'; run(['/usr/bin/git','clone','--depth','2','--branch','main',f'file://{bare}',c]); git(c,'config','user.name','U'); git(c,'config','user.email','u@e'); w=b/'ws'; cws('init',c,w); m=spawn(w,request='r'); r=Path(m['path']); assert_true(git(r,'rev-parse','HEAD').stdout.strip()==m['base_sha']); return result(worker_shallow=(r/'.git'/'shallow').exists())
+    git(src,'branch','-M','main'); git(src,'push','-u','origin','main'); c=b/'canon'; run([GIT_BIN,'clone','--depth','2','--branch','main',f'file://{bare}',c]); git(c,'config','user.name','U'); git(c,'config','user.email','u@e'); w=b/'ws'; cws('init',c,w); m=spawn(w,request='r'); r=Path(m['path']); assert_true(git(r,'rev-parse','HEAD').stdout.strip()==m['base_sha']); return result(worker_shallow=(r/'.git'/'shallow').exists())
 
 def t_sparse_checkout():
-    b,c,w,_=mkcase('sparse'); (c/'keep').mkdir(); (c/'drop').mkdir(); (c/'keep'/'k').write_text('k'); (c/'drop'/'d').write_text('d'); git(c,'add','.'); git(c,'commit','-m','tree'); git(c,'sparse-checkout','init','--cone'); git(c,'sparse-checkout','set','keep'); m=spawn(w,request='r'); r=Path(m['path']); assert_true((r/'keep'/'k').exists() and not (r/'drop'/'d').exists()); return result(sparse=m['copied_sparse_checkout'])
+    b,c,w,_=mkcase('sparse'); (c/'keep').mkdir(); (c/'drop').mkdir(); (c/'keep'/'k').write_text('k'); (c/'drop'/'d').write_text('d'); git(c,'add','.'); git(c,'commit','-m','tree'); git(c,'sparse-checkout','init','--cone'); git(c,'sparse-checkout','set','keep'); m=spawn(w,request='r'); r=Path(m['path']); assert_true((r/'keep'/'k').exists(),'sparse worker omitted included path'); assert_true(not (r/'drop'/'d').exists(),'sparse worker materialized excluded path'); return result(sparse=m['copied_sparse_checkout'])
 
 def t_submodule_baseline():
-    b=ROOT/'submodule'; shutil.rmtree(b,ignore_errors=True); b.mkdir(parents=True); sub=b/'sub'; git(b,'init','-b','main',sub); git(sub,'config','user.name','U'); git(sub,'config','user.email','u@e'); (sub/'s').write_text('s'); git(sub,'add','.'); git(sub,'commit','-m','s'); c=b/'canon'; git(b,'init','-b','main',c); git(c,'config','user.name','U'); git(c,'config','user.email','u@e'); (c/'a').write_text('a'); git(c,'add','.'); git(c,'commit','-m','i'); run(['/usr/bin/git','-c','protocol.file.allow=always','submodule','add',sub,'vendor/sub'],cwd=c); git(c,'commit','-am','sub'); w=b/'ws'; cws('init',c,w); m=spawn(w,request='r'); r=Path(m['path']); assert_true(git(r,'ls-files','-s','vendor/sub').stdout.startswith('160000 ')); assert_true(not (r/'vendor'/'sub'/'s').exists()); return result(note='submodule intentionally uninitialized; bootstrap required')
+    b=ROOT/'submodule'; shutil.rmtree(b,ignore_errors=True); b.mkdir(parents=True); sub=b/'sub'; git(b,'init','-b','main',sub); git(sub,'config','user.name','U'); git(sub,'config','user.email','u@e'); (sub/'s').write_text('s'); git(sub,'add','.'); git(sub,'commit','-m','s'); c=b/'canon'; git(b,'init','-b','main',c); git(c,'config','user.name','U'); git(c,'config','user.email','u@e'); (c/'a').write_text('a'); git(c,'add','.'); git(c,'commit','-m','i'); run([GIT_BIN,'-c','protocol.file.allow=always','submodule','add',sub,'vendor/sub'],cwd=c); git(c,'commit','-am','sub'); w=b/'ws'; cws('init',c,w); m=spawn(w,request='r'); r=Path(m['path']); assert_true(git(r,'ls-files','-s','vendor/sub').stdout.startswith('160000 ')); assert_true(not (r/'vendor'/'sub'/'s').exists()); return result(note='submodule intentionally uninitialized; bootstrap required')
 
 def t_symlink_and_executable_bits():
     b,c,w,_=mkcase('symlink-exec'); script=c/'run.sh'; script.write_text('#!/bin/sh\n'); script.chmod(0o755); os.symlink('README.md',c/'link'); git(c,'add','.'); git(c,'commit','-m','modes'); m=spawn(w,request='r'); r=Path(m['path']); assert_true((r/'link').is_symlink() and os.readlink(r/'link')=='README.md'); assert_true(os.access(r/'run.sh',os.X_OK)); return result()
@@ -400,7 +411,7 @@ TESTS: dict[str, tuple[str, Callable[[],dict[str,Any]]]] = {
     # group, function
     'exact_base_dirty':('core',t_exact_base_dirty),'request_parameter_mismatch':('core',t_request_parameter_mismatch),'detached_head_refused':('core',t_detached_head_refused),'post_collect_drift_guard':('core',t_post_collect_drift_guard),'worker_replacement_guard':('core',t_worker_replacement_guard),'canonical_replacement_guard':('core',t_canonical_replacement_guard),'unrelated_history_policy':('core',t_unrelated_history_policy),'workspace_nesting_rules':('core',t_workspace_nesting_rules),'git_environment_sanitized':('core',t_git_environment_sanitized),'hostile_task_unicode':('core',t_hostile_task_and_unicode_paths),'remote_semantics_push_guard':('core',t_remote_semantics_and_push_guard),'config_stash_isolation':('core',t_config_and_stash_isolation),'private_hook_boundary':('core',t_private_hook_boundary),'dirty_operation_refusal':('core',t_dirty_and_operation_collect_refusal),'collect_idempotent':('core',t_collect_idempotent),'collect_concurrent_mutation':('core',t_collect_concurrent_mutation),'status_drift':('core',t_status_reports_post_collect_drift),
     'parallel_spawns_unique':('concurrency',t_parallel_spawns_unique),'same_request_concurrent':('concurrency',t_same_request_concurrent),'base_pin_survives_gc':('concurrency',t_base_pin_survives_gc),'collect_discard_race':('concurrency',t_collect_discard_race),'canonical_advance':('concurrency',t_canonical_advance_does_not_move_worker),'two_workspaces_refs':('concurrency',t_two_workspaces_ref_isolation),'worker_gc_concurrency':('concurrency',t_worker_gc_concurrency),
-    'init_crash_matrix':('crash',t_init_crash_matrix),'spawn_crash_matrix':('crash',t_spawn_crash_matrix),'collect_crash_matrix':('crash',t_collect_crash_matrix),'discard_crash_matrix':('crash',t_discard_crash_matrix),'recover_dirty_ready':('crash',t_recover_preserves_dirty_ready_worker),
+    'init_crash_matrix':('crash',t_init_crash_matrix),'spawn_crash_matrix':('crash',t_spawn_crash_matrix),'collect_crash_matrix':('crash',t_collect_crash_matrix),'lease_crash_matrix':('crash',t_lease_crash_matrix),'discard_crash_matrix':('crash',t_discard_crash_matrix),'recover_dirty_ready':('crash',t_recover_preserves_dirty_ready_worker),
     'strong_object_isolation':('compat',t_strong_object_isolation),'fast_object_sharing':('compat',t_fast_object_sharing_is_explicit),'alternates_detached':('compat',t_alternates_detached_strong),'sha256_repository':('compat',t_sha256_repository),'reftable_repository':('compat',t_reftable_repository),'shallow_repository':('compat',t_shallow_repository),'sparse_checkout':('compat',t_sparse_checkout),'submodule_baseline':('compat',t_submodule_baseline),'symlink_executable':('compat',t_symlink_and_executable_bits),'detached_canonical_no_remote':('compat',t_detached_canonical_and_no_remote),'path_bound_config_warning':('compat',t_path_bound_config_warning),'info_exclude':('compat',t_info_exclude_copied),'worker_marker_tamper':('compat',t_marker_tamper_detection),'canonical_marker_loss':('compat',t_canonical_marker_loss_detection),
     'metadata_path_tamper':('redteam',t_metadata_path_tamper_guards),'worker_slot_symlink':('redteam',t_worker_slot_symlink_guard),'metadata_identity':('redteam',t_metadata_identity_validation),'recovery_resilience':('redteam',t_recovery_resilience_and_orphans),'provisioning_hooks':('redteam',t_provisioning_hooks_suppressed_but_preserved),'auxiliary_refs':('redteam',t_remote_tracking_notes_and_replace_refs),'ordinary_failure_rollbacks':('redteam',t_normal_failure_rollbacks),'final_path_collision':('redteam',t_final_path_collision_is_never_deleted),'branch_gitdir_substitution':('redteam',t_branch_rename_and_gitdir_substitution_refused),'result_survives_gc':('redteam',t_result_survives_discard_and_gc),
     'state_path_tamper':('redteam',t_workspace_state_path_tamper_rejected),'control_lock_symlink':('redteam',t_control_and_lock_symlink_rejected),'late_commit_crashed_discard':('redteam',t_late_commit_after_crashed_discard_survives),
@@ -409,9 +420,13 @@ TESTS: dict[str, tuple[str, Callable[[],dict[str,Any]]]] = {
 def run_one(name):
     started=time.perf_counter()
     try:
-        details=TESTS[name][1](); return {'name':name,'group':TESTS[name][0],'mode':MODE,'ok':True,'seconds':time.perf_counter()-started,'details':details}
+        details=TESTS[name][1](); skipped=bool(details.get('skipped')); return {'name':name,'group':TESTS[name][0],'mode':MODE,'ok':True,'skipped':skipped,'seconds':time.perf_counter()-started,'details':details}
     except Exception as e:
         return {'name':name,'group':TESTS[name][0],'ok':False,'seconds':time.perf_counter()-started,'error':repr(e)}
+
+def result_counts(rows):
+    skipped=sum(r['ok'] and bool(r.get('skipped') or (isinstance(r.get('details'),dict) and r['details'].get('skipped'))) for r in rows)
+    return {'total':len(rows),'passed':sum(r['ok'] and not bool(r.get('skipped') or (isinstance(r.get('details'),dict) and r['details'].get('skipped'))) for r in rows),'skipped':skipped,'failed':sum(not r['ok'] for r in rows)}
 
 def driver(group=None,names=None):
     selected=names or [n for n,(g,_) in TESTS.items() if group is None or g==group]
@@ -421,17 +436,21 @@ def driver(group=None,names=None):
             p=subprocess.run([sys.executable,__file__,'--one',name],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=150)
             lines=[x for x in p.stdout.splitlines() if x.startswith('RESULT_JSON=')]
             if not lines: r={'name':name,'group':TESTS[name][0],'ok':False,'error':f'no result; rc={p.returncode}; stderr={p.stderr[-500:]}'}
-            else: r=json.loads(lines[-1].split('=',1)[1]); r['child_rc']=p.returncode
+            else:
+                r=json.loads(lines[-1].split('=',1)[1]); r['child_rc']=p.returncode
+                if p.returncode:
+                    r['ok']=False; reason=f'child exited {p.returncode} after emitting result JSON'; r['error']=f"{r.get('error','')}; {reason}".strip('; ')
         except subprocess.TimeoutExpired:
             r={'name':name,'group':TESTS[name][0],'ok':False,'error':'test timed out after 150s'}
         results.append(r)
-        print(('PASS' if r['ok'] else 'FAIL'),name,f"{r.get('seconds',0):.2f}s",r.get('error',''),flush=True)
+        label='FAIL' if not r['ok'] else ('SKIP' if r.get('skipped') else 'PASS')
+        print(label,name,f"{r.get('seconds',0):.2f}s",r.get('error',''),flush=True)
     existing=[]
     if OUT.exists():
         try: existing=json.loads(OUT.read_text()).get('results',[])
         except Exception: existing=[]
     by={r['name']:r for r in existing}; by.update({r['name']:r for r in results}); merged=list(by.values())
-    payload={'generated':time.time(),'total':len(merged),'passed':sum(r['ok'] for r in merged),'failed':sum(not r['ok'] for r in merged),'results':sorted(merged,key=lambda x:x['name'])}
+    payload={'generated':time.time(),**result_counts(merged),'results':sorted(merged,key=lambda x:x['name'])}
     OUT.write_text(json.dumps(payload,indent=2))
     return 1 if any(not r['ok'] for r in results) else 0
 

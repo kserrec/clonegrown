@@ -187,9 +187,15 @@ class QuarantineTests(unittest.TestCase):
     # --- every new boundary, interrupted, in both modes ---------------------------------
 
     def test_interrupting_every_boundary_recovers_idempotently(self) -> None:
-        boundaries = ("discard.after_mark", "discard.before_delete", "discard.after_quarantine",
-                      "discard.after_recheck", "discard.after_delete", "discard.after_metadata")
+        common_boundaries = (
+            "discard.after_mark", "discard.before_delete", "discard.after_quarantine",
+            "discard.after_recheck", "discard.after_delete",
+        )
         for mode in MODES:
+            boundaries = common_boundaries
+            if mode == "worktree":
+                boundaries += ("discard.after_admin_cleanup", "discard.after_branch_cleanup")
+            boundaries += ("discard.after_metadata",)
             for boundary in boundaries:
                 with self.subTest(mode=mode, boundary=boundary):
                     worker = self.released_collected(f"{boundary} {mode}", mode)

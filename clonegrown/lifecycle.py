@@ -25,9 +25,9 @@ from .recovery import recover
 from .repository import (
     WORKTREE_SHARING_WARNING, absent_marker, add_worktree, apply_clone_config_plan,
     build_clone_config_plan, checkout_without_hooks, copy_auxiliary_refs, copy_info_files,
-    copy_sparse_patterns, copy_sparse_policy, create_task_branch, delete_ref,
+    copy_sparse_policy, create_task_branch, delete_ref,
     detach_alternates_if_needed, is_symbolic_ref, private_hook_warnings, ref_points_at,
-    repair_worktree, resolve_ref, sparse_checkout_enabled, write_ref,
+    repair_worktree, resolve_ref, write_ref,
 )
 from .state import (
     SCHEMA, WORKER_MODES, WorkerRecord, WorkerStatus, WorkspaceState, branch_owner_ref, canonical_marker_path,
@@ -305,9 +305,7 @@ def _check_out_base(stage_repo: Path, worker: WorkerRecord, canonical: Path | No
 
 def _provision_worktree(canonical: Path, stage_repo: Path, worker: WorkerRecord) -> SpawnDetails:
     """Check out the base in a staged worktree; everything else is shared with canonical."""
-    sparse = sparse_checkout_enabled(canonical)  # the config is shared; only the pattern file is per-worktree
-    if sparse:
-        copy_sparse_patterns(canonical, stage_repo)
+    sparse = copy_sparse_policy(canonical, stage_repo, linked_worktree=True)
     _check_out_base(stage_repo, worker, canonical)
     return SpawnDetails(
         source_remote=None,
@@ -818,6 +816,7 @@ def claim(ws_path: Path, worker_id: int) -> dict[str, Any]:
             worker.lease = "active"
             worker.lease_released = None
             worker.save(ws)
+            failpoint("lease.after_claim")
             return worker.to_json()
 
 
@@ -840,6 +839,7 @@ def release(ws_path: Path, worker_id: int) -> dict[str, Any]:
                 worker.lease = "released"
                 worker.lease_released = time.time()
                 worker.save(ws)
+                failpoint("lease.after_release")
             return worker.to_json()
 
 

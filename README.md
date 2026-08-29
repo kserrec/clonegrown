@@ -8,7 +8,8 @@ under a ref in the canonical repository. A worker can be a linked worktree or a
 local clone. Collection preserves a result; it does not merge, rebase,
 cherry-pick, or otherwise integrate that result into a user branch.
 
-> **Status:** alpha, POSIX-only. Destructive operations are conservative, but
+> **Status:** alpha; supported operating-system targets are Linux and macOS
+> (POSIX only). Destructive operations are conservative, but
 > the work lease that guards discard is cooperative and cannot stop a process
 > that ignores it. Do not use unattended cleanup for valuable work. Read [Current alpha safety
 > boundary](#current-alpha-safety-boundary) before using `discard`.
@@ -93,7 +94,12 @@ Codex skill
 It does not edit the shell profile. If the command directory is not on `PATH`,
 it prints the shell-safe line needed to add it. A directory containing `:`
 cannot be represented as one POSIX `PATH` entry, so that case receives a
-shell-safe full-path command instead. Git and Python 3.11+ are required.
+shell-safe full-path command instead. Git 2.29.0 or newer and Python 3.11 or
+newer are required. CI runs the full unit suite, including destructive
+installer and lifecycle paths, through a Linux/macOS matrix configured for
+Python 3.11 and the latest stable Python 3.x release. A separate job builds
+exact Git 2.29.0 and runs the full unit and clone/worktree adversarial suites
+against it.
 `clonegrown --version` confirms the CLI installation, and
 `python -m clonegrown` is equivalent to the command.
 
@@ -247,6 +253,14 @@ absolute paths, URL schemes, and scp-like remotes keep their spelling. The full
 copied and omitted state boundary is the
 [minimum clone-fidelity contract](ARCHITECTURE.md#minimum-clone-fidelity-contract).
 
+Ordinary required clean/smudge filters are covered with a real external driver:
+tracked attributes select the filter, Git stores the cleaned bytes, both clone
+and worktree workers materialize the smudged bytes, subsequent `git add`
+cleans them again, and collection preserves the cleaned blob. The driver
+command must already be available wherever Git runs. Clonegrown copies eligible
+repository-local filter configuration into a clone and shares canonical config
+with a worktree; it does not copy or install the driver program.
+
 ## Implemented safeguards
 
 - Workers start from an explicitly resolved and pinned commit.
@@ -353,10 +367,22 @@ authenticated quarantine before checked deletion, one-shot workers after
 collection, and explicit integration. All of it is implemented in this
 release.
 
-Git LFS, arbitrary filters, network or distributed filesystems, genuine
-disk/inode exhaustion, and native Windows are separate unverified validation
-gaps. Clonegrown 0.x treats them as unsupported; this is not a claim that each
-is known to fail.
+Git LFS remains unsupported in 0.x: `git-lfs` is not a Clonegrown dependency,
+and Clonegrown neither installs it nor simulates its filter-process, object
+transfer, credential, or remote-storage behavior. Long-running `filter.process`
+drivers, delayed checkout, credentialed/network filters, and other filter
+protocols beyond the tested clean/smudge case are also unsupported.
+
+Deterministic fault tests cover an `ENOSPC` equivalent before atomic metadata
+publication, a refused cross-device quarantine rename, and an I/O error after
+recursive deletion has removed one file. They prove the represented recovery
+behavior, not the behavior of a genuinely exhausted disk or inode table.
+Genuine disk/inode exhaustion and network or distributed filesystems remain
+unvalidated and unsupported; this is not a claim that each is known to fail.
+Native Windows is explicitly unsupported in 0.x: the implementation imports
+POSIX-only `fcntl` and relies on POSIX advisory locking, rename, and deletion
+semantics. Linux and macOS results do not establish equivalent Windows
+behavior.
 
 ## Agent skill
 
@@ -376,9 +402,11 @@ sets:
 - Current-package campaigns and their dates are recorded in
   [`PLAN.md`](PLAN.md). The package passed the documented clone and worktree
   hardening campaigns, crash failpoints, SIGKILL campaigns, and randomized
-  lifecycle seeds before this review. A later CI worktree run exposed a timing
-  gate failure; its root cause remains to be diagnosed in the planned
-  verification phase.
+  lifecycle seeds before this review. A later CI worktree run exposed a
+  one-sample timing assertion: it treated host scheduling and I/O contention as
+  a correctness property. Phase 5.1 removed timing from the deterministic
+  concurrency gate and moved raw multi-sample measurements to a nonblocking
+  benchmark.
 - [`research/REPORT.md`](research/REPORT.md) preserves the conclusions of the
   frozen prototype campaign. [`research/REPRODUCE.md`](research/REPRODUCE.md)
   distinguishes commands that run against the current package from historical

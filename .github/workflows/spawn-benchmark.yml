@@ -1,0 +1,31 @@
+name: Informational spawn benchmark
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 8 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Five-sample spawn measurements
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [clone, worktree]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Measure ${{ matrix.mode }} workers
+        run: >-
+          python tests/campaign/spawn_benchmark.py
+          --mode ${{ matrix.mode }}
+          --samples 5
+          --parallelism 8
+          --output ${{ runner.temp }}/spawn-benchmark-${{ matrix.mode }}.json

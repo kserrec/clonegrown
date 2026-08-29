@@ -1,0 +1,468 @@
+{
+  "environment": {
+    "clonegrown_head": "17bb42a4d69aeac1ca0b1db4e7a28f4c710f0af0",
+    "clonegrown_package_sha256": "d43e907baf57ed6e1191dd46306f19afb9081c272662f873b8c04cc98ada0734",
+    "git_executable": "/usr/bin/git",
+    "git_version": "git version 2.43.0",
+    "harness_sha256": "3f787f8f0c662734e38e04f4a517e4012ea351ada777a32b417e29063a2c3c41",
+    "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+    "python_build": "3.12.3 (main, Jul 15 2026, 23:46:41) [GCC 13.3.0]",
+    "python_executable": "/usr/bin/python3",
+    "python_implementation": "CPython",
+    "python_version": "3.12.3"
+  },
+  "fixture_cleanup": {
+    "path": null,
+    "retained_by_request": false
+  },
+  "generated_at": "2026-08-29T15:55:22.645257+00:00",
+  "passed": true,
+  "profiles": [
+    {
+      "checkout_safety": {
+        "clone_started_with_no_checkout": true,
+        "dotenv_filename_patterns_excluded_before_checkout": [
+          "!/.env",
+          "!/*.env",
+          "!/.env.*",
+          "!/*.env.*",
+          "!/**/.env",
+          "!/**/*.env",
+          "!/**/.env.*",
+          "!/**/*.env.*"
+        ],
+        "submodules_initialized": false
+      },
+      "profile": "curl-history",
+      "public_commit": "8a2bb9ca241bbd82a0da536f6f39dca9037dd046",
+      "public_commit_url": "https://github.com/curl/curl/commit/8a2bb9ca241bbd82a0da536f6f39dca9037dd046",
+      "role": "ordinary history-heavy repository",
+      "scenarios": [
+        {
+          "base_sha": "8a2bb9ca241bbd82a0da536f6f39dca9037dd046",
+          "compatibility_warnings": [],
+          "connectivity_check": "passed",
+          "copied_sparse_checkout": true,
+          "final_worker_status": "discarded",
+          "materialization": {
+            "core_sparse_checkout": true,
+            "excluded_paths_absent": [],
+            "included_paths_present": [
+              "README.md"
+            ]
+          },
+          "mode": "clone",
+          "passed": true,
+          "qualification_file": "clonegrown-qualification-clone.txt",
+          "recovery_actions": [
+            "spawn-publish-finished"
+          ],
+          "result_ref": "refs/cws/22c4d08a6f904ba2/workers/1/results/91ff491aefb8060b673698596eb7105470067fdc",
+          "result_ref_survived_discard": true,
+          "result_sha": "91ff491aefb8060b673698596eb7105470067fdc",
+          "seconds_observed": {
+            "collect": 0.32325137499992707,
+            "discard": 0.8171103450004011,
+            "idempotent_spawn_retry": 0.14871050700003252,
+            "init": 0.16825826599961147,
+            "interrupted_spawn": 2.909242488000018,
+            "recover": 0.32731235600022046,
+            "release": 0.12152567100019951,
+            "total": 7.093694551000226
+          },
+          "spawn_failpoint": "spawn.after_publish",
+          "spawn_failpoint_exit": 88,
+          "worker_head_after_recovery": "8a2bb9ca241bbd82a0da536f6f39dca9037dd046",
+          "worker_id": 1,
+          "worker_path_removed": true,
+          "worker_status_after_recovery": "ready",
+          "workspace_audit_issues": []
+        },
+        {
+          "base_sha": "8a2bb9ca241bbd82a0da536f6f39dca9037dd046",
+          "compatibility_warnings": [
+            "worktree worker shares canonical Git configuration, remotes, refs, stash, and hooks"
+          ],
+          "connectivity_check": "passed",
+          "copied_sparse_checkout": true,
+          "final_worker_status": "discarded",
+          "materialization": {
+            "core_sparse_checkout": true,
+            "excluded_paths_absent": [],
+            "included_paths_present": [
+              "README.md"
+            ]
+          },
+          "mode": "worktree",
+          "passed": true,
+          "qualification_file": "clonegrown-qualification-worktree.txt",
+          "recovery_actions": [
+            "spawn-publish-finished"
+          ],
+          "result_ref": "refs/cws/29045361ac7c47b4/workers/1/results/91cc825be69f4ddbbeb627b64d8960ae0224ecc9",
+          "result_ref_survived_discard": true,
+          "result_sha": "91cc825be69f4ddbbeb627b64d8960ae0224ecc9",
+          "seconds_observed": {
+            "collect": 0.3040886219996537,
+            "discard": 0.8623516669995297,
+            "idempotent_spawn_retry": 0.1486714849997952,
+            "init": 0.1645818329998292,
+            "interrupted_spawn": 0.7948271209997984,
+            "recover": 0.3425635160001548,
+            "release": 0.12245769299988751,
+            "total": 5.008052649000092
+          },
+          "spawn_failpoint": "spawn.after_publish",
+          "spawn_failpoint_exit": 88,
+          "worker_head_after_recovery": "8a2bb9ca241bbd82a0da536f6f39dca9037dd046",
+          "worker_id": 1,
+          "worker_path_removed": true,
+          "worker_status_after_recovery": "ready",
+          "workspace_audit_issues": []
+        }
+      ],
+      "source_preparation": {
+        "clone_kind": "full remote clone with checkout deferred",
+        "clone_seconds_observed": 30.028077459999622,
+        "statistics": {
+          "all_reachable_commits": 39654,
+          "commit_date": "2026-08-29T14:37:50+02:00",
+          "head": "8a2bb9ca241bbd82a0da536f6f39dca9037dd046",
+          "head_history_commits": 39564,
+          "materialization": {
+            "core_sparse_checkout": true,
+            "excluded_paths_absent": [],
+            "included_paths_present": [
+              "README.md"
+            ]
+          },
+          "object_database": {
+            "count": 0,
+            "garbage": 0,
+            "in-pack": 289120,
+            "packs": 1,
+            "prune-packable": 0,
+            "size": 0,
+            "size-garbage": 0,
+            "size-pack": 154506
+          },
+          "refs": 254,
+          "tags": 226
+        }
+      },
+      "source_url": "https://github.com/curl/curl.git"
+    },
+    {
+      "checkout_safety": {
+        "clone_started_with_no_checkout": true,
+        "dotenv_filename_patterns_excluded_before_checkout": [
+          "!/.env",
+          "!/*.env",
+          "!/.env.*",
+          "!/*.env.*",
+          "!/**/.env",
+          "!/**/*.env",
+          "!/**/.env.*",
+          "!/**/*.env.*"
+        ],
+        "submodules_initialized": false
+      },
+      "profile": "git-refs",
+      "public_commit": "c73e85354c275c9d409b26445089bc16940fc527",
+      "public_commit_url": "https://github.com/git/git/commit/c73e85354c275c9d409b26445089bc16940fc527",
+      "role": "ref-heavy repository",
+      "scenarios": [
+        {
+          "base_sha": "c73e85354c275c9d409b26445089bc16940fc527",
+          "compatibility_warnings": [],
+          "connectivity_check": "passed",
+          "copied_sparse_checkout": true,
+          "final_worker_status": "discarded",
+          "materialization": {
+            "core_sparse_checkout": true,
+            "excluded_paths_absent": [],
+            "included_paths_present": [
+              "README.md"
+            ]
+          },
+          "mode": "clone",
+          "passed": true,
+          "qualification_file": "clonegrown-qualification-clone.txt",
+          "recovery_actions": [
+            "spawn-publish-finished"
+          ],
+          "result_ref": "refs/cws/3f537402dd6f4df5/workers/1/results/ec1eacd7bee634e0769c86d9f003e1ef3be98579",
+          "result_ref_survived_discard": true,
+          "result_sha": "ec1eacd7bee634e0769c86d9f003e1ef3be98579",
+          "seconds_observed": {
+            "collect": 0.3739533660000234,
+            "discard": 0.9276973060004821,
+            "idempotent_spawn_retry": 0.14883384099994146,
+            "init": 0.16337639700032014,
+            "interrupted_spawn": 10.477801562000423,
+            "recover": 0.34743002300001535,
+            "release": 0.12567099200077791,
+            "total": 20.161147724999864
+          },
+          "spawn_failpoint": "spawn.after_publish",
+          "spawn_failpoint_exit": 88,
+          "worker_head_after_recovery": "c73e85354c275c9d409b26445089bc16940fc527",
+          "worker_id": 1,
+          "worker_path_removed": true,
+          "worker_status_after_recovery": "ready",
+          "workspace_audit_issues": []
+        },
+        {
+          "base_sha": "c73e85354c275c9d409b26445089bc16940fc527",
+          "compatibility_warnings": [
+            "worktree worker shares canonical Git configuration, remotes, refs, stash, and hooks"
+          ],
+          "connectivity_check": "passed",
+          "copied_sparse_checkout": true,
+          "final_worker_status": "discarded",
+          "materialization": {
+            "core_sparse_checkout": true,
+            "excluded_paths_absent": [],
+            "included_paths_present": [
+              "README.md"
+            ]
+          },
+          "mode": "worktree",
+          "passed": true,
+          "qualification_file": "clonegrown-qualification-worktree.txt",
+          "recovery_actions": [
+            "spawn-publish-finished"
+          ],
+          "result_ref": "refs/cws/92d7eb7d05614ee3/workers/1/results/86c0e90aebe95ece18ebf8acd7124e9fdc0d41b0",
+          "result_ref_survived_discard": true,
+          "result_sha": "86c0e90aebe95ece18ebf8acd7124e9fdc0d41b0",
+          "seconds_observed": {
+            "collect": 0.5923850810004296,
+            "discard": 1.252400215000307,
+            "idempotent_spawn_retry": 0.15561237600013555,
+            "init": 0.2170262849995197,
+            "interrupted_spawn": 1.0160930380006903,
+            "recover": 0.332121288000053,
+            "release": 0.1275869769997371,
+            "total": 11.298864493999645
+          },
+          "spawn_failpoint": "spawn.after_publish",
+          "spawn_failpoint_exit": 88,
+          "worker_head_after_recovery": "c73e85354c275c9d409b26445089bc16940fc527",
+          "worker_id": 1,
+          "worker_path_removed": true,
+          "worker_status_after_recovery": "ready",
+          "workspace_audit_issues": []
+        }
+      ],
+      "source_preparation": {
+        "clone_kind": "full remote clone with checkout deferred",
+        "clone_seconds_observed": 62.77607618000002,
+        "statistics": {
+          "all_reachable_commits": 85469,
+          "commit_date": "2026-08-28T11:04:57-07:00",
+          "head": "c73e85354c275c9d409b26445089bc16940fc527",
+          "head_history_commits": 82085,
+          "materialization": {
+            "core_sparse_checkout": true,
+            "excluded_paths_absent": [],
+            "included_paths_present": [
+              "README.md"
+            ]
+          },
+          "object_database": {
+            "count": 0,
+            "garbage": 0,
+            "in-pack": 420077,
+            "packs": 1,
+            "prune-packable": 0,
+            "size": 0,
+            "size-garbage": 0,
+            "size-pack": 322572
+          },
+          "refs": 1019,
+          "tags": 1008
+        }
+      },
+      "source_url": "https://github.com/git/git.git"
+    },
+    {
+      "checkout_safety": {
+        "clone_started_with_no_checkout": true,
+        "dotenv_filename_patterns_excluded_before_checkout": [
+          "!/.env",
+          "!/*.env",
+          "!/.env.*",
+          "!/*.env.*",
+          "!/**/.env",
+          "!/**/*.env",
+          "!/**/.env.*",
+          "!/**/*.env.*"
+        ],
+        "submodules_initialized": false
+      },
+      "profile": "git-features",
+      "public_commit": "c73e85354c275c9d409b26445089bc16940fc527",
+      "public_commit_url": "https://github.com/git/git/commit/c73e85354c275c9d409b26445089bc16940fc527",
+      "role": "submodule gitlink plus narrow sparse checkout",
+      "scenarios": [
+        {
+          "base_sha": "c73e85354c275c9d409b26445089bc16940fc527",
+          "compatibility_warnings": [],
+          "connectivity_check": "passed",
+          "copied_sparse_checkout": true,
+          "final_worker_status": "discarded",
+          "materialization": {
+            "core_sparse_checkout": true,
+            "excluded_paths_absent": [
+              "Makefile"
+            ],
+            "gitlink": {
+              "commit": "855827c583bc30645ba427885caa40c5b81764d2",
+              "mode": "160000",
+              "path": "sha1collisiondetection",
+              "submodule_initialized": false
+            },
+            "included_paths_present": [
+              "Documentation/git.adoc",
+              ".gitmodules"
+            ]
+          },
+          "mode": "clone",
+          "passed": true,
+          "qualification_file": "Documentation/clonegrown-qualification-clone.txt",
+          "recovery_actions": [
+            "spawn-publish-finished"
+          ],
+          "result_ref": "refs/cws/a74ad75da9034903/workers/1/results/14697554ac50ace0777d62ce6cc5a42bd9bf8ff7",
+          "result_ref_survived_discard": true,
+          "result_sha": "14697554ac50ace0777d62ce6cc5a42bd9bf8ff7",
+          "seconds_observed": {
+            "collect": 0.4107665640003688,
+            "discard": 0.4319202690003294,
+            "idempotent_spawn_retry": 0.14987778300019272,
+            "init": 0.1769824080001854,
+            "interrupted_spawn": 7.774083004000204,
+            "recover": 0.2422988730004363,
+            "release": 0.13574251600039133,
+            "total": 16.66912667700035
+          },
+          "spawn_failpoint": "spawn.after_publish",
+          "spawn_failpoint_exit": 88,
+          "worker_head_after_recovery": "c73e85354c275c9d409b26445089bc16940fc527",
+          "worker_id": 1,
+          "worker_path_removed": true,
+          "worker_status_after_recovery": "ready",
+          "workspace_audit_issues": []
+        },
+        {
+          "base_sha": "c73e85354c275c9d409b26445089bc16940fc527",
+          "compatibility_warnings": [
+            "worktree worker shares canonical Git configuration, remotes, refs, stash, and hooks"
+          ],
+          "connectivity_check": "passed",
+          "copied_sparse_checkout": true,
+          "final_worker_status": "discarded",
+          "materialization": {
+            "core_sparse_checkout": true,
+            "excluded_paths_absent": [
+              "Makefile"
+            ],
+            "gitlink": {
+              "commit": "855827c583bc30645ba427885caa40c5b81764d2",
+              "mode": "160000",
+              "path": "sha1collisiondetection",
+              "submodule_initialized": false
+            },
+            "included_paths_present": [
+              "Documentation/git.adoc",
+              ".gitmodules"
+            ]
+          },
+          "mode": "worktree",
+          "passed": true,
+          "qualification_file": "Documentation/clonegrown-qualification-worktree.txt",
+          "recovery_actions": [
+            "spawn-publish-finished"
+          ],
+          "result_ref": "refs/cws/849d0c6ce62d46fe/workers/1/results/a8488d2e646e52068e534fae71ab83624c996a0e",
+          "result_ref_survived_discard": true,
+          "result_sha": "a8488d2e646e52068e534fae71ab83624c996a0e",
+          "seconds_observed": {
+            "collect": 0.35368999399997847,
+            "discard": 0.47205983999992895,
+            "idempotent_spawn_retry": 0.1530455250003797,
+            "init": 0.16466066900011356,
+            "interrupted_spawn": 0.4424942089999604,
+            "recover": 0.2433483470003921,
+            "release": 0.1270595769992724,
+            "total": 9.651698011000008
+          },
+          "spawn_failpoint": "spawn.after_publish",
+          "spawn_failpoint_exit": 88,
+          "worker_head_after_recovery": "c73e85354c275c9d409b26445089bc16940fc527",
+          "worker_id": 1,
+          "worker_path_removed": true,
+          "worker_status_after_recovery": "ready",
+          "workspace_audit_issues": []
+        }
+      ],
+      "source_preparation": {
+        "clone_kind": "local full clone of the pinned disposable public-source clone",
+        "clone_seconds_observed": 0.053527095000390545,
+        "statistics": {
+          "all_reachable_commits": 82090,
+          "commit_date": "2026-08-28T11:04:57-07:00",
+          "head": "c73e85354c275c9d409b26445089bc16940fc527",
+          "head_history_commits": 82085,
+          "materialization": {
+            "core_sparse_checkout": true,
+            "excluded_paths_absent": [
+              "Makefile"
+            ],
+            "gitlink": {
+              "commit": "855827c583bc30645ba427885caa40c5b81764d2",
+              "mode": "160000",
+              "path": "sha1collisiondetection",
+              "submodule_initialized": false
+            },
+            "included_paths_present": [
+              "Documentation/git.adoc",
+              ".gitmodules"
+            ]
+          },
+          "object_database": {
+            "count": 0,
+            "garbage": 0,
+            "in-pack": 420077,
+            "packs": 1,
+            "prune-packable": 0,
+            "size": 0,
+            "size-garbage": 0,
+            "size-pack": 322572
+          },
+          "refs": 1012,
+          "tags": 1008
+        }
+      },
+      "source_url": "https://github.com/git/git.git"
+    }
+  ],
+  "qualification": "real-public-repositories",
+  "schema_version": 1,
+  "scope": {
+    "agent_quality_claim": "none; this run does not measure whether coding agents make fewer mistakes",
+    "interpretation": "qualification evidence, not a universal performance policy",
+    "timing_policy": "observational only; no duration or ratio decides pass/fail"
+  },
+  "summary": {
+    "passed_scenarios": 6,
+    "profiles": 3,
+    "scenarios": 6,
+    "seconds_observed": 168.30907956399915,
+    "worker_modes": [
+      "clone",
+      "worktree"
+    ]
+  }
+}

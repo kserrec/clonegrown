@@ -348,16 +348,27 @@ def copy_sparse_patterns(canonical: Path, worker: Path) -> None:
     shutil.copy2(src, dst)
 
 
-def copy_sparse_policy(canonical: Path, worker: Path) -> bool:
-    """For a clone: replicate canonical's sparse-checkout config and patterns. False if not sparse."""
+def copy_sparse_policy(canonical: Path, worker: Path, *, linked_worktree: bool = False) -> bool:
+    """Replicate canonical's sparse-checkout config and patterns. False if not sparse.
+
+    Linked worktrees normally inherit repository config. When
+    ``extensions.worktreeConfig`` is enabled, however, sparse-checkout flags
+    belong to each worktree. Git 2.29 does not populate those flags for a new
+    linked worktree, so install them explicitly before checkout.
+    """
     if not sparse_checkout_enabled(canonical):
         return False
-    git(worker, "config", "core.sparseCheckout", "true", sensitive=("true",))
-    for key in ("core.sparseCheckoutCone", "index.sparse"):
-        value = git(canonical, "config", "--get", key, check=False)
-        if value.returncode == 0 and value.stdout.strip():
-            copied_value = value.stdout.strip()
-            git(worker, "config", key, copied_value, sensitive=(copied_value,))
+    worktree_config = git(canonical, "config", "--bool", "extensions.worktreeConfig", check=False)
+    config_scope = ("--worktree",) if linked_worktree and (
+        worktree_config.returncode == 0 and worktree_config.stdout.strip().lower() == "true"
+    ) else ()
+    if not linked_worktree or config_scope:
+        git(worker, "config", *config_scope, "core.sparseCheckout", "true", sensitive=("true",))
+        for key in ("core.sparseCheckoutCone", "index.sparse"):
+            value = git(canonical, "config", "--get", key, check=False)
+            if value.returncode == 0 and value.stdout.strip():
+                copied_value = value.stdout.strip()
+                git(worker, "config", *config_scope, key, copied_value, sensitive=(copied_value,))
     copy_sparse_patterns(canonical, worker)
     return True
 

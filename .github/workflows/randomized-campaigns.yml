@@ -1,0 +1,113 @@
+name: Nightly randomized campaigns
+
+run-name: Randomized campaigns from seed ${{ inputs.seed_start || github.run_number }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed_start:
+        description: First integer seed; every case records its exact replay command
+        required: true
+        default: '0'
+        type: string
+      random_kill_seed_count:
+        description: Seeds for each random-kill operation and worker mode
+        required: true
+        default: '2'
+        type: choice
+        options: ['1', '2', '3', '5']
+      state_machine_seed_count:
+        description: Seeds for each state-machine worker mode
+        required: true
+        default: '2'
+        type: choice
+        options: ['1', '2', '3', '5']
+      state_machine_steps:
+        description: Lifecycle steps per state-machine seed
+        required: true
+        default: '50'
+        type: choice
+        options: ['25', '50', '75', '100']
+  schedule:
+    - cron: '37 9 * * *'
+
+permissions:
+  contents: read
+
+env:
+  CAMPAIGN_SEED_START: ${{ inputs.seed_start || github.run_number }}
+  RANDOM_KILL_SEED_COUNT: ${{ inputs.random_kill_seed_count || '2' }}
+  STATE_MACHINE_SEED_COUNT: ${{ inputs.state_machine_seed_count || '2' }}
+  STATE_MACHINE_STEPS: ${{ inputs.state_machine_steps || '50' }}
+
+jobs:
+  random-kill:
+    name: Random kill (${{ matrix.mode }}, ${{ matrix.operation }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [clone, worktree]
+        operation: [spawn, collect, discard]
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 5
+      - uses: actions/setup-python@v7
+        timeout-minutes: 5
+        with:
+          python-version: '3.11'
+      - name: Run bounded random-kill seeds
+        timeout-minutes: 25
+        env:
+          CWS_SUITE_MODE: ${{ matrix.mode }}
+        run: >-
+          python3 tests/campaign/random_kill.py ${{ matrix.operation }}
+          --start "$CAMPAIGN_SEED_START"
+          --count "$RANDOM_KILL_SEED_COUNT"
+          --output "${{ runner.temp }}/random-kill-${{ matrix.mode }}-${{ matrix.operation }}.json"
+      - name: Retain random-kill result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        timeout-minutes: 5
+        with:
+          name: random-kill-${{ matrix.mode }}-${{ matrix.operation }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/random-kill-${{ matrix.mode }}-${{ matrix.operation }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  state-machine:
+    name: State machine (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [clone, worktree]
+    steps:
+      - uses: actions/checkout@v7
+        timeout-minutes: 5
+      - uses: actions/setup-python@v7
+        timeout-minutes: 5
+        with:
+          python-version: '3.11'
+      - name: Run bounded state-machine seeds
+        timeout-minutes: 25
+        env:
+          CWS_FUZZ_ROOT: ${{ runner.temp }}/state-machine-${{ matrix.mode }}
+          CWS_SUITE_MODE: ${{ matrix.mode }}
+        run: >-
+          python3 tests/campaign/state_machine_fuzz.py
+          --start "$CAMPAIGN_SEED_START"
+          --seeds "$STATE_MACHINE_SEED_COUNT"
+          --steps "$STATE_MACHINE_STEPS"
+          --output "${{ runner.temp }}/state-machine-${{ matrix.mode }}.json"
+      - name: Retain state-machine result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        timeout-minutes: 5
+        with:
+          name: state-machine-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/state-machine-${{ matrix.mode }}.json
+          if-no-files-found: error
+          retention-days: 30
