@@ -222,7 +222,10 @@ class SafetyErrorTests(unittest.TestCase):
 
     def test_init_failure_after_state_names_checkpoint_and_retry_finishes(self) -> None:
         workspace = self.root / "second-dev"
-        with patch.dict(os.environ, {"CWS_ERRORPOINT": "init.after_state"}):
+        with patch.dict(os.environ, {
+            "CLONEGROWN_TEST_MODE": "1",
+            "CLONEGROWN_TEST_ERRORPOINT": "init.after_state",
+        }):
             with self.assertRaises(ClonegrownError) as caught:
                 init_workspace(self.repo, workspace)
         message = self.assert_context(caught.exception, "init")
@@ -236,8 +239,69 @@ class SafetyErrorTests(unittest.TestCase):
         self.assertFalse(canonical_marker_path(self.repo, state["workspace_id"]).exists())
         self.assertEqual(init_workspace(self.repo, workspace)["status"], "ready")
 
+    def test_init_refuses_selected_workspace_symlink_before_external_writes(self) -> None:
+        repo = make_repo(self.root, "selected-workspace-symlink-repo")
+        external = self.root / "external-selected-workspace"
+        external.mkdir()
+        selected = self.root / "selected-workspace-symlink-dev"
+        os.symlink(external, selected, target_is_directory=True)
+
+        with self.assertRaisesRegex(ClonegrownError, "workspace directory is not a real directory"):
+            init_workspace(repo, selected)
+        self.assertEqual(list(external.iterdir()), [])
+        self.assertTrue(selected.is_symlink())
+
+    def test_init_refuses_workspace_control_symlink_before_external_writes(self) -> None:
+        repo = make_repo(self.root, "workspace-symlink-repo")
+        workspace = self.root / "workspace-symlink-dev"
+        workspace.mkdir()
+        external = self.root / "external-workspace-control"
+        external.mkdir()
+        os.symlink(external, workspace / ".cws", target_is_directory=True)
+
+        with self.assertRaisesRegex(ClonegrownError, "workspace control directory is not a real directory"):
+            init_workspace(repo, workspace)
+        self.assertEqual(list(external.iterdir()), [])
+        self.assertTrue((workspace / ".cws").is_symlink())
+
+    def test_init_preflights_existing_control_subdirectory_symlinks(self) -> None:
+        repo = make_repo(self.root, "subdirectory-symlink-repo")
+        workspace = self.root / "subdirectory-symlink-dev"
+        control = workspace / ".cws"
+        control.mkdir(parents=True)
+        external = self.root / "external-workers"
+        external.mkdir()
+        os.symlink(external, control / "workers", target_is_directory=True)
+
+        with self.assertRaisesRegex(ClonegrownError, "workspace workers directory is not a real directory"):
+            init_workspace(repo, workspace)
+        self.assertEqual(list(external.iterdir()), [])
+        self.assertEqual(sorted(path.name for path in control.iterdir()), ["workers"])
+
+    def test_init_refuses_canonical_marker_symlink_before_external_writes(self) -> None:
+        repo = make_repo(self.root, "marker-symlink-repo")
+        workspace = self.root / "marker-symlink-dev"
+        external = self.root / "external-canonical-markers"
+        external.mkdir()
+        os.symlink(external, repo / ".git" / "cws", target_is_directory=True)
+
+        with self.assertRaisesRegex(ClonegrownError, "canonical marker directory is not a real directory"):
+            init_workspace(repo, workspace)
+        self.assertEqual(list(external.iterdir()), [])
+        self.assertFalse(workspace.exists())
+
+    def test_init_real_directories_remains_idempotent(self) -> None:
+        before = (self.ws / ".cws" / "state.json").read_bytes()
+        first = init_workspace(self.repo, self.ws)
+        second = init_workspace(self.repo, self.ws)
+        self.assertEqual(first, second)
+        self.assertEqual((self.ws / ".cws" / "state.json").read_bytes(), before)
+
     def test_spawn_failure_after_publication_preserves_worker_for_recovery(self) -> None:
-        with patch.dict(os.environ, {"CWS_ERRORPOINT": "spawn.after_publish"}):
+        with patch.dict(os.environ, {
+            "CLONEGROWN_TEST_MODE": "1",
+            "CLONEGROWN_TEST_ERRORPOINT": "spawn.after_publish",
+        }):
             with self.assertRaises(ClonegrownError) as caught:
                 spawn(self.ws, "HEAD", "published failure")
         message = self.assert_context(caught.exception, "spawn")
@@ -256,12 +320,15 @@ class SafetyErrorTests(unittest.TestCase):
     def test_collect_failure_after_fetch_retains_candidate_and_returns_ready(self) -> None:
         worker = spawn(self.ws, "HEAD", "collect failure")
         commit(Path(worker["path"]), "work.txt")
-        with patch.dict(os.environ, {"CWS_ERRORPOINT": "collect.after_fetch"}):
+        with patch.dict(os.environ, {
+            "CLONEGROWN_TEST_MODE": "1",
+            "CLONEGROWN_TEST_ERRORPOINT": "collect.after_fetch",
+        }):
             with self.assertRaises(ClonegrownError) as caught:
                 collect(self.ws, worker["id"])
         message = self.assert_context(caught.exception, "collect")
         self.assertIn("collection rolled back", message)
-        self.assertIn("fetched immutable candidate ref was retained", message)
+        self.assertIn("published immutable candidate ref was retained", message)
         self.assertIn("not required", message)
 
         (listed,) = status(self.ws)["workers"]
@@ -281,7 +348,10 @@ class SafetyErrorTests(unittest.TestCase):
         commit(Path(worker["path"]), "work.txt")
         collect(self.ws, worker["id"])
         release(self.ws, worker["id"])
-        with patch.dict(os.environ, {"CWS_ERRORPOINT": "discard.after_quarantine"}):
+        with patch.dict(os.environ, {
+            "CLONEGROWN_TEST_MODE": "1",
+            "CLONEGROWN_TEST_ERRORPOINT": "discard.after_quarantine",
+        }):
             with self.assertRaises(ClonegrownError) as caught:
                 discard(self.ws, worker["id"])
         message = self.assert_context(caught.exception, "discard")

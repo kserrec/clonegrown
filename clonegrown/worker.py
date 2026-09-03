@@ -18,13 +18,13 @@ from .core import (
     git_dir, git_path, lexical_abs, load_json, object_format, operation_checkpoint, public_exception_text, repo_root,
 )
 from .repository import (
-    absent_marker, delete_ref, is_symbolic_ref, ref_points_at, release_task_branch, repair_worktree, resolve_ref,
-    write_ref,
+    absent_marker, delete_ref, git_at_git_dir, is_symbolic_ref, ref_points_at, release_task_branch,
+    repair_worktree, resolve_ref, write_ref,
 )
 from .state import (
-    SCHEMA, WorkerRecord, WorkerStatus, WorkspaceState, base_pin_ref, branch_owner_ref, params_hash, quarantine_root,
-    request_path, staging_root, validate_control_dir, worker_lock_path, worker_marker_path, worker_record_path,
-    worker_slot, workspace_lock, ws_paths,
+    SCHEMA, VerifiedWorkspace, WorkerRecord, WorkerStatus, WorkspaceState, base_pin_ref, branch_owner_ref,
+    params_hash, quarantine_root, request_path, staging_root, validate_control_dir, worker_lock_path,
+    worker_marker_path, worker_record_path, worker_slot, workspace_lock, ws_paths,
 )
 
 # Git-directory entries whose presence means a merge/rebase/etc. is mid-flight.
@@ -56,15 +56,13 @@ def verify_worker(state: WorkspaceState, worker: WorkerRecord, require_exists: b
     quarantine; the identity checks are the same either way.
     """
     repo = worker.repo if repo is None else repo
-    if not repo.exists():
-        if require_exists:
-            raise ClonegrownError("worker repository is missing")
-        return repo
     for boundary, label in ((repo.parent, "worker slot"), (repo, "worker repository")):
         try:
             mode = os.lstat(boundary).st_mode
         except FileNotFoundError:
-            raise ClonegrownError(f"{label} is missing")
+            if require_exists:
+                raise ClonegrownError(f"{label} is missing")
+            return repo
         if stat.S_ISLNK(mode):
             raise ClonegrownError(f"{label} was replaced by a symlink")
         if not stat.S_ISDIR(mode):
@@ -195,6 +193,49 @@ def inspect_ignored_content(repo: Path) -> IgnoredContent:
     return IgnoredContent(count=len(names), sample=tuple(names[:IGNORED_SAMPLE_LIMIT]))
 
 
+@dataclass(frozen=True)
+class PrivateRefChanges:
+    """Clone-private ref names that differ from the publication baseline; never ref contents."""
+    count: int
+    sample: tuple[str, ...]
+
+    def describe(self) -> str:
+        shown = ", ".join(self.sample)
+        more = f", and {self.count - len(self.sample)} more" if self.count > len(self.sample) else ""
+        return f"{self.count} changed private ref{'s' if self.count != 1 else ''} ({shown}{more})"
+
+
+def snapshot_clone_private_refs(repo: Path, task_branch: str) -> dict[str, str]:
+    """Exact non-task refs in an independent clone, including stash and symbolic refs.
+
+    The assigned task branch is excluded because its ordinary committed tip is the
+    collection result. Every other ref is clone-private state that deletion must
+    compare with the publication baseline.
+    """
+    listing = git(repo, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)").stdout
+    out: dict[str, str] = {}
+    assigned = f"refs/heads/{task_branch}"
+    for line in listing.splitlines():
+        parts = line.split("\0")
+        if len(parts) != 3 or not parts[0] or parts[0] == assigned:
+            continue
+        ref, object_id, symbolic_target = parts
+        out[ref] = f"symref:{symbolic_target}" if symbolic_target else object_id
+    return out
+
+
+def inspect_clone_private_ref_changes(worker: WorkerRecord, repo: Path | None = None) -> PrivateRefChanges | None:
+    """Differences from a clone's publication baseline, or None when old metadata has no baseline."""
+    if worker.clone_private_refs is None:
+        return None
+    current = snapshot_clone_private_refs(repo or worker.repo, str(worker.branch))
+    changed = sorted(
+        ref for ref in set(current) | set(worker.clone_private_refs)
+        if current.get(ref) != worker.clone_private_refs.get(ref)
+    )
+    return PrivateRefChanges(count=len(changed), sample=tuple(changed[:IGNORED_SAMPLE_LIMIT]))
+
+
 # --- deletion through quarantine ------------------------------------------------
 
 def _status_paths(listing: bytes) -> list[bytes]:
@@ -222,7 +263,7 @@ def _status_paths(listing: bytes) -> list[bytes]:
     return paths
 
 
-def custody_fingerprint(repo: Path) -> dict[str, Any]:
+def custody_fingerprint(repo: Path, *, include_git_refs: bool = False) -> dict[str, Any]:
     """What the worker holds right now, without reading contents.
 
     HEAD, Git's complete NUL-delimited status listing (tracked changes, every
@@ -230,7 +271,10 @@ def custody_fingerprint(repo: Path) -> dict[str, Any]:
     and type of every entry in the worker directory tree except its ``.git``
     (walked directly, so nested repositories, FIFOs, sockets, and anything
     else Git does not list are covered) and of every entry beside the
-    repository in its slot. A path added, removed, or rewritten in place
+    repository in its slot. For an independent clone, callers also include the
+    complete ref listing so private-ref changes after authorization are caught;
+    linked worktrees omit it because their refs are shared canonical state. A
+    path added, removed, or rewritten in place
     changes the fingerprint; a rewrite that keeps the same size and
     modification timestamp does not, which is the residual gap the README
     states. A worker whose Git directory no longer works (a quarantined
@@ -248,6 +292,12 @@ def custody_fingerprint(repo: Path) -> dict[str, Any]:
     except ClonegrownError:
         mode = "walk"
         digest = hashlib.sha256(b"walk")
+    if include_git_refs:
+        try:
+            refs = git_bytes(repo, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)")
+        except ClonegrownError:
+            refs = b"unreadable"
+        digest.update(b"\0private-refs\0" + refs)
     entries: list[tuple[bytes, Path]] = [(os.fsencode(child.name), Path(child.name))
                                          for child in repo.iterdir() if child.name != ".git"]
     for sibling in sorted(slot.iterdir()):
@@ -330,7 +380,8 @@ def delete_verified(path: Path, label: str) -> None:
 
 
 def delete_through_quarantine(ws: Path, state: WorkspaceState, worker: WorkerRecord, canonical: Path,
-                              persist: Callable[[], None]) -> None:
+                              persist: Callable[[], None], *,
+                              canonical_git_dir_fd: int | None = None) -> None:
     """Remove a ``discarding`` worker's content, proving each part gone before the next.
 
     Slot → quarantine (one rename, location persisted at once) → worktree
@@ -343,14 +394,14 @@ def delete_through_quarantine(ws: Path, state: WorkspaceState, worker: WorkerRec
     """
     worker_id = int(worker.id)
     slot = worker_slot(ws, worker_id)
-    if worker.quarantine_path is None and slot.exists():
+    if worker.quarantine_path is None and os.path.lexists(slot):
         # Persist where the slot is about to go and what it holds before it moves, so an
         # interruption at any later point finds the quarantine described in the record.
         repo = verify_worker(state, worker)
         target = prepare_quarantine(ws, worker)
         worker.quarantine_path = str(target)
         worker.quarantine_started = time.time()
-        worker.quarantine_snapshot = custody_fingerprint(repo)
+        worker.quarantine_snapshot = custody_fingerprint(repo, include_git_refs=not worker.is_worktree)
         worker.quarantine_error = None
         operation_checkpoint(
             stage="quarantine custody-record commit",
@@ -369,7 +420,7 @@ def delete_through_quarantine(ws: Path, state: WorkspaceState, worker: WorkerRec
         )
     if worker.quarantine_path is not None:
         quarantine = Path(worker.quarantine_path)
-        if not os.path.lexists(quarantine) and slot.exists():
+        if not os.path.lexists(quarantine) and os.path.lexists(slot):
             # Intent was recorded but the rename never happened (or failed): do it now. The
             # recheck below then compares the moved slot with the recorded fingerprint.
             failpoint("discard.before_delete")
@@ -401,7 +452,7 @@ def delete_through_quarantine(ws: Path, state: WorkspaceState, worker: WorkerRec
                 recovery="run `clonegrown recover`; it rechecks the recorded custody fingerprint before deletion",
             )
             failpoint("discard.after_quarantine")
-        if os.path.lexists(quarantine) and slot.exists():
+        if os.path.lexists(quarantine) and os.path.lexists(slot):
             raise ClonegrownError(
                 f"worker {worker_id} has content both in its slot and at its quarantine path {quarantine}; "
                 "nothing is deleted until one of them is moved away by hand")
@@ -414,14 +465,16 @@ def delete_through_quarantine(ws: Path, state: WorkspaceState, worker: WorkerRec
                 # The custody question: is this still exactly what was authorized for deletion?
                 repo = quarantine / str(state.repo_name)
                 try:
-                    repair_owned_worktree(canonical, worker, repo)
+                    repair_owned_worktree(
+                        canonical, worker, repo, git_dir_fd=canonical_git_dir_fd,
+                    )
                     verify_worker(state, worker, repo=repo)
                 except AdminDirectoryMissing as exc:
                     if worker.quarantine_snapshot.get("listing") != "walk":
                         raise ClonegrownError(
                             f"{exc}; run discard again with its acknowledgement to delete the quarantined copy "
                             "without Git inspection") from exc
-                now = custody_fingerprint(repo)
+                now = custody_fingerprint(repo, include_git_refs=not worker.is_worktree)
                 if now != worker.quarantine_snapshot:
                     raise ClonegrownError(
                         f"worker {worker_id} changed after its custody check; preserved in quarantine at {quarantine}")
@@ -461,7 +514,7 @@ def delete_through_quarantine(ws: Path, state: WorkspaceState, worker: WorkerRec
                                    "was selected for deletion"),
                 recovery="run `clonegrown recover`; it finishes stage and canonical cleanup before terminal status",
             )
-        elif slot.exists():
+        elif os.path.lexists(slot):
             raise ClonegrownError(f"worker {worker_id} slot reappeared after quarantine; nothing deleted")
         clear_quarantine(worker)
         persist()
@@ -516,20 +569,24 @@ def unrecorded_quarantine(ws: Path, worker: WorkerRecord) -> Path | None:
     return target if worker.quarantine_path is None and os.path.lexists(target) else None
 
 
-def finish_deletion(canonical: Path, worker: WorkerRecord, persist: Callable[[], None]) -> bool:
+def finish_deletion(canonical: Path, worker: WorkerRecord, persist: Callable[[], None], *,
+                    canonical_git_dir_fd: int | None = None) -> bool:
     """After the content is proved gone, clean canonical's worktree state and record the terminal status.
 
     Returns False, leaving the record ``discarding`` with its evidence, when a
     task branch or admin directory could not be cleaned; ``recover`` retries.
     """
-    forget_worktree(canonical, worker, persist)
+    forget_worktree(canonical, worker, persist, git_dir_fd=canonical_git_dir_fd)
     worker.release_ownership()
     if worktree_cleanup_conflict(worker):
         persist()
         return False
     # A worker preserved as broken after an interrupted spawn still holds its base pin; drop it
     # only at its recorded value, so a pin naming anything else stays for status to report.
-    delete_ref(canonical, base_pin_ref(str(worker.workspace_id), int(worker.id)), str(worker.base_sha), check=False)
+    delete_ref(
+        canonical, base_pin_ref(str(worker.workspace_id), int(worker.id)),
+        str(worker.base_sha), check=False, git_dir_fd=canonical_git_dir_fd,
+    )
     worker.status = worker.discard_intent or WorkerStatus.DISCARDED
     worker.discarded = time.time()
     persist()
@@ -578,7 +635,8 @@ def load_worker_record(ws: Path, state: WorkspaceState, worker_id: int) -> Worke
 
 # --- allocation --------------------------------------------------------------
 
-def allocation_evidence(ws: Path, state: WorkspaceState, canonical: Path, worker_id: int) -> list[str]:
+def allocation_evidence(ws: Path, state: WorkspaceState, canonical: Path, worker_id: int, *,
+                        git_dir_fd: int | None = None) -> list[str]:
     """Everything that already represents worker ``worker_id``: a stale counter must not overwrite any of it."""
     found: list[str] = []
     if worker_record_path(ws, worker_id).exists():
@@ -591,11 +649,15 @@ def allocation_evidence(ws: Path, state: WorkspaceState, canonical: Path, worker
         found.append("quarantine directory")
     if os.path.lexists(worker_lock_path(ws, worker_id)):
         found.append("operation lock file")
-    if resolve_ref(canonical, state.base_ref(worker_id)) is not None:
+    if resolve_ref(canonical, state.base_ref(worker_id), git_dir_fd=git_dir_fd) is not None:
         found.append("base ref")
-    elif is_symbolic_ref(canonical, state.base_ref(worker_id)):
+    elif is_symbolic_ref(canonical, state.base_ref(worker_id), git_dir_fd=git_dir_fd):
         found.append("symbolic base ref")  # dangling symrefs are invisible to for-each-ref; ask Git directly
-    if git(canonical, "for-each-ref", f"{state.ref_prefix}/workers/{worker_id}/", check=False).stdout.strip():
+    listing = (git(canonical, "for-each-ref", f"{state.ref_prefix}/workers/{worker_id}/", check=False)
+               if git_dir_fd is None else
+               git_at_git_dir(canonical, git_dir_fd, "for-each-ref",
+                              f"{state.ref_prefix}/workers/{worker_id}/", check=False))
+    if listing.stdout.strip():
         found.append("worker refs")
     return found
 
@@ -640,15 +702,23 @@ def authenticate_settled(ws: Path, state: WorkspaceState, worker: WorkerRecord, 
         if not ref_points_at(canonical, worker.result_ref, worker.result_sha):
             raise ClonegrownError(f"worker {worker_id} is recorded as collected but its result ref is missing or moved")
     elif worker.status in WorkerStatus.GONE:
+        if (worker.status == WorkerStatus.DISCARDED
+                and not ref_points_at(canonical, worker.result_ref, worker.result_sha)):
+            raise ClonegrownError(
+                f"worker {worker_id} is recorded as discarded but its result ref is missing or moved"
+            )
         if os.path.lexists(worker_slot(ws, worker_id)):
             raise ClonegrownError(f"worker {worker_id} is recorded as gone but its slot still exists")
         if unrecorded_quarantine(ws, worker) is not None:
             raise ClonegrownError(f"worker {worker_id} is recorded as gone but content sits at its quarantine path")
 
 
-def validate_generated_branch(canonical: Path, branch: str) -> None:
+def validate_generated_branch(canonical: Path, branch: str, *,
+                              git_dir_fd: int | None = None) -> None:
     """Reject a deterministic task branch before allocation creates any durable evidence."""
-    valid = git(canonical, "check-ref-format", "--branch", branch, check=False)
+    valid = (git(canonical, "check-ref-format", "--branch", branch, check=False)
+             if git_dir_fd is None else
+             git_at_git_dir(canonical, git_dir_fd, "check-ref-format", "--branch", branch, check=False))
     if valid.returncode:
         raise ClonegrownError(f"generated task branch is invalid for Git: {branch}")
 
@@ -667,10 +737,11 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
     create-only semantics. A failure after the counter advanced leaves the ID
     unused, an observable gap, rather than reusing it.
     """
-    with workspace_lock(ws):
-        state = WorkspaceState.load(ws)
-        canonical = state.verify_canonical()
-        digest = params_hash(base, task, strong, mode)
+    digest = params_hash(base, task, strong, mode)
+    verified = VerifiedWorkspace.load(ws)
+    with verified.open_canonical_git_dir() as git_dir_fd, workspace_lock(ws):
+        state = verified.reload_under_lock(ws)
+        canonical = verified.canonical
         if request_id:
             existing = load_request_index(ws, state, request_id, digest)
             if existing is not None and existing.status not in WorkerStatus.RETRYABLE:
@@ -683,14 +754,18 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
                 )
                 return existing, False
             # A failed incomplete spawn may be retried under the same idempotency key.
-        resolved = git(canonical, "rev-parse", "--verify", f"{base}^{{commit}}", check=False)
+        resolved = git_at_git_dir(
+            canonical, git_dir_fd, "rev-parse", "--verify", f"{base}^{{commit}}", check=False,
+        )
         if resolved.returncode:
             raise ClonegrownError(f"base does not resolve to a commit: {base}")
         base_sha = resolved.stdout.strip()
         worker_id = int(state.next_id)
         branch = state.worker_branch(worker_id, task)
-        validate_generated_branch(canonical, branch)
-        evidence = allocation_evidence(ws, state, canonical, worker_id)
+        validate_generated_branch(canonical, branch, git_dir_fd=git_dir_fd)
+        evidence = allocation_evidence(
+            ws, state, canonical, worker_id, git_dir_fd=git_dir_fd,
+        )
         if evidence:
             raise ClonegrownError(
                 f"workspace counter is stale: the next worker ID {worker_id} already has a "
@@ -713,7 +788,10 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
         )
         failpoint("allocate.after_state")
         token = secrets.token_hex(16)
-        write_ref(canonical, state.base_ref(worker_id), base_sha, "0" * len(base_sha))
+        write_ref(
+            canonical, state.base_ref(worker_id), base_sha, "0" * len(base_sha),
+            git_dir_fd=git_dir_fd,
+        )
         operation_checkpoint(
             stage="worker-record creation",
             durable_state=(f"worker ID {worker_id} was consumed and its base pin was written; record creation "
@@ -745,7 +823,10 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
             atomic_json_create(worker_record_path(ws, worker_id), worker.to_json())
         except Exception:
             # The ID stays consumed (a visible gap); only the pin this call made is withdrawn.
-            delete_ref(canonical, state.base_ref(worker_id), base_sha, check=False)
+            delete_ref(
+                canonical, state.base_ref(worker_id), base_sha, check=False,
+                git_dir_fd=git_dir_fd,
+            )
             operation_checkpoint(
                 stage="worker-record creation rollback",
                 durable_state=(f"worker ID {worker_id} was consumed, no worker record was created, and "
@@ -807,7 +888,8 @@ def _admin_belongs_to(admin: Path, worker: WorkerRecord) -> bool:
     return target in owned
 
 
-def repair_owned_worktree(canonical: Path, worker: WorkerRecord, repo: Path) -> None:
+def repair_owned_worktree(canonical: Path, worker: WorkerRecord, repo: Path, *,
+                          git_dir_fd: int | None = None) -> None:
     """Point Git's admin entry at a moved worktree, but only an entry that identifies as this worker.
 
     ``git worktree repair`` rewrites the admin directory named by the moved
@@ -829,12 +911,14 @@ def repair_owned_worktree(canonical: Path, worker: WorkerRecord, repo: Path) -> 
     admin = _pointer_target(repo, text[len("gitdir:"):].strip())
     if admin.parent != git_common_dir(canonical) / "worktrees":
         raise ClonegrownError("worktree worker's .git pointer names a path outside the canonical worktrees directory")
-    if not os.path.lexists(admin):
+    anchored_admin = (Path("/dev/fd") / str(git_dir_fd) / "worktrees" / admin.name
+                      if git_dir_fd is not None else admin)
+    if not os.path.lexists(anchored_admin):
         raise AdminDirectoryMissing(
             f"worktree worker's admin directory {admin} is missing (pruned?); Git cannot inspect this checkout")
-    if not _admin_belongs_to(admin, worker):
+    if not _admin_belongs_to(anchored_admin, worker):
         raise ClonegrownError("worktree worker's .git pointer names an admin directory that is not this worker's")
-    repair_worktree(canonical, repo)
+    repair_worktree(canonical, repo, git_dir_fd=git_dir_fd)
 
 
 class AdminDirectoryMissing(ClonegrownError):
@@ -861,7 +945,7 @@ def adoptable_quarantine(ws: Path, state: WorkspaceState, worker: WorkerRecord, 
     found = unrecorded_quarantine(ws, worker)
     if found is None:
         return None
-    if worker_slot(ws, int(worker.id)).exists():
+    if os.path.lexists(worker_slot(ws, int(worker.id))):
         raise ClonegrownError(
             f"worker {int(worker.id)}'s quarantine path {found} is occupied while its slot is still in place; "
             "nothing there was touched. Move the occupant away by hand, then run recover")
@@ -902,7 +986,8 @@ def locate_worktree_admin(canonical: Path, worker: WorkerRecord) -> Path | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def remove_worktree_admin(canonical: Path, admin: Path, worker: WorkerRecord) -> bool:
+def remove_worktree_admin(canonical: Path, admin: Path, worker: WorkerRecord, *,
+                          git_dir_fd: int | None = None) -> bool:
     """Delete one worktree's admin directory so Git forgets it; True if it was ours (or already gone).
 
     Deliberately not ``git worktree prune``: that would also drop any of the
@@ -914,26 +999,30 @@ def remove_worktree_admin(canonical: Path, admin: Path, worker: WorkerRecord) ->
     admin = lexical_abs(admin)
     if admin.parent != git_common_dir(canonical) / "worktrees":
         raise ClonegrownError("refusing to delete a path outside the worktrees directory")
+    target = (Path("/dev/fd") / str(git_dir_fd) / "worktrees" / admin.name
+              if git_dir_fd is not None else admin)
     try:
-        mode = os.lstat(admin).st_mode
+        mode = os.lstat(target).st_mode
     except FileNotFoundError:
         return True
     if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
         raise ClonegrownError("worktree admin path is not a directory")
-    if not _admin_belongs_to(admin, worker):
+    if not _admin_belongs_to(target, worker):
         return False
     try:
-        shutil.rmtree(admin)
+        shutil.rmtree(target)
     except OSError as exc:
         raise ClonegrownError(f"could not remove worktree admin directory: {exc}") from exc
     try:
-        os.lstat(admin)
+        os.lstat(target)
     except FileNotFoundError:
         return True
     raise ClonegrownError(f"worktree admin directory still present after deletion: {admin}")
 
 
-def forget_worktree(canonical: Path, worker: WorkerRecord, persist: Callable[[], None] | None = None) -> None:
+def forget_worktree(canonical: Path, worker: WorkerRecord,
+                    persist: Callable[[], None] | None = None, *,
+                    git_dir_fd: int | None = None) -> None:
     """After a worktree worker's directory is gone, remove its admin dir and task branch from canonical.
 
     Each field is cleared only once its exact target is proved gone. The
@@ -958,7 +1047,9 @@ def forget_worktree(canonical: Path, worker: WorkerRecord, persist: Callable[[],
                 persist()
     if worker.worktree_admin:
         try:
-            ours = remove_worktree_admin(canonical, Path(worker.worktree_admin), worker)
+            ours = remove_worktree_admin(
+                canonical, Path(worker.worktree_admin), worker, git_dir_fd=git_dir_fd,
+            )
         except ClonegrownError as exc:
             worker.worktree_admin_left = public_exception_text(exc)[:1000]
         else:
@@ -967,21 +1058,23 @@ def forget_worktree(canonical: Path, worker: WorkerRecord, persist: Callable[[],
             worker.worktree_admin_left = None
             worker.worktree_admin = None
     failpoint("discard.after_admin_cleanup")
-    _release_task_branch(canonical, worker, persist)
+    _release_task_branch(canonical, worker, persist, git_dir_fd=git_dir_fd)
     failpoint("discard.after_branch_cleanup")
 
 
-def _release_task_branch(canonical: Path, worker: WorkerRecord, persist: Callable[[], None] | None) -> None:
+def _release_task_branch(canonical: Path, worker: WorkerRecord,
+                         persist: Callable[[], None] | None, *,
+                         git_dir_fd: int | None = None) -> None:
     branch = str(worker.branch)
     owner_ref = branch_owner_ref(str(worker.workspace_id), int(worker.id))
-    if is_symbolic_ref(canonical, owner_ref):
+    if is_symbolic_ref(canonical, owner_ref, git_dir_fd=git_dir_fd):
         # Never ours: an ownership ref that points elsewhere proves nothing and is never touched.
         worker.branch_cleanup_left = "task branch retained: its ownership ref is a symbolic ref, which is not ours"
         return
-    owner_sha = resolve_ref(canonical, owner_ref)
+    owner_sha = resolve_ref(canonical, owner_ref, git_dir_fd=git_dir_fd)
     if owner_sha is None:
         # Nothing proves this worker created the branch: never delete by name alone.
-        if resolve_ref(canonical, f"refs/heads/{branch}") is not None:
+        if resolve_ref(canonical, f"refs/heads/{branch}", git_dir_fd=git_dir_fd) is not None:
             worker.branch_cleanup_left = "task branch retained: no ownership ref proves this worker created it"
         else:
             worker.branch_cleanup_left = None
@@ -989,7 +1082,9 @@ def _release_task_branch(canonical: Path, worker: WorkerRecord, persist: Callabl
         return
     if worker.branch_cleanup_sha is None:
         # Never recorded (an interrupted spawn's cleanup): record the tip now, or its absence.
-        worker.branch_cleanup_sha = resolve_ref(canonical, f"refs/heads/{branch}") or absent_marker(str(worker.base_sha))
+        worker.branch_cleanup_sha = (resolve_ref(
+            canonical, f"refs/heads/{branch}", git_dir_fd=git_dir_fd,
+        ) or absent_marker(str(worker.base_sha)))
         if persist is not None:
             persist()
     own_paths = {lexical_abs(worker.repo),
@@ -999,7 +1094,10 @@ def _release_task_branch(canonical: Path, worker: WorkerRecord, persist: Callabl
         own_paths.add(lexical_abs(Path(worker.quarantine_path) / worker.repo.name))
     if worker.stage_root:
         own_paths.add(lexical_abs(Path(str(worker.stage_root)) / worker.repo.name))
-    conflict = release_task_branch(canonical, branch, owner_ref, owner_sha, worker.branch_cleanup_sha, own_paths)
+    conflict = release_task_branch(
+        canonical, branch, owner_ref, owner_sha, worker.branch_cleanup_sha,
+        own_paths, git_dir_fd=git_dir_fd,
+    )
     if conflict is None:
         worker.branch_cleanup_sha = None
         worker.branch_cleanup_left = None

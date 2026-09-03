@@ -10,6 +10,11 @@ Those are not interchangeable. The current harnesses can test the current
 checkout, but they cannot recreate the historical `RESULTS.json` byte for byte
 because the frozen candidate and several campaign inputs are absent.
 
+[`PLAN-ARCHIVE.md`](PLAN-ARCHIVE.md) separately preserves the dated
+implementation and review
+transcript moved from the active roadmap. It is provenance, not an additional
+evidence set or normative product documentation.
+
 ## Preserved historical evidence
 
 - `REPORT.md` is the narrative adversarial evidence report.
@@ -24,6 +29,12 @@ The preserved recovered files have these SHA-256 digests:
 be38e48911d5a7fc2096b23bee251a05b286ebd9288c43c87bb10687db6cd17c  RESULTS.json
 51e1b2d6ca4aa12280febefae5c53865a6b1389adc86394dfba84a200446baff  FALSIFICATION.md
 ```
+
+`REPORT.md` identifies its absent `cws.py` candidate at source commit
+`be4391c` and records Linux 6.18.35 x86_64, Git 2.47.3, and Python 3.13.5.
+`FALSIFICATION.md` records Git 2.47.3 but does not preserve its exact source
+revision, operating system, or Python version. Those omissions are part of the
+historical record; do not infer or reconstruct the missing provenance.
 
 ## Requirements for current checks
 
@@ -63,6 +74,51 @@ The harnesses write the original prototype's positional command form;
 they exercise the code users run. They do **not** invoke the absent frozen
 `cws.py` candidate.
 
+## Recorded current-package evidence
+
+The latest full local result was produced on 2026-08-29 from the uncommitted
+Phase 6 package tree based on commit
+`354d16bc662f15f65dded911d3c26729bf5804aa`. On Linux with CPython 3.12.3,
+the full suite passed 226/226 with Git 2.43.0 and 226/226 with exact Git
+2.29.0. Clone and worktree hardening each reported 57 defined cases, 56
+exercised passes, one conditional reftable skip, and zero failures.
+`PLAN-ARCHIVE.md` and `HANDOFF.md` preserve the exact local-diff boundary,
+durations, and result hashes; `../PLAN.md` retains the current release
+boundary. Because the tree was uncommitted and generated outputs remained under
+`/tmp`, these commands can produce new current-package evidence but cannot
+reconstruct the old output byte-for-byte.
+
+The latest hosted blocking evidence before the local Phase 6–7 tree is GitHub
+Actions run 33278590221 at committed revision
+`354d16bc662f15f65dded911d3c26729bf5804aa`. All seven jobs passed:
+Ubuntu/macOS, Python 3.11/latest stable, exact Git 2.29.0, and both hardening
+modes. That commit changes only Phase 5 completion records from the earlier
+`a2ae7793` executable tree. Scheduled randomized run 33638194991 is the latest
+hosted randomized result observed before final qualification and passed at the
+same revision. Neither result includes the uncommitted Phase 6–7 tree; its own
+pushed-SHA runs are required before release completion.
+
+## Current fresh-agent orchestration simulation
+
+[`ORCHESTRATOR_SIMULATION.md`](ORCHESTRATOR_SIMULATION.md) preserves the
+complete Phase 7 Step 7.3 prompt boundary, fresh-agent report, exact public
+outputs, and coordinating-session checks. On 2026-09-02, the current
+uncommitted tree was snapshotted outside the checkout, installed with CPython
+3.12.3, and paired with a disposable canonical repository. The agent read only
+the installed `SKILL.md` for Clonegrown guidance.
+
+The agent initialized one workspace; spawned, committed, collected, separately
+integrated, released, and discarded three independent workers; exercised a
+ready-state release/claim handoff; then SIGKILLed only Clonegrown's parent
+during a filter-blocked fourth spawn. Recovery returned `spawn-cleaned`, final
+status reported no issues, and every retained result ref remained resolvable.
+No human workflow correction or product/skill defect was observed.
+
+This is one qualitative run, not a timing benchmark or paired comparison. Its
+temporary repository and process IDs are not stable reproduction inputs, and
+it does not establish that Clonegrown reduces agent mistakes or human
+intervention relative to ordinary worktrees.
+
 ## Current deterministic checks
 
 Run one named adversarial case:
@@ -86,10 +142,10 @@ CWS_SUITE_MODE=worktree CWS_RESULTS_PATH=/tmp/clonegrown-hardening-worktree.json
 ```
 
 The consolidated JSON distinguishes `passed`, `skipped`, and `failed`.
-`total` is the number of defined cases, not the number exercised. On Git
-2.43.0, both modes currently report 57 total, 56 passed, one conditional
-reftable skip, and zero failed; a missing optional repository format is never
-counted as a pass.
+`total` is the number of defined cases, not the number exercised. In the
+2026-08-29 local result identified above, Git 2.43.0 reported 57 total, 56
+passed, one conditional reftable skip, and zero failed in each mode; a missing
+optional repository format is never counted as a pass.
 
 Blocking CI disables hardening-matrix fail-fast and configures each mode's
 structured JSON upload with `if: always()` and `if-no-files-found: error`; job
@@ -112,11 +168,13 @@ These six cases pause one configured Git child, send `SIGKILL` only to its
 Python parent, prove the Git child remains alive, let that child finish, and
 track its exit. Before invoking recovery they inspect the durable worker record
 and the relevant staged/final paths, worktree administration directory, task
-branch, ownership ref, candidate ref, or result ref. The cases cover worktree
+branch, ownership ref, transferred candidate object, candidate ref, or result
+ref. The collection-fetch case proves that the child can finish with the exact
+object present and its destination ref still absent, after which recovery
+publishes through an absent-ref compare-and-swap. The cases also cover worktree
 add before its administration path is persisted, clone provisioning,
-collection fetch, published and quarantined worktree repair, and branch
-cleanup. They create only temporary fixtures and retain no generated output in
-the checkout.
+published and quarantined worktree repair, and branch cleanup. They create only
+temporary fixtures and retain no generated output in the checkout.
 
 Run the filter and resource-boundary cases:
 
@@ -199,26 +257,74 @@ python3 tests/campaign/random_kill.py collect --start 0 --count 1 --output /tmp/
 python3 tests/campaign/random_kill.py discard --start 0 --count 1 --output /tmp/clonegrown-kill-discard.json
 ```
 
-Individual failpoint cases append one JSON row per run to
-`CWS_CRASH_RESULTS_PATH` (default `tests/campaign/crash-results.jsonl`, which is
-git-ignored):
+The former one-row `run_crash_case.py` wrapper was removed after its collect
+and discard cases became strict subsets of the deterministic hardening
+matrices above. Its generated JSONL was never preserved historical evidence.
+
+## Current auxiliary-ref policy benchmark
+
+`tests/campaign/auxiliary_ref_benchmark.py` creates a synthetic canonical
+repository carrying all three promised auxiliary namespaces together. Its
+default fixture has 4,096 remote-tracking refs, 256 notes refs, and 256 replace
+refs. Every sample uses a fresh canonical/workspace pair; current clone,
+the retained Step 6.4 candidate simulation, and worktree-control order rotates
+by sample. It measures:
+
+- the current clone implementation, which enumerates exact canonical
+  name/object-ID pairs, supplies those refspecs to one `git fetch --stdin`, and
+  packs the staged clone immediately afterward;
+- a benchmark-only simulation that submits all nonempty namespace refspecs in
+  one fetch and then runs `git pack-refs --all` (intentionally the same policy,
+  retained so the Step 6.5 acceptance rerun used the unchanged harness); and
+- the current worktree control, which shares canonical's refs and must not be
+  packed by Clonegrown.
+
+Each path records spawn time, total and per-class ref counts, loose/packed ref
+counts, and logical/allocated Git-directory storage. The product enumeration
+is the snapshot boundary: a ref added or moved afterward cannot change the
+explicit object-ID refspecs, and an object that cannot be fetched makes spawn
+fail rather than producing a ready record with mismatched counts. A sample is
+valid only if every canonical name retains its resolved object ID, clone
+metadata reports the exact canonical per-class counts, offline remote
+comparison/notes/replace behavior passes with the canonical path temporarily
+unavailable, and packed clone remote/notes/replace refs can be deleted and
+restored. A canonical symbolic remote-tracking ref is checked by name and
+resolved tip; symbolic form is not part of the contract. Timing remains
+observational and never controls the harness exit status.
+
+Run the exact five-sample measurement with output outside the checkout:
 
 ```bash
-CWS_CRASH_RESULTS_PATH=/tmp/clonegrown-crash.jsonl python3 tests/campaign/run_crash_case.py collect collect.after_fetch
-CWS_CRASH_RESULTS_PATH=/tmp/clonegrown-crash.jsonl python3 tests/campaign/run_crash_case.py discard discard.after_delete
+python3 -B tests/campaign/auxiliary_ref_benchmark.py --samples 5 --remote-refs 4096 --notes-refs 256 --replace-refs 256 --output /tmp/clonegrown-auxiliary-refs.json
 ```
 
-That generated file is not part of the preserved historical evidence.
+Run the focused command-shape and real-Git contract matrix:
 
-## Current comparative probes
+```bash
+PYTHONPYCACHEPREFIX=/tmp/clonegrown-auxiliary-pycache python3 -m unittest discover -s tests -p 'test_auxiliary_refs.py' -v
+```
 
-These probes accept an output path, so their results can stay outside the
-checkout:
+The simulation patches only the benchmark process's call boundary; it does
+not alter `clonegrown/` product code. The harness uses the Python standard
+library and existing Git executable, creates no external account or network
+traffic, explicitly excludes every dotenv filename pattern from recursive
+storage accounting, and deletes successful fixtures. The measured policy and
+completed one-time Step 6.5 acceptance decision are recorded in
+`PLAN-ARCHIVE.md`.
+Timing remains descriptive and is not a continuing test or CI gate.
+
+## Current scaling probe
+
+This observational probe accepts an output path, so its result can stay
+outside the checkout:
 
 ```bash
 python3 tests/campaign/scaling_v2.py tiny --workers 4 --output /tmp/clonegrown-scale-tiny.json
-python3 tests/campaign/concurrency_v2.py 16 --output /tmp/clonegrown-concurrency.json
 ```
+
+The old single-sample `concurrency_v2.py` probe was removed after deterministic
+allocation integrity moved to `hardening_suite.py` and timing moved to the
+multi-sample benchmark below.
 
 ## Current spawn concurrency benchmark
 
@@ -243,21 +349,56 @@ manual dispatch. It has no push or pull-request trigger, so benchmark timing is
 not a required correctness check. The raw JSON and summaries appear in each
 job's log; the workflow does not commit generated output.
 
-The following present-day probes are runnable, but each writes a fixed JSON
-file inside `tests/campaign/`:
+The allocation module also pins the narrower canonical-verification boundary:
+each successful clone or worktree spawn performs four full verifications, one
+immediately before each of the allocation, cloning, configuring, and
+publishing lock transactions. Locked reconciliation then permits only the
+serialized workspace-counter change and rematches repository directory and
+marker identity before mutation; the final transaction reuses its verified
+value for ready-state cleanup. The tests replace canonical both between spawn
+transactions and between verification and lock acquisition, and require
+refusal before unsafe publication or allocation:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_allocation.py' -v
+```
+
+The Step 6.2 five-fixture diagnostic recorded in `PLAN-ARCHIVE.md` counted
+exact Git
+argument vectors before and after the change. Its timing distributions are
+observations, not a threshold or a performance guarantee; the benchmark above
+remains the reproducible multi-sample timing tool.
+
+Step 6.3 measured the held and waiting time of every spawn workspace-lock
+phase across five fresh single-spawn and five fresh eight-way fixtures per
+worker mode. Its before/after raw distributions remained under `/tmp`; the
+durable medians and limitations are recorded in `PLAN-ARCHIVE.md`. Timing did
+not
+decide correctness. The unchanged hardening cases below remain the allocation
+and request-index race gates:
+
+```bash
+CWS_SUITE_MODE=clone python3 tests/campaign/hardening_suite.py --one parallel_spawns_unique
+CWS_SUITE_MODE=clone python3 tests/campaign/hardening_suite.py --one same_request_concurrent
+CWS_SUITE_MODE=worktree python3 tests/campaign/hardening_suite.py --one parallel_spawns_unique
+CWS_SUITE_MODE=worktree python3 tests/campaign/hardening_suite.py --one same_request_concurrent
+```
+
+The retained present-day Git garbage-collection comparison is runnable, but it
+writes a fixed JSON file inside `tests/campaign/`:
 
 ```bash
 python3 tests/campaign/gc_compare.py
-python3 tests/campaign/shared_state_compare.py
-python3 tests/campaign/io_fault_probe.py
 ```
 
-Their generated files are, respectively, `tests/campaign/gc-concurrency.json`,
-`tests/campaign/shared-state-comparison.json`, and `tests/campaign/io-fault-result.json`. They
-are current experimental output, not replacements for `research/RESULTS.json`.
-The file-size-limit I/O probe is likewise not evidence of genuine disk or inode
-exhaustion; the blocking targeted cases above carry the supported recovery
-claims.
+Its generated file, `tests/campaign/gc-concurrency.json`, is current
+experimental output, not a replacement for `research/RESULTS.json`. The old
+shared-state probe was removed after the clone/worktree config, stash, remote,
+and branch behaviors were pinned by deterministic hardening. The file-size
+limit I/O probe was removed after deterministic atomic-write,
+quarantine-rename, and partial-deletion tests became the supported recovery
+evidence; neither the old probe nor those targeted injections establish
+support for genuine disk or inode exhaustion.
 
 ## State-machine fuzzer
 

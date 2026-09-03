@@ -32,7 +32,12 @@ class WorktreeWorkerTests(unittest.TestCase):
         return payload
 
     def cli_process(self, cwd: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        full_env = {**os.environ, "PYTHONPATH": str(ROOT), **(env or {})}
+        full_env = {
+            **os.environ,
+            "PYTHONPATH": str(ROOT),
+            "CLONEGROWN_TEST_MODE": "1",
+            **(env or {}),
+        }
         return subprocess.run([sys.executable, "-m", "clonegrown", *args], cwd=cwd, env=full_env,
                               text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -218,7 +223,7 @@ class WorktreeWorkerTests(unittest.TestCase):
         commit(Path(worker["path"]), "w.txt")
         collect(self.ws, worker["id"])
         release(self.ws, worker["id"])
-        p = self.cli_process(self.repo, "discard", str(worker["id"]), env={"CWS_FAILPOINT": "discard.after_delete"})
+        p = self.cli_process(self.repo, "discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_delete"})
         self.assertEqual(p.returncode, 88, p.stderr)
         # The worker directory is gone; before cleanup finishes, someone moves the task branch.
         moved_to = commit(self.repo, "elsewhere.txt")
@@ -300,7 +305,7 @@ class WorktreeWorkerTests(unittest.TestCase):
         release(self.ws, worker["id"])
         run_git(self.repo, "update-ref", "-d", f"refs/heads/{worker['branch']}")  # the branch is gone before discard
         p = self.cli_process(self.repo, "discard", str(worker["id"]), "--force",
-                             env={"CWS_FAILPOINT": "discard.after_delete"})
+                             env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_delete"})
         self.assertEqual(p.returncode, 88, p.stderr)
         foreign = commit(self.repo, "someone-elses.txt")
         run_git(self.repo, "branch", worker["branch"], foreign)  # someone reuses the name meanwhile
@@ -347,7 +352,7 @@ class WorktreeWorkerTests(unittest.TestCase):
         # (a) admin name recycled by a newer worker: nothing of ours is left there.
         first = spawn(self.ws, "HEAD", "first", strong=False, mode="worktree")
         release(self.ws, first["id"])
-        p = self.cli_process(self.repo, "discard", str(first["id"]), "--abandon", env={"CWS_FAILPOINT": "discard.after_delete"})
+        p = self.cli_process(self.repo, "discard", str(first["id"]), "--abandon", env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_delete"})
         self.assertEqual(p.returncode, 88, p.stderr)
         run_git(self.repo, "worktree", "prune")
         second = spawn(self.ws, "HEAD", "second", strong=False, mode="worktree")
@@ -361,7 +366,7 @@ class WorktreeWorkerTests(unittest.TestCase):
         commit(Path(third["path"]), "t.txt")
         collect(self.ws, third["id"])
         release(self.ws, third["id"])
-        p = self.cli_process(self.repo, "discard", str(third["id"]), env={"CWS_FAILPOINT": "discard.after_delete"})
+        p = self.cli_process(self.repo, "discard", str(third["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_delete"})
         self.assertEqual(p.returncode, 88, p.stderr)
         run_git(self.repo, "update-ref", f"refs/heads/{third['branch']}", commit(self.repo, "moved.txt"))
         self.assertIn("worktree-cleanup-conflict", {r.get("action") for r in recover(self.ws) if r.get("id") == third["id"]})
@@ -374,7 +379,7 @@ class WorktreeWorkerTests(unittest.TestCase):
         collect(self.ws, fourth["id"])
         release(self.ws, fourth["id"])
         run_git(self.repo, "update-ref", "-d", f"refs/heads/{fourth['branch']}")
-        p = self.cli_process(self.repo, "discard", str(fourth["id"]), "--force", env={"CWS_FAILPOINT": "discard.after_delete"})
+        p = self.cli_process(self.repo, "discard", str(fourth["id"]), "--force", env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_delete"})
         self.assertEqual(p.returncode, 88, p.stderr)
         theirs = commit(self.repo, "theirs.txt")
         run_git(self.repo, "branch", fourth["branch"], theirs)
@@ -387,7 +392,7 @@ class WorktreeWorkerTests(unittest.TestCase):
 
     def test_crash_after_publish_before_repair_is_recovered(self) -> None:
         p = self.cli_process(self.repo, "spawn", "crash", "--worktree", "--request-id", "c",
-                             env={"CWS_FAILPOINT": "spawn.after_publish"})
+                             env={"CLONEGROWN_TEST_FAILPOINT": "spawn.after_publish"})
         self.assertEqual(p.returncode, 88, p.stderr)
         reports = recover(self.ws)
         self.assertIn("spawn-publish-finished", {r.get("action") for r in reports})
@@ -400,7 +405,7 @@ class WorktreeWorkerTests(unittest.TestCase):
 
     def test_crash_before_publish_leaves_nothing_behind(self) -> None:
         p = self.cli_process(self.repo, "spawn", "crash early", "--worktree", "--request-id", "e",
-                             env={"CWS_FAILPOINT": "spawn.after_checkout"})
+                             env={"CLONEGROWN_TEST_FAILPOINT": "spawn.after_checkout"})
         self.assertEqual(p.returncode, 88, p.stderr)
         recover(self.ws)
         worker = status(self.ws)["workers"][0]
@@ -411,7 +416,7 @@ class WorktreeWorkerTests(unittest.TestCase):
     def test_crash_right_after_worktree_add_leaves_no_admin_dir(self) -> None:
         # Git has created .git/worktrees/<name> but nothing else has happened yet.
         p = self.cli_process(self.repo, "spawn", "crash after add", "--worktree", "--request-id", "a",
-                             env={"CWS_FAILPOINT": "spawn.after_clone"})
+                             env={"CLONEGROWN_TEST_FAILPOINT": "spawn.after_clone"})
         self.assertEqual(p.returncode, 88, p.stderr)
         recover(self.ws)
         worker = status(self.ws)["workers"][0]
@@ -423,7 +428,7 @@ class WorktreeWorkerTests(unittest.TestCase):
         mine = self.root / "users-own-worktree"
         run_git(self.repo, "worktree", "add", "--detach", str(mine))
         p = self.cli_process(self.repo, "spawn", "crash after add", "--worktree", "--request-id", "w",
-                             env={"CWS_FAILPOINT": "spawn.after_worktree_add"})
+                             env={"CLONEGROWN_TEST_FAILPOINT": "spawn.after_worktree_add"})
         self.assertEqual(p.returncode, 88, p.stderr)
         record = json.loads((self.ws / ".cws" / "workers" / "1.json").read_text())
         self.assertIsNone(record.get("worktree_admin"))  # the window: Git created it, nothing recorded it
@@ -445,7 +450,7 @@ class WorktreeWorkerTests(unittest.TestCase):
             with self.subTest(mode=mode, mutation=mutation):
                 request = f"{mode}-{mutation}"
                 args = ["spawn", request, "--request-id", request] + (["--worktree"] if mode == "worktree" else [])
-                p = self.cli_process(self.repo, *args, env={"CWS_FAILPOINT": "spawn.after_publish"})
+                p = self.cli_process(self.repo, *args, env={"CLONEGROWN_TEST_FAILPOINT": "spawn.after_publish"})
                 self.assertEqual(p.returncode, 88, p.stderr)
                 (record,) = [w for w in status(self.ws)["workers"] if w["request_id"] == request]
                 self.assertEqual(record["status"], "publishing")
@@ -497,7 +502,7 @@ class WorktreeWorkerTests(unittest.TestCase):
         sha = commit(Path(worker["path"]), "w.txt")
         collected = collect(self.ws, worker["id"])
         release(self.ws, worker["id"])
-        p = self.cli_process(self.repo, "discard", str(worker["id"]), env={"CWS_FAILPOINT": "discard.after_delete"})
+        p = self.cli_process(self.repo, "discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_delete"})
         self.assertEqual(p.returncode, 88, p.stderr)
         reports = recover(self.ws)
         self.assertIn("discard-finished", {r.get("action") for r in reports})

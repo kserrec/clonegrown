@@ -14,6 +14,7 @@ from unittest.mock import patch
 from clonegrown import cli
 import clonegrown.core as core
 from clonegrown.lifecycle import init_workspace
+from clonegrown.repository import prepared_ref_transaction
 from support import make_repo, run_git
 
 
@@ -70,6 +71,10 @@ os.execv(%r, [%r, *sys.argv[1:]])
             self.assertEqual(core._find_git(), wrapper)
             with patch.object(core, "GIT_BIN", core._find_git()):
                 result = core.git(self.repo, "rev-parse", "--git-dir")
+                head = core.git(self.repo, "rev-parse", "HEAD").stdout.strip()
+                branch = core.git(self.repo, "symbolic-ref", "HEAD").stdout.strip()
+                with prepared_ref_transaction(self.repo, [f"verify {branch} {head}"]):
+                    pass
 
         self.assertEqual(result.stdout.strip(), ".git")
         observed = json.loads(capture.read_text(encoding="utf-8"))
@@ -246,6 +251,46 @@ Path(os.environ["CLONEGROWN_TEST_CAPTURE"]).write_text(
                 core.git(self.repo, "rev-parse", "--verify", "refs/heads/definitely-missing")
         self.assertEqual(caught.exception.operation, "git rev-parse")
         self.assertIn("Needed a single revision", str(caught.exception))
+
+
+class TestHookGateTests(unittest.TestCase):
+    def test_production_mode_ignores_new_hostile_and_legacy_hook_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "must-not-exist"
+            hostile = {
+                "CLONEGROWN_TEST_PAUSEPOINT": "boundary",
+                "CLONEGROWN_TEST_PAUSE_MARKER": str(marker),
+                "CLONEGROWN_TEST_PAUSE_SECONDS": "not-a-number",
+                "CLONEGROWN_TEST_FAILPOINT": "boundary",
+                "CLONEGROWN_TEST_ERRORPOINT": "boundary",
+                "CWS_PAUSEPOINT": "boundary",
+                "CWS_PAUSE_MARKER": str(marker),
+                "CWS_PAUSE_SECONDS": "not-a-number",
+                "CWS_FAILPOINT": "boundary",
+                "CWS_ERRORPOINT": "boundary",
+            }
+            for mode in (None, "", "0", "true", "01"):
+                with self.subTest(mode=mode):
+                    environment = dict(hostile)
+                    if mode is not None:
+                        environment["CLONEGROWN_TEST_MODE"] = mode
+                    with patch.dict(os.environ, environment, clear=True):
+                        core.failpoint("boundary")
+                    self.assertFalse(marker.exists())
+
+    def test_exact_test_mode_gate_enables_only_the_new_hook_names(self) -> None:
+        with patch.dict(os.environ, {
+            "CLONEGROWN_TEST_MODE": "1",
+            "CLONEGROWN_TEST_ERRORPOINT": "boundary",
+        }, clear=True):
+            with self.assertRaisesRegex(core.ClonegrownError, "injected ordinary failure"):
+                core.failpoint("boundary")
+
+        with patch.dict(os.environ, {
+            "CLONEGROWN_TEST_MODE": "1",
+            "CWS_ERRORPOINT": "boundary",
+        }, clear=True):
+            core.failpoint("boundary")
 
 
 class StoredErrorRedactionTests(unittest.TestCase):

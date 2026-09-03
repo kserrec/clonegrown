@@ -211,7 +211,8 @@ class ParentInterruptionTests(unittest.TestCase):
         state = WorkspaceState.load(self.workspace)
         self.assertEqual(before["status"], "collecting")
         self.assertEqual(before["candidate_sha"], sha)
-        self.assertEqual(self.ref(before["candidate_ref"]), sha)
+        self.assertIsNone(self.ref(before["candidate_ref"]))
+        self.assertEqual(run_git(self.repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode, 0)
         self.assertIsNone(self.ref(state.summary_ref(worker["id"])))
         self.assertTrue(Path(worker["path"]).is_dir())
 

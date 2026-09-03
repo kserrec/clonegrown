@@ -111,7 +111,8 @@ class QualificationError(RuntimeError):
 def clean_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
     environment = os.environ.copy()
     for name in tuple(environment):
-        if name.startswith("GIT_") or name.startswith("CWS_"):
+        if (name.startswith("GIT_") or name.startswith("CWS_")
+                or name.startswith("CLONEGROWN_TEST_")):
             environment.pop(name, None)
     environment.pop("CLONEGROWN_GIT", None)
     environment["GIT_TERMINAL_PROMPT"] = "0"
@@ -357,7 +358,10 @@ def run_scenario(root: Path, canonical: Path, profile: Profile, mode: str) -> di
         cli,
         *spawn_arguments,
         check=False,
-        extra_environment={"CWS_FAILPOINT": "spawn.after_publish"},
+        extra_environment={
+            "CLONEGROWN_TEST_MODE": "1",
+            "CLONEGROWN_TEST_FAILPOINT": "spawn.after_publish",
+        },
     )
     require(
         interrupted.returncode == 88,

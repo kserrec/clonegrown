@@ -25,9 +25,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, ParamSpec, TypeVar
 
 # The on-disk protocol name. Workspace control dirs (.cws/), canonical refs
-# (refs/cws/...), marker files (cws-worker.json), the reserved remote name and
-# the CWS_* test variables all carry it. It predates the product name and is
-# kept on purpose: renaming it would break every existing workspace.
+# (refs/cws/...), marker files (cws-worker.json), and the reserved remote name
+# all carry it. It predates the product name and is kept on purpose: renaming
+# it would break every existing workspace.
 PROTOCOL_NAME = "cws"
 
 
@@ -232,7 +232,7 @@ def _git_operation(args: tuple[str | Path, ...]) -> str:
 
 
 class CommandFailure(ClonegrownError):
-    """A failed direct command with a safe public rendering and private diagnostics.
+    """A failed direct command with targeted public redaction and private diagnostics.
 
     ``str(error)`` and ``repr(error)`` contain only the redacted rendering used
     by the CLI and durable worker error fields. The underscore-prefixed values
@@ -291,7 +291,8 @@ def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
         env: dict[str, str] | None = None, timeout: float | None = None,
         input: str | None = None, operation: str | None = None,
-        sensitive: Iterable[str | Path] = ()) -> subprocess.CompletedProcess[str]:
+        sensitive: Iterable[str | Path] = (),
+        pass_fds: Iterable[int] = ()) -> subprocess.CompletedProcess[str]:
     """Run a generic non-Git command with the caller's environment semantics."""
     argv = [str(x) for x in cmd]
     actual_env = env if env is not None else os.environ.copy()
@@ -299,7 +300,8 @@ def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
     try:
         # Paths in Git's output need not be UTF-8; surrogateescape keeps their bytes intact.
         p = subprocess.run(argv, cwd=cwd, text=True, errors="surrogateescape", stdout=subprocess.PIPE,
-                           input=input, stderr=subprocess.PIPE, env=actual_env, timeout=timeout)
+                           input=input, stderr=subprocess.PIPE, env=actual_env, timeout=timeout,
+                           pass_fds=tuple(pass_fds))
     except subprocess.TimeoutExpired as exc:
         raise CommandFailure(
             returncode=None, operation=label, command=argv, cwd=cwd,
@@ -321,11 +323,12 @@ def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
 
 def git(repo: Path, *args: str | Path, check: bool = True,
         timeout: float | None = None, input: str | None = None,
-        sensitive: Iterable[str | Path] = ()) -> subprocess.CompletedProcess[str]:
+        sensitive: Iterable[str | Path] = (),
+        pass_fds: Iterable[int] = ()) -> subprocess.CompletedProcess[str]:
     """Run the configured Git executable with a sanitized, noninteractive environment."""
     return run(
         [GIT_BIN, *args], cwd=repo, check=check, env=clean_git_env(), timeout=timeout,
-        input=input, operation=_git_operation(args), sensitive=sensitive,
+        input=input, operation=_git_operation(args), sensitive=sensitive, pass_fds=pass_fds,
     )
 
 
@@ -428,17 +431,19 @@ def load_json(path: Path) -> dict[str, Any]:
 def failpoint(name: str) -> None:
     """Test-only hook: pause, hard-exit, or raise at an exact lifecycle transition.
 
-    Controlled by CWS_PAUSEPOINT / CWS_FAILPOINT / CWS_ERRORPOINT. A no-op in
-    ordinary use.
+    Controlled by ``CLONEGROWN_TEST_*`` variables only when the explicit test
+    mode gate is exactly ``1``. Production execution ignores every hook value.
     """
-    if os.environ.get("CWS_PAUSEPOINT") == name:
-        marker = os.environ.get("CWS_PAUSE_MARKER")
+    if os.environ.get("CLONEGROWN_TEST_MODE") != "1":
+        return
+    if os.environ.get("CLONEGROWN_TEST_PAUSEPOINT") == name:
+        marker = os.environ.get("CLONEGROWN_TEST_PAUSE_MARKER")
         if marker:
             Path(marker).write_text(name, encoding="utf-8")
-        time.sleep(float(os.environ.get("CWS_PAUSE_SECONDS", "1")))
-    if os.environ.get("CWS_FAILPOINT") == name:
+        time.sleep(float(os.environ.get("CLONEGROWN_TEST_PAUSE_SECONDS", "1")))
+    if os.environ.get("CLONEGROWN_TEST_FAILPOINT") == name:
         os._exit(88)
-    if os.environ.get("CWS_ERRORPOINT") == name:
+    if os.environ.get("CLONEGROWN_TEST_ERRORPOINT") == name:
         raise ClonegrownError(f"injected ordinary failure at {name}")
 
 

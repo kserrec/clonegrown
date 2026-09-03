@@ -1,12 +1,14 @@
 """Ignored content is in discard's custody: a collected worker's ignored paths need their own acknowledgement."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from clonegrown import ClonegrownError, collect, discard, release, spawn
+from clonegrown.state import worker_record_path
 from clonegrown.worker import IGNORED_SAMPLE_LIMIT, inspect_ignored_content
 from support import commit, make_repo, run_cli, run_git, filesystem_accepts_non_utf8_names
 
@@ -155,6 +157,43 @@ class DiscardIgnoredTests(unittest.TestCase):
         self.assertEqual(discard(self.ws, first["id"])["status"], "discarded")
         second = self.collected_worker("clean two")
         self.assertEqual(discard(self.ws, second["id"], discard_ignored=True)["status"], "discarded")
+
+    # --- clone-private refs are a third, clone-only custody question -----------------
+
+    def test_clone_private_stash_needs_its_own_acknowledgement(self) -> None:
+        worker = self.collected_worker("private stash")
+        repo = Path(worker["path"])
+        (repo / "README.md").write_text("unique stash content\n", encoding="utf-8")
+        run_git(repo, "stash", "push", "-m", "unique clone stash")
+        stash_sha = run_git(repo, "rev-parse", "refs/stash").stdout.strip()
+
+        with self.assertRaisesRegex(ClonegrownError, "--discard-private-refs"):
+            discard(self.ws, worker["id"])
+        self.assertEqual(run_git(repo, "rev-parse", "refs/stash").stdout.strip(), stash_sha)
+        self.assertTrue(repo.is_dir())
+
+        discarded = discard(self.ws, worker["id"], discard_private_refs=True)
+        self.assertEqual(discarded["status"], "discarded")
+        self.assertFalse(repo.exists())
+
+    def test_task_branch_result_is_not_reported_as_a_private_ref_change(self) -> None:
+        worker = self.collected_worker("ordinary result")
+        self.assertEqual(discard(self.ws, worker["id"])["status"], "discarded")
+
+    def test_clone_record_without_a_private_ref_baseline_fails_closed(self) -> None:
+        worker = self.collected_worker("legacy private refs")
+        path = worker_record_path(self.ws, worker["id"])
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record.pop("clone_private_refs", None)
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+        with self.assertRaisesRegex(ClonegrownError, "--discard-private-refs.*baseline"):
+            discard(self.ws, worker["id"])
+        self.assertTrue(Path(worker["path"]).is_dir())
+        self.assertEqual(
+            discard(self.ws, worker["id"], discard_private_refs=True)["status"],
+            "discarded",
+        )
 
     def test_cli_flag_and_error_text(self) -> None:
         rc, worker = run_cli(self.repo, "spawn", "cli ignored")

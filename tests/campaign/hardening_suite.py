@@ -15,6 +15,7 @@ GIT_BIN=os.environ.get('CLONEGROWN_GIT','/usr/bin/git')
 
 def run(cmd,cwd=None,check=True,env=None,timeout=45):
     e=os.environ.copy()
+    e['CLONEGROWN_TEST_MODE']='1'
     if env: e.update({str(k):str(v) for k,v in env.items()})
     p=subprocess.run([str(x) for x in cmd],cwd=cwd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=e,timeout=timeout)
     if check and p.returncode:
@@ -146,7 +147,7 @@ def t_collect_idempotent():
     b,c,w,_=mkcase('collect-idem'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r); a=jload(cws('collect',w,str(m['id']))); b2=jload(cws('collect',w,str(m['id']))); assert_true(a['result_sha']==sha==b2['result_sha']); return result(sha=sha)
 
 def t_collect_concurrent_mutation():
-    b,c,w,_=mkcase('collect-race'); m=spawn(w,request='r'); r=Path(m['path']); a=commit(r,'A'); marker=b/'pause'; env={**os.environ,'CWS_PAUSEPOINT':'collect.after_mark','CWS_PAUSE_SECONDS':'1.0','CWS_PAUSE_MARKER':str(marker)}
+    b,c,w,_=mkcase('collect-race'); m=spawn(w,request='r'); r=Path(m['path']); a=commit(r,'A'); marker=b/'pause'; env={**os.environ,'CLONEGROWN_TEST_MODE':'1','CLONEGROWN_TEST_PAUSEPOINT':'collect.after_mark','CLONEGROWN_TEST_PAUSE_SECONDS':'1.0','CLONEGROWN_TEST_PAUSE_MARKER':str(marker)}
     p=subprocess.Popen(['python3',str(CWS),'collect',str(w),str(m['id'])],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env); deadline=time.time()+10
     while time.time()<deadline and not marker.exists(): time.sleep(.01)
     assert_true(marker.exists(),'collect did not reach pause'); bsha=commit(r,'B'); out,err=p.communicate(timeout=20); mm=meta(w,m['id']); assert_true(p.returncode!=0 and mm['status']=='ready' and 'result_sha' not in mm); return result(candidate=a,new_head=bsha,stderr=err.strip()[-120:])
@@ -175,7 +176,7 @@ def t_same_request_concurrent():
     ids={m['id'] for m in ms}; assert_true(ids=={1}); assert_true(len(list((w/'.cws'/'workers').glob('*.json')))==1); return result(ids=list(ids))
 
 def t_base_pin_survives_gc():
-    b,c,w,_=mkcase('base-pin'); git(c,'checkout','-b','temp'); sha=commit(c,'unique','unique'); git(c,'checkout','main'); marker=b/'pause'; env={**os.environ,'CWS_PAUSEPOINT':'spawn.after_allocated','CWS_PAUSE_SECONDS':'1.0','CWS_PAUSE_MARKER':str(marker)}
+    b,c,w,_=mkcase('base-pin'); git(c,'checkout','-b','temp'); sha=commit(c,'unique','unique'); git(c,'checkout','main'); marker=b/'pause'; env={**os.environ,'CLONEGROWN_TEST_MODE':'1','CLONEGROWN_TEST_PAUSEPOINT':'spawn.after_allocated','CLONEGROWN_TEST_PAUSE_SECONDS':'1.0','CLONEGROWN_TEST_PAUSE_MARKER':str(marker)}
     p=subprocess.Popen(['python3',str(CWS),'spawn',str(w),'--task','gc','--base','temp','--request-id','gc',ISOLATION_FLAG],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env); deadline=time.time()+10
     while time.time()<deadline and not marker.exists(): time.sleep(.01)
     assert_true(marker.exists()); git(c,'branch','-D','temp'); git(c,'reflog','expire','--expire=now','--all'); git(c,'gc','--prune=now'); out,err=p.communicate(timeout=30); assert_true(p.returncode==0,err); m=json.loads(out); assert_true(m['base_sha']==sha and git(Path(m['path']),'rev-parse','HEAD').stdout.strip()==sha); return result(base=sha)
@@ -208,13 +209,13 @@ def t_init_crash_matrix():
     out=[]
     for i,fp in enumerate(('init.after_state','init.after_marker')):
         b=ROOT/f'init-crash-{i}'; shutil.rmtree(b,ignore_errors=True); b.mkdir(parents=True); c=b/'canon'; git(b,'init','-b','main',c); git(c,'config','user.name','U'); git(c,'config','user.email','u@e'); (c/'a').write_text('a'); git(c,'add','.'); git(c,'commit','-m','i'); w=b/'ws'
-        p=cws('init',c,w,env={'CWS_FAILPOINT':fp},check=False); assert_true(p.returncode==88); st=jload(cws('init',c,w)); assert_true(st['status']=='ready'); out.append(fp)
+        p=cws('init',c,w,env={'CLONEGROWN_TEST_FAILPOINT':fp},check=False); assert_true(p.returncode==88); st=jload(cws('init',c,w)); assert_true(st['status']=='ready'); out.append(fp)
     return result(failpoints=out)
 
 def t_spawn_crash_matrix():
     fps=('spawn.after_allocated',)+(('spawn.after_worktree_add',) if WORKTREE else ())+('spawn.after_clone','spawn.after_checkout','spawn.after_publish')+(('spawn.after_repair',) if WORKTREE else ())+('spawn.after_ready',); actions=[]
     for i,fp in enumerate(fps):
-        b,c,w,_=mkcase(f'spawn-crash-{i}'); p=cws('spawn',w,'--task','x','--base','main','--request-id','r',ISOLATION_FLAG,env={'CWS_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,1)
+        b,c,w,_=mkcase(f'spawn-crash-{i}'); p=cws('spawn',w,'--task','x','--base','main','--request-id','r',ISOLATION_FLAG,env={'CLONEGROWN_TEST_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,1)
         if fp in ('spawn.after_publish','spawn.after_repair','spawn.after_ready'): assert_true(mm['status']=='ready')
         else:
             assert_true(mm['status']=='spawn_failed'); m2=spawn(w,task='x',request='r'); assert_true(m2['status']=='ready' and m2['id']>1)
@@ -224,22 +225,22 @@ def t_spawn_crash_matrix():
 def t_collect_crash_matrix():
     fps=('collect.after_mark','collect.before_fetch','collect.after_fetch','collect.after_verify','collect.after_worker_recheck','collect.after_summary','collect.after_metadata'); rows=[]
     for i,fp in enumerate(fps):
-        b,c,w,_=mkcase(f'collect-crash-{i}'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r); p=cws('collect',w,str(m['id']),env={'CWS_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,m['id'])
+        b,c,w,_=mkcase(f'collect-crash-{i}'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r); p=cws('collect',w,str(m['id']),env={'CLONEGROWN_TEST_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,m['id'])
         if mm['status']=='ready': cws('collect',w,str(m['id'])); mm=meta(w,m['id'])
         assert_true(mm['status']=='collected' and mm['result_sha']==sha); rows.append([fp,rep])
     return result(cases=rows)
 
 def t_lease_crash_matrix():
     b,c,w,_=mkcase('lease-crash'); m=spawn(w,request='r')
-    released=cws('release',w,str(m['id']),env={'CWS_FAILPOINT':'lease.after_release'},check=False); assert_true(released.returncode==88); after_release=meta(w,m['id']); assert_true(after_release['status']=='ready' and after_release['lease']=='released' and after_release.get('lease_released') is not None)
-    release_reports=jload(cws('recover',w)); claimed=cws('claim',w,str(m['id']),env={'CWS_FAILPOINT':'lease.after_claim'},check=False); assert_true(claimed.returncode==88); after_claim=meta(w,m['id']); assert_true(after_claim['status']=='ready' and after_claim['lease']=='active' and 'lease_released' not in after_claim)
+    released=cws('release',w,str(m['id']),env={'CLONEGROWN_TEST_FAILPOINT':'lease.after_release'},check=False); assert_true(released.returncode==88); after_release=meta(w,m['id']); assert_true(after_release['status']=='ready' and after_release['lease']=='released' and after_release.get('lease_released') is not None)
+    release_reports=jload(cws('recover',w)); claimed=cws('claim',w,str(m['id']),env={'CLONEGROWN_TEST_FAILPOINT':'lease.after_claim'},check=False); assert_true(claimed.returncode==88); after_claim=meta(w,m['id']); assert_true(after_claim['status']=='ready' and after_claim['lease']=='active' and 'lease_released' not in after_claim)
     claim_reports=jload(cws('recover',w)); blocked=cws('discard',w,str(m['id']),'--abandon',check=False); assert_true(blocked.returncode!=0 and 'leased' in blocked.stderr and Path(m['path']).exists()); cws('release',w,str(m['id'])); gone=jload(cws('discard',w,str(m['id']),'--abandon')); assert_true(gone['status']=='abandoned' and not Path(m['path']).exists() and jload(cws('status',w))['issues']==[])
     return result(release_reports=release_reports,claim_reports=claim_reports,final=gone['status'])
 
 def t_discard_crash_matrix():
     fps=('discard.after_mark','discard.before_delete','discard.after_quarantine','discard.after_recheck','discard.after_delete')+(('discard.after_admin_cleanup','discard.after_branch_cleanup') if WORKTREE else ())+('discard.after_metadata',); rows=[]
     for i,fp in enumerate(fps):
-        b,c,w,_=mkcase(f'discard-crash-{i}'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r); cws('collect',w,str(m['id'])); cws('release',w,str(m['id'])); p=cws('discard',w,str(m['id']),env={'CWS_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,m['id']);
+        b,c,w,_=mkcase(f'discard-crash-{i}'); m=spawn(w,request='r'); r=Path(m['path']); sha=commit(r); cws('collect',w,str(m['id'])); cws('release',w,str(m['id'])); p=cws('discard',w,str(m['id']),env={'CLONEGROWN_TEST_FAILPOINT':fp},check=False); assert_true(p.returncode==88); rep=jload(cws('recover',w)); mm=meta(w,m['id']);
         if mm['status']=='collected': cws('discard',w,str(m['id'])); mm=meta(w,m['id'])
         assert_true(mm['status']=='discarded' and not r.exists()); assert_true(git(c,'cat-file','-e',sha).returncode==0); rows.append([fp,rep])
     return result(cases=rows)
@@ -304,7 +305,7 @@ def t_marker_tamper_detection():
     b,c,w,_=mkcase('marker-tamper'); m=spawn(w,request='r'); r=Path(m['path']); wm=gitdir(r)/'cws-worker.json'; data=json.loads(wm.read_text()); data['worker_token']='tampered'; wm.write_text(json.dumps(data)); p=cws('collect',w,str(m['id']),check=False); assert_true(p.returncode!=0 and 'marker mismatch' in p.stderr); return result()
 
 def t_canonical_marker_loss_detection():
-    b,c,w,_=mkcase('canon-marker-loss'); st=state(w); (c/'.git'/'cws'/f"{st['workspace_id']}.json").unlink(); p=cws('status',w,check=False); assert_true(p.returncode!=0 and 'cannot read metadata' in p.stderr); return result()
+    b,c,w,_=mkcase('canon-marker-loss'); st=state(w); (c/'.git'/'cws'/f"{st['workspace_id']}.json").unlink(); p=cws('status',w,check=False); assert_true(p.returncode!=0 and 'canonical identity marker is missing' in p.stderr); return result()
 
 # ----- Metadata / boundary red team -----
 def t_metadata_path_tamper_guards():
@@ -358,9 +359,9 @@ def t_remote_tracking_notes_and_replace_refs():
 
 def t_normal_failure_rollbacks():
     b,c,w,_=mkcase('ordinary-errors')
-    p=cws('spawn',w,'--task','spawn-error','--base','main','--request-id','spawn-error',ISOLATION_FLAG,env={'CWS_ERRORPOINT':'spawn.after_publish'},check=False)
+    p=cws('spawn',w,'--task','spawn-error','--base','main','--request-id','spawn-error',ISOLATION_FLAG,env={'CLONEGROWN_TEST_ERRORPOINT':'spawn.after_publish'},check=False)
     assert_true(p.returncode!=0); rep=jload(cws('recover',w)); mm=meta(w,1); assert_true(mm['status']=='ready' and Path(mm['path']).exists())
-    sha=commit(Path(mm['path']),'collectable'); p2=cws('collect',w,'1',env={'CWS_ERRORPOINT':'collect.after_fetch'},check=False)
+    sha=commit(Path(mm['path']),'collectable'); p2=cws('collect',w,'1',env={'CLONEGROWN_TEST_ERRORPOINT':'collect.after_fetch'},check=False)
     assert_true(p2.returncode!=0 and meta(w,1)['status']=='ready'); got=jload(cws('collect',w,'1')); assert_true(got['result_sha']==sha)
     return result(recovery=rep,result=sha)
 
@@ -402,7 +403,7 @@ def t_control_and_lock_symlink_rejected():
 
 def t_late_commit_after_crashed_discard_survives():
     b,c,w,_=mkcase('late-discard'); m=spawn(w,request='r'); r=Path(m['path']); first=commit(r,'first')
-    cws('collect',w,str(m['id'])); cws('release',w,str(m['id'])); p=cws('discard',w,str(m['id']),env={'CWS_FAILPOINT':'discard.before_delete'},check=False); assert_true(p.returncode==88)
+    cws('collect',w,str(m['id'])); cws('release',w,str(m['id'])); p=cws('discard',w,str(m['id']),env={'CLONEGROWN_TEST_FAILPOINT':'discard.before_delete'},check=False); assert_true(p.returncode==88)
     late=commit(r,'late'); reports=jload(cws('recover',w)); assert_true(r.exists()); mm=meta(w,m['id']); assert_true(mm['status']=='collected')
     s=jload(cws('status',w)); assert_true(s['workers'][0].get('drift')=='changed-after-collection')
     return result(first=first,late=late,reports=reports)

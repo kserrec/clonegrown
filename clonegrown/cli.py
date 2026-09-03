@@ -30,6 +30,7 @@ _BOOKKEEPING_KEYS = {
     "schema", "next_id", "canonical_git_dir",
     "owner_pid", "owner_start", "heartbeat", "stage_root",
     "worktree_admin", "branch_cleanup_sha", "pending_spawn_details",
+    "clone_private_refs",
     "candidate_sha", "candidate_ref", "collect_started", "collected_snapshot", "collection_race",
     "discard_intent", "discard_previous", "discard_started", "quarantine_snapshot",
 }
@@ -102,9 +103,9 @@ def _resolve_operation_input(operation: str, resolver: Callable[[], _T]) -> _T:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="clonegrown",
-        description="Per-task Git working directories for coding agents: spawn a worker, "
-                    "work in it, preserve its committed result, then discard it. "
-                    "Recover reconciles recorded interruption boundaries.",
+        description="Per-task Git working directories for coding agents. Collection preserves a commit "
+                    "under a canonical ref; integration into a user branch is separate. Published workers "
+                    "hold a cooperative lease until release. Recover reconciles represented durable checkpoints.",
     )
     parser.add_argument("--version", action="version", version=f"clonegrown {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -123,20 +124,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base", default="HEAD", help="base ref or commit (default: HEAD)")
     isolation = p.add_mutually_exclusive_group()
     isolation.add_argument("--strong", action="store_true",
-                           help="clone with no object files shared with canonical")
+                           help="clone with physically separate object files at spawn (not an OS sandbox)")
     isolation.add_argument("--worktree", action="store_true",
-                           help="linked worktree sharing canonical's Git internals (fastest, least isolated)")
-    p.add_argument("--request-id", help="stable id that makes matching spawn retries return one allocation")
+                           help="linked worktree sharing canonical refs, config, stash, hooks, and objects")
+    p.add_argument(
+        "--request-id",
+        help="stable id for matching retries; abandoned or spawn_failed outcomes may allocate anew",
+    )
     p.add_argument("--wait-seconds", type=float, default=120.0,
                    help="how long to wait for an in-flight spawn with the same request id")
 
-    p = sub.add_parser("collect", help="preserve a worker's clean committed tip under a canonical ref")
+    p = sub.add_parser(
+        "collect",
+        help="preserve a clean committed tip under a canonical ref; do not update a user branch",
+        description="Preserve a worker's clean committed tip under a canonical ref. Collection does not "
+                    "merge, rebase, cherry-pick, or update a user branch; a collected worker is one-shot.",
+    )
     p.add_argument("id", type=int, help="worker id")
     workspace_option(p)
     p.add_argument("--allow-rewrite", action="store_true",
                    help="accept a result that does not descend from the worker's base")
 
-    p = sub.add_parser("release", help="release a worker's cooperative work lease so it can be discarded")
+    p = sub.add_parser(
+        "release",
+        help="record that every writer has stopped and release the lease for discard",
+        description="Release the cooperative work lease only after every process that can write to the "
+                    "worker has stopped. Clonegrown records this assertion but cannot verify it.",
+    )
     p.add_argument("id", type=int, help="worker id")
     workspace_option(p)
 
@@ -146,11 +160,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "discard",
-        help="delete a released worker",
-        description="Delete a worker whose lease has been released. A collected worker needs --force for "
-                    "changes after collection and --discard-ignored for Git-ignored paths; an uncollected "
-                    "worker needs --abandon. The lease is cooperative, not enforced; read the README safety "
-                    "boundary before cleanup.",
+        help="delete an authorized worker through authenticated quarantine",
+        description="Delete a published worker whose lease has been released. A failed unpublished spawn has "
+                    "no releasable lease but still needs --abandon. A collected worker needs --force for "
+                    "changes after collection, --discard-ignored for Git-ignored paths, and "
+                    "--discard-private-refs for changed clone-private refs; another uncollected worker also "
+                    "needs --abandon. The lease is cooperative, not enforced; read the README safety boundary "
+                    "before cleanup.",
     )
     p.add_argument("id", type=int, help="worker id")
     workspace_option(p)
@@ -159,11 +175,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="discard detected post-collection changes intentionally")
     p.add_argument("--discard-ignored", action="store_true",
                    help="discard a collected worker's Git-ignored paths intentionally")
+    p.add_argument("--discard-private-refs", action="store_true",
+                   help="discard a collected clone's changed private refs intentionally")
 
-    p = sub.add_parser("recover", help="reconcile interrupted operations represented in durable state")
+    p = sub.add_parser(
+        "recover",
+        help="reconcile represented checkpoints; may finish recorded deletion but never infer lease release",
+        description="Reconcile lifecycle checkpoints represented in durable state. Recovery preserves a "
+                    "diverged interrupted-spawn worker, may finish an already-recorded quarantine deletion, "
+                    "and never infers lease release from a dead process.",
+    )
     workspace_option(p)
 
-    p = sub.add_parser("status", help="show workspace and worker state")
+    p = sub.add_parser(
+        "status",
+        help="audit documented invariants without repairing worker state or Git content",
+        description="Audit Clonegrown's documented workspace and worker invariants without repairing records, "
+                    "refs, worker content, or Git indexes. Acquiring the workspace lock can recreate its "
+                    "missing control file. This is not a general filesystem-integrity or security scan.",
+    )
     workspace_option(p)
     return parser
 
@@ -199,7 +229,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "discard":
             workspace = _resolve_operation_input("discard", lambda: resolve_workspace(args.workspace))
             result = discard(workspace, args.id, args.abandon, args.force,
-                             args.discard_ignored)
+                             args.discard_ignored, args.discard_private_refs)
         elif args.command == "recover":
             workspace = _resolve_operation_input("recover", lambda: resolve_workspace(args.workspace))
             result = recover(workspace)

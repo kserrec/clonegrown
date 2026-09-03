@@ -41,7 +41,7 @@ class WorkerRecordValidationTests(unittest.TestCase):
     # --- fixtures ------------------------------------------------------------
 
     def owner(self) -> dict[str, Any]:
-        return {"owner_pid": os.getpid(), "owner_start": pid_fingerprint(os.getpid()), "heartbeat": 1.0}
+        return {"owner_pid": os.getpid(), "owner_start": pid_fingerprint(os.getpid())}
 
     def result_fields(self) -> dict[str, Any]:
         return {
@@ -56,7 +56,7 @@ class WorkerRecordValidationTests(unittest.TestCase):
         """A record the lifecycle could have written for ``target``, derived from the real ready record."""
         base = dict(self.ready)
         unpublished = {key: None for key in ("ready", "source_remote", "alternates_detached", "copied_local_config",
-                                              "copied_sparse_checkout", "copied_auxiliary_refs",
+                                              "copied_sparse_checkout", "copied_auxiliary_refs", "clone_private_refs",
                                               "compatibility_warnings")}
         if target in WorkerStatus.SPAWNING:
             base.update(unpublished, status=target, **self.owner())
@@ -110,7 +110,7 @@ class WorkerRecordValidationTests(unittest.TestCase):
             WorkerStatus.COLLECTING: ["ready", "collect_started", "candidate_sha", "candidate_ref"],
             WorkerStatus.COLLECTED: ["ready", "collected", "result_sha", "result_ref"],
             WorkerStatus.DISCARDING: ["discard_intent", "discard_previous", "discard_started", "result_sha"],
-            WorkerStatus.DISCARDED: ["discarded"],
+            WorkerStatus.DISCARDED: ["ready", "collected", "result_sha", "result_ref", "discarded"],
             WorkerStatus.ABANDONED: ["discarded"],
             WorkerStatus.SPAWN_FAILED: ["failed", "error"],
             WorkerStatus.BROKEN: ["error"],
@@ -180,6 +180,7 @@ class WorkerRecordValidationTests(unittest.TestCase):
             ("ready", {"error": ["not", "text"]}, "error is malformed"),
             ("ready", {"copied_local_config": "core.hooksPath"}, "copied_local_config is malformed"),
             ("ready", {"copied_auxiliary_refs": {"refs/notes": "many"}}, "copied_auxiliary_refs is malformed"),
+            ("ready", {"clone_private_refs": {"refs/stash": 7}}, "clone_private_refs is malformed"),
             ("ready", {"compatibility_warnings": [1]}, "compatibility_warnings is malformed"),
             ("ready", {"worktree_admin": elsewhere}, "only valid for a worktree worker"),
             ("ready", {"path": str(Path(self.ready["path"]).parent / "x" / ".." / Path(self.ready["path"]).name)},
@@ -209,7 +210,7 @@ class WorkerRecordValidationTests(unittest.TestCase):
             ("discarding", {"discard_previous": "ready"}, "only a collected worker can be discarded"),
             ("discarding", {"ready": None}, "must record when it became ready"),
             ("abandoned", {"ready": None}, "must record when it became ready"),
-            ("discarded", {"ready": None}, "must record when it became ready"),
+            ("discarded", {"ready": None}, "missing ready"),
             ("discarded", {"discard_intent": "abandoned"}, "carries an abandon intent"),
             ("abandoned", {"discard_intent": "discarded", "discard_previous": "collected"}, "carries a discard intent"),
             ("broken", {"quarantine_path": elsewhere}, "quarantine path does not match its identity"),
@@ -282,12 +283,22 @@ class WorkerRecordValidationTests(unittest.TestCase):
         data = self.valid_record("collected")
         del data["mode"]
         data["future_field"] = {"nested": [1, 2]}
+        data["heartbeat"] = 1.0
         record = self.validate(data)
         self.assertEqual(record.mode, "clone")
         self.assertFalse(record.is_worktree)
-        self.assertEqual(record.extra, {"future_field": {"nested": [1, 2]}})
+        self.assertEqual(record.extra, {
+            "future_field": {"nested": [1, 2]},
+            "heartbeat": 1.0,
+        })
         self.assertEqual(record.to_json()["future_field"], {"nested": [1, 2]})
+        self.assertEqual(record.to_json()["heartbeat"], 1.0)
         self.assertEqual(record.to_json()["mode"], "clone")
+
+    def test_current_operation_ownership_does_not_write_a_heartbeat(self) -> None:
+        record = self.validate(self.valid_record("ready"))
+        record.take_ownership(WorkerStatus.COLLECTING)
+        self.assertNotIn("heartbeat", record.to_json())
 
     # --- the validator runs before any path or ref is used ---------------------
 

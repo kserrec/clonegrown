@@ -22,6 +22,7 @@ from typing import Any
 
 import os
 import re
+import stat
 
 from .core import (
     ClonegrownError, file_lock, git, operation_boundary, operation_checkpoint, process_alive,
@@ -30,7 +31,10 @@ from .core import (
 from .audit import (
     NamespaceRefs, _PIN_DROPPED, audit_lock_files, audit_namespace, audit_request_indexes, audit_stages, audit_worker,
 )
-from .repository import delete_ref, is_symbolic_ref, ref_points_at, resolve_ref, write_ref
+from .repository import (
+    absent_marker, delete_ref, is_symbolic_ref, ref_points_at, resolve_ref,
+    result_ref_transaction, write_ref,
+)
 from .state import WorkerRecord, WorkerStatus, WorkspaceState, worker_lock_path, worker_slot, workspace_lock, ws_paths
 from .worker import (
     adoptable_quarantine, delete_through_quarantine, delete_verified, describe_divergence, finish_deletion,
@@ -69,7 +73,7 @@ def _orphan_slots(ws: Path, state: WorkspaceState, known_ids: set[int]) -> list[
     out = []
     for child in ws.iterdir():
         wid = _worker_id_of(child.name)
-        if wid is not None and child.is_dir() and wid != state.canonical_slot and wid not in known_ids:
+        if wid is not None and wid != state.canonical_slot and wid not in known_ids:
             out.append((wid, child))
     return out
 
@@ -183,10 +187,10 @@ class _Recovery:
     def _recover_spawn(self) -> None:
         worker = self.worker
         repo = worker.repo
-        if repo.exists():
+        if os.path.lexists(repo):
             self._recover_published_spawn()
             return
-        if self.slot.exists():
+        if os.path.lexists(self.slot):
             self.mark_broken("allocated worker slot is occupied by an unrecognized path", "spawn-broken-slot-collision")
             return
         # Never published: only the stage, the admin directory, and the task branch this
@@ -246,28 +250,55 @@ class _Recovery:
     def _recover_collecting(self) -> None:
         worker = self.worker
         candidate, ref = worker.candidate_sha, worker.candidate_ref
-        can_finish = bool(candidate) and ref_points_at(self.canonical, ref, candidate)
+        # The collecting checkpoint precedes the fetch. If the parent dies
+        # after the Git child transfers the object but before the create-only
+        # ref transaction, recovery may finish that represented publication.
+        # A symbolic or direct conflict is never overwritten.
+        if candidate and ref and not ref_points_at(self.canonical, ref, candidate):
+            object_present = git(
+                self.canonical, "cat-file", "-e", f"{candidate}^{{commit}}", check=False,
+            ).returncode == 0
+            if object_present and not is_symbolic_ref(self.canonical, ref):
+                write_ref(
+                    self.canonical, ref, candidate, absent_marker(candidate), check=False,
+                )
+        can_finish = (
+            bool(candidate)
+            and not is_symbolic_ref(self.canonical, str(ref))
+            and ref_points_at(self.canonical, ref, candidate)
+        )
         if can_finish:
             try:
                 snap = snapshot_worker(self.state, worker, require_ancestry=not worker.allow_rewrite)
                 can_finish = snap.head == candidate
             except Exception:
                 can_finish = False
-        if can_finish and is_symbolic_ref(self.canonical, self.state.summary_ref(self.worker_id)):
-            can_finish = False  # never write through a symbolic ref in our namespace
         if can_finish:
-            write_ref(self.canonical, self.state.summary_ref(self.worker_id), str(candidate))
-            worker.status = WorkerStatus.COLLECTED
-            worker.result_sha = candidate
-            worker.result_ref = ref
-            worker.collected = time.time()
-            self.report("collect-finished")
-        else:
-            worker.status = WorkerStatus.READY
-            worker.collection_recovered = time.time()
-            self.report("collect-reset-ready")
+            entered = False
+            try:
+                with result_ref_transaction(
+                    self.canonical, str(ref), self.state.summary_ref(self.worker_id),
+                    str(candidate), update_summary=True,
+                ):
+                    entered = True
+                    worker.status = WorkerStatus.COLLECTED
+                    worker.result_sha = candidate
+                    worker.result_ref = ref
+                    worker.collected = time.time()
+                    worker.clear_candidate()
+                    self.save()
+            except ClonegrownError:
+                if entered:
+                    raise
+                can_finish = False
+            else:
+                self.report("collect-finished")
+                return
+        worker.status = WorkerStatus.READY
+        worker.collection_recovered = time.time()
         worker.clear_candidate()
         self.save()
+        self.report("collect-reset-ready")
 
     def _recover_discarding(self) -> None:
         worker = self.worker
@@ -279,7 +310,7 @@ class _Recovery:
             # Something that is not this worker occupies its derived quarantine path. Never
             # touch it; withdraw a normal discard whose worker is still in place, otherwise
             # leave the record recoverable and say exactly what blocks it.
-            if self.slot.exists() and intent != WorkerStatus.ABANDONED:
+            if os.path.lexists(self.slot) and intent != WorkerStatus.ABANDONED:
                 self._withdraw_discard()
             else:
                 worker.error = public_exception_text(exc)[:1000]
@@ -293,7 +324,7 @@ class _Recovery:
             worker.quarantine_started = worker.quarantine_started or time.time()
             self.save()
         intended_only = (worker.quarantine_path is not None and not os.path.lexists(worker.quarantine_path)
-                         and self.slot.exists())
+                         and os.path.lexists(self.slot))
         if intended_only and intent != WorkerStatus.ABANDONED:
             # Intent was recorded but nothing moved. A normal discard is simply withdrawn; the
             # caller retries it against the worker as it is now.
@@ -302,7 +333,7 @@ class _Recovery:
             # An interrupted or refused deletion left the worker in (or on its way to) quarantine:
             # resume it against the fingerprint recorded before the rename. Never label residue gone.
             self._resume_deletion(finished, "quarantine-preserved")
-        elif not self.slot.exists():
+        elif not os.path.lexists(self.slot):
             self._resume_deletion(finished, "discard-cleanup-incomplete")
         elif intent == WorkerStatus.ABANDONED and worker.is_leased:
             # Only an explicit release authorizes deletion; a dead owner does not.
@@ -333,7 +364,7 @@ class _Recovery:
                 worker.quarantine_error = reason[:1000]
                 self.save()
                 self.report(preserved)
-            elif self.slot.exists():
+            elif os.path.lexists(self.slot):
                 self.mark_broken(f"could not safely finish deletion: {reason}", "discard-marked-broken")
             else:
                 # The content is gone; only the stage or canonical cleanup remains. Keep the
@@ -360,22 +391,49 @@ class _Recovery:
 
     def _recover_collected(self) -> None:
         worker = self.worker
+        if os.path.lexists(self.slot):
+            try:
+                mode = os.lstat(self.slot).st_mode
+            except OSError:
+                mode = 0
+            if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                self.report("collected-worker-path-invalid")
+                return
         if not ref_points_at(self.canonical, worker.result_ref, worker.result_sha):
             self.mark_broken("preserved result ref missing", "collected-marked-broken")
             return
+        self._repair_summary()
+
+    def _repair_summary(self) -> None:
+        """Repair only the mutable summary pointer from a verified immutable result."""
+        worker = self.worker
         summary = self.state.summary_ref(self.worker_id)
         if is_symbolic_ref(self.canonical, summary):
             self.report("summary-ref-symbolic-left")
             return
         current = resolve_ref(self.canonical, summary)
         if current != worker.result_sha:
-            # Compare-and-swap against what was observed; the result ref above is the authority.
-            expected_old = current or ("0" * len(str(worker.result_sha)))
-            write_ref(self.canonical, summary, str(worker.result_sha), expected_old)
+            try:
+                with result_ref_transaction(
+                    self.canonical, str(worker.result_ref), summary,
+                    str(worker.result_sha), update_summary=True,
+                ):
+                    pass
+            except ClonegrownError:
+                if is_symbolic_ref(self.canonical, summary):
+                    self.report("summary-ref-symbolic-left")
+                else:
+                    self.report("summary-ref-conflict-left")
+                return
             self.report("summary-ref-repaired")
 
     def _recover_tombstone(self) -> None:
         worker = self.worker
+        if worker.status == WorkerStatus.DISCARDED:
+            if not ref_points_at(self.canonical, worker.result_ref, worker.result_sha):
+                self.report("discarded-result-missing")
+            else:
+                self._repair_summary()
         if worker.stage_root and os.path.lexists(worker.stage_root):
             try:
                 delete_verified(Path(str(worker.stage_root)), "worker stage")
@@ -384,12 +442,12 @@ class _Recovery:
         # A terminal record owns no directory. Whatever occupies its slot now was put there
         # after the deletion was proved (or after a failed spawn); it is reported, never deleted
         # without a new discard.
-        if worker.status in WorkerStatus.TOMBSTONE and self.slot.exists():
+        if worker.status in WorkerStatus.TOMBSTONE and os.path.lexists(self.slot):
             self.report("tombstone-path-left")
         found = unrecorded_quarantine(self.ws, worker)
         if found is not None:
             self.report("tombstone-quarantine-left")
-        if not self.slot.exists() and (worker.worktree_admin or worker.branch_cleanup_sha):
+        if not os.path.lexists(self.slot) and (worker.worktree_admin or worker.branch_cleanup_sha):
             # Retained evidence means an earlier cleanup did not finish; try again, never by name alone.
             self.forget_worktree()
             worker.save(self.ws)
@@ -400,9 +458,13 @@ class _Recovery:
 def recover(ws_path: Path) -> list[Report]:
     """Reconcile the lifecycle checkpoints represented by current worker records.
 
-    Nothing published is deleted here; a diverged published spawn is
-    preserved as ``broken`` and a quarantine is resumed only against its
-    recorded fingerprint. See the module contract.
+    Interrupted-spawn recovery never deletes a published worker: divergence is
+    preserved as ``broken``. An interrupted collection can create its absent
+    result ref from an available exact candidate only through compare-and-swap,
+    and accepts it only after worker validation. For a recorded deletion,
+    recovery can withdraw an untouched normal discard, proceed with a released
+    abandonment, or resume quarantined and durably authorized deletion. It
+    never infers lease release from a dead process. See the module contract.
     """
     ws = ws_path.resolve()
     reports: list[Report] = []
@@ -551,7 +613,11 @@ def recover(ws_path: Path) -> list[Report]:
 
 
 def status(ws_path: Path) -> dict[str, Any]:
-    """Describe the workspace, every worker record, and any inconsistencies found."""
+    """Audit documented invariants without repairing records, refs, workers, or Git indexes.
+
+    Acquiring the workspace advisory lock can recreate its missing control
+    file. See the architecture's command-output contract.
+    """
     ws = ws_path.resolve()
     with workspace_lock(ws):
         state = WorkspaceState.load(ws)
@@ -575,8 +641,12 @@ def status(ws_path: Path) -> dict[str, Any]:
                 continue
             valid[worker_id] = worker
             item = worker.to_json()
-            issues.extend(audit_worker(ws, state, canonical, worker, refs))
-            if worker.status in {WorkerStatus.READY, WorkerStatus.COLLECTED} and worker.repo.exists():
+            worker_issues = audit_worker(ws, state, canonical, worker, refs)
+            issues.extend(worker_issues)
+            path_issue = any(item["issue"] in {"worker-repository-missing", "worker-authentication-failed"}
+                             for item in worker_issues)
+            if (worker.status in {WorkerStatus.READY, WorkerStatus.COLLECTED}
+                    and not path_issue and os.path.lexists(worker.repo)):
                 try:
                     snap = snapshot_worker(state, worker, require_ancestry=not worker.allow_rewrite)
                     if worker.status == WorkerStatus.COLLECTED and snap.head != worker.result_sha:

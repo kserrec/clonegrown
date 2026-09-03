@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from clonegrown import cli
+from clonegrown.state import worker_record_path
 from support import commit, git_out, make_repo, run_cli
 
 PRIVATE_FIELDS = {"canonical_token", "worker_token", "params_hash", "owner_pid", "owner_start", "stage_root"}
@@ -29,6 +33,47 @@ class ClonegrownCliTests(unittest.TestCase):
         elif isinstance(value, list):
             for item in value:
                 self.assert_no_private_fields(item)
+
+    def help_text(self, *args: str) -> str:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            cli.build_parser().parse_args([*args, "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        return " ".join(output.getvalue().split())
+
+    def test_help_exposes_lifecycle_custody_and_isolation_boundaries(self) -> None:
+        top = self.help_text()
+        self.assertIn("Collection preserves a commit under a canonical ref", top)
+        self.assertIn("integration into a user branch is separate", top)
+        self.assertIn("cooperative lease until release", top)
+
+        spawn_help = self.help_text("spawn")
+        self.assertIn("physically separate object files at spawn", spawn_help)
+        self.assertIn("sharing canonical refs, config, stash, hooks, and objects", spawn_help)
+        self.assertIn("abandoned or spawn_failed outcomes may allocate anew", spawn_help)
+
+        self.assertIn(
+            "does not merge, rebase, cherry-pick, or update a user branch",
+            self.help_text("collect"),
+        )
+        self.assertIn(
+            "only after every process that can write to the worker has stopped",
+            self.help_text("release"),
+        )
+
+        discard_help = self.help_text("discard")
+        self.assertIn("lease is cooperative", discard_help)
+        self.assertIn("--discard-ignored", discard_help)
+        self.assertIn("--discard-private-refs", discard_help)
+        self.assertIn("failed unpublished spawn has no releasable lease", discard_help)
+
+        recover_help = self.help_text("recover")
+        self.assertIn("may finish an already-recorded quarantine deletion", recover_help)
+        self.assertIn("never infers lease release from a dead process", recover_help)
+        self.assertIn(
+            "without repairing records, refs, worker content, or Git indexes",
+            self.help_text("status"),
+        )
 
     def test_zero_config_lifecycle_from_canonical_and_worker(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -96,6 +141,25 @@ class ClonegrownCliTests(unittest.TestCase):
             self.assertRegex(released["lease_released"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
             _, discarded = self.cli(repo, "discard", str(worker["id"]))
             self.assertEqual(set(discarded), set(released) | {"discarded"})
+
+    def test_historical_heartbeat_round_trips_on_disk_but_stays_out_of_cli_json(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            repo = make_repo(root)
+            _, initialized = self.cli(repo, "init")
+            workspace = Path(initialized["workspace"])
+            _, worker = self.cli(repo, "spawn", "historical heartbeat")
+            record_path = worker_record_path(workspace, int(worker["id"]))
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["heartbeat"] = 123.5
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+
+            _, listing = self.cli(repo, "status")
+            self.assertNotIn("heartbeat", listing["workers"][0])
+            self.assertEqual(
+                json.loads(record_path.read_text(encoding="utf-8"))["heartbeat"],
+                123.5,
+            )
 
     def test_default_workspace_name_and_explicit_override(self) -> None:
         with tempfile.TemporaryDirectory() as td:

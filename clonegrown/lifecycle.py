@@ -2,8 +2,8 @@
 
 Transactions persist named recovery checkpoints around their major stages.
 Those records support the recovery paths represented in durable state; they do
-not yet cover every destructive substep. ``failpoint`` names mark the tested
-checkpoint windows.
+not represent every possible filesystem interruption. ``failpoint`` names
+mark the tested checkpoint windows.
 """
 from __future__ import annotations
 
@@ -18,27 +18,29 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .core import (
-    ClonegrownError, atomic_json, failpoint, file_lock, git, git_common_dir, inside, load_json, object_format,
-    operation_boundary, operation_checkpoint, process_alive, public_exception_text, validate_primary_repo,
+    PROTOCOL_NAME, ClonegrownError, atomic_json, failpoint, file_lock, git, git_common_dir, inside, lexical_abs,
+    load_json, object_format, operation_boundary, operation_checkpoint, process_alive, public_exception_text,
+    validate_primary_repo,
 )
 from .recovery import recover
 from .repository import (
     WORKTREE_SHARING_WARNING, absent_marker, add_worktree, apply_clone_config_plan,
     build_clone_config_plan, checkout_without_hooks, copy_auxiliary_refs, copy_info_files,
     copy_sparse_policy, create_task_branch, delete_ref,
-    detach_alternates_if_needed, is_symbolic_ref, private_hook_warnings, ref_points_at,
-    repair_worktree, resolve_ref, write_ref,
+    detach_alternates_if_needed, git_at_git_dir, is_symbolic_ref, private_hook_warnings, ref_points_at,
+    repair_worktree, resolve_ref, result_ref_transaction, write_ref,
 )
 from .state import (
-    SCHEMA, WORKER_MODES, WorkerRecord, WorkerStatus, WorkspaceState, branch_owner_ref, canonical_marker_path,
-    worker_lock_path, worker_slot, workspace_lock, ws_paths,
+    SCHEMA, WORKER_MODES, VerifiedWorkspace, WorkerRecord, WorkerStatus, WorkspaceState, branch_owner_ref,
+    canonical_marker_path, ensure_real_directory, load_canonical_marker, worker_lock_path, worker_slot,
+    workspace_lock, ws_paths,
 )
 from .worker import (
     DELETION_AUTHORIZED, AdminDirectoryMissing, adoptable_quarantine, allocate_spawn, authenticate_settled, require_worker,
     clear_quarantine, custody_fingerprint,
     delete_through_quarantine, delete_verified, finish_deletion, forget_worktree, inspect_ignored_content,
-    load_worker, repair_owned_worktree, snapshot_worker, unrecorded_quarantine, verify_worker, withdraw_discard,
-    write_worker_marker,
+    inspect_clone_private_ref_changes, load_worker, repair_owned_worktree, snapshot_clone_private_refs,
+    snapshot_worker, unrecorded_quarantine, verify_worker, withdraw_discard, write_worker_marker,
 )
 
 
@@ -70,18 +72,38 @@ def _canonical_marker(workspace_id: str, token: str, canonical: Path) -> dict[st
 def init_workspace(canonical_path: Path, ws_path: Path) -> dict[str, Any]:
     """Create (or finish creating) a workspace bound to one canonical checkout. Idempotent."""
     canonical = validate_primary_repo(canonical_path)
-    ws = ws_path.resolve()
+    selected_ws = lexical_abs(ws_path)
+    if os.path.lexists(selected_ws):
+        ensure_real_directory(selected_ws, "workspace directory")
+    ws = selected_ws.resolve()
     if ws == canonical or inside(ws, canonical):
         raise ClonegrownError("workspace cannot be the canonical repository or live inside its working tree")
     paths = ws_paths(ws)
+    marker_directory = git_common_dir(canonical) / PROTOCOL_NAME
+    # Preflight every already-existing parent before creating anything. This
+    # makes a symlink refusal side-effect-free at both trust boundaries.
+    for path, label in (
+        (ws, "workspace directory"),
+        (paths["ctl"], "workspace control directory"),
+        (paths["workers"], "workspace workers directory"),
+        (paths["requests"], "workspace requests directory"),
+        (paths["locks"], "workspace locks directory"),
+        (paths["staging"], "workspace staging directory"),
+        (paths["quarantine"], "workspace quarantine directory"),
+        (marker_directory, "canonical marker directory"),
+    ):
+        if os.path.lexists(path):
+            ensure_real_directory(path, label)
     operation_checkpoint(
         stage="workspace control-directory creation",
         durable_state="workspace control-directory creation is in progress and may be partial",
         work_preservation="believed preserved — initialization writes only Clonegrown metadata, not working files",
         recovery="retry init; if the workspace path remains unsafe, inspect that path manually",
     )
+    ensure_real_directory(ws, "workspace directory", create=True, parents=True)
+    ensure_real_directory(paths["ctl"], "workspace control directory", create=True)
     for key in ("workers", "requests", "locks", "staging"):
-        paths[key].mkdir(parents=True, exist_ok=True)
+        ensure_real_directory(paths[key], f"workspace {key} directory", create=True)
     operation_checkpoint(
         stage="workspace-state inspection",
         durable_state="workspace control directories were created or confirmed; no identity record was changed",
@@ -105,8 +127,8 @@ def init_workspace(canonical_path: Path, ws_path: Path) -> dict[str, Any]:
             if state.status == "initializing":
                 # Finish either crash window: after the state write or after the marker write.
                 marker_path = canonical_marker_path(canonical, str(state.workspace_id))
-                if marker_path.exists():
-                    if load_json(marker_path).get("token") != state.canonical_token:
+                if os.path.lexists(marker_path):
+                    if load_canonical_marker(marker_path).get("token") != state.canonical_token:
                         raise ClonegrownError("initializing workspace has a conflicting canonical marker")
                 else:
                     operation_checkpoint(
@@ -116,6 +138,7 @@ def init_workspace(canonical_path: Path, ws_path: Path) -> dict[str, Any]:
                         work_preservation="believed preserved — only Clonegrown identity metadata may be changing",
                         recovery="retry init; inspect the canonical marker manually if the conflict persists",
                     )
+                    ensure_real_directory(marker_path.parent, "canonical marker directory", create=True)
                     atomic_json(
                         marker_path,
                         _canonical_marker(str(state.workspace_id), str(state.canonical_token), canonical),
@@ -180,7 +203,9 @@ def init_workspace(canonical_path: Path, ws_path: Path) -> dict[str, Any]:
             work_preservation="believed preserved — only Clonegrown identity metadata may be changing",
             recovery="retry init; inspect the canonical marker manually if the conflict persists",
         )
-        atomic_json(canonical_marker_path(canonical, workspace_id), _canonical_marker(workspace_id, token, canonical))
+        marker_path = canonical_marker_path(canonical, workspace_id)
+        ensure_real_directory(marker_path.parent, "canonical marker directory", create=True)
+        atomic_json(marker_path, _canonical_marker(workspace_id, token, canonical))
         operation_checkpoint(
             stage="after canonical marker creation",
             durable_state="the initializing workspace state and canonical identity marker were written",
@@ -209,6 +234,7 @@ class SpawnDetails:
     copied_local_config: list[str]
     copied_sparse_checkout: bool
     copied_auxiliary_refs: dict[str, int]
+    clone_private_refs: dict[str, str] | None
     compatibility_warnings: list[str]
 
     def apply(self, worker: WorkerRecord) -> None:
@@ -220,10 +246,11 @@ class _RetryableOutcome(Exception):
     """The existing worker for this request ended in a state that lets the request be allocated again."""
 
 
-def _require_plain_refs(canonical: Path, *refs: str) -> None:
+def _require_plain_refs(canonical: Path, *refs: str,
+                        git_dir_fd: int | None = None) -> None:
     """A namespace ref that is symbolic is not ours: refuse to write through it."""
     for ref in refs:
-        if is_symbolic_ref(canonical, ref):
+        if is_symbolic_ref(canonical, ref, git_dir_fd=git_dir_fd):
             raise ClonegrownError(f"refusing to write through a symbolic ref in Clonegrown's namespace: {ref}")
 
 
@@ -260,14 +287,15 @@ def _wait_for_existing(ws: Path, worker_id: int, timeout_seconds: float) -> dict
         time.sleep(0.05)
 
 
-def _advance_spawn(ws: Path, worker_id: int, status: str) -> tuple[WorkerRecord, WorkspaceState, Path]:
-    """Record the next spawn stage and re-verify canonical, under the workspace lock."""
+def _advance_spawn(ws: Path, worker_id: int, status: str) -> tuple[WorkerRecord, WorkspaceState, VerifiedWorkspace]:
+    """Verify canonical, then record the next spawn stage under a matching workspace lock."""
+    verified = VerifiedWorkspace.load(ws)
     with workspace_lock(ws):
+        state = verified.reload_under_lock(ws)
         worker = WorkerRecord.load(ws, worker_id)
         worker.take_ownership(status)
         worker.save(ws)
-        state = WorkspaceState.load(ws)
-        return worker, state, state.verify_canonical()
+        return worker, state, verified
 
 
 def _record_worktree_admin(ws: Path, worker_id: int, admin: Path) -> None:
@@ -284,7 +312,8 @@ def _record_worktree_admin(ws: Path, worker_id: int, admin: Path) -> None:
         worker.save(ws)
 
 
-def _check_out_base(stage_repo: Path, worker: WorkerRecord, canonical: Path | None = None) -> None:
+def _check_out_base(stage_repo: Path, worker: WorkerRecord, canonical: Path | None = None, *,
+                    canonical_git_dir_fd: int | None = None) -> None:
     """Put the staged repository on its task branch at the pinned base and stamp its identity.
 
     A clone creates the branch in its own refs. A worktree's branch lives in
@@ -294,7 +323,8 @@ def _check_out_base(stage_repo: Path, worker: WorkerRecord, canonical: Path | No
     """
     if canonical is not None:
         create_task_branch(canonical, str(worker.branch),
-                           branch_owner_ref(str(worker.workspace_id), int(worker.id)), str(worker.base_sha))
+                           branch_owner_ref(str(worker.workspace_id), int(worker.id)), str(worker.base_sha),
+                           git_dir_fd=canonical_git_dir_fd)
         checkout_without_hooks(stage_repo, str(worker.branch), str(worker.base_sha), create=False)
     else:
         checkout_without_hooks(stage_repo, str(worker.branch), str(worker.base_sha))
@@ -303,16 +333,20 @@ def _check_out_base(stage_repo: Path, worker: WorkerRecord, canonical: Path | No
         raise ClonegrownError("worker checkout differs from immutable requested base")
 
 
-def _provision_worktree(canonical: Path, stage_repo: Path, worker: WorkerRecord) -> SpawnDetails:
+def _provision_worktree(canonical: Path, stage_repo: Path, worker: WorkerRecord, *,
+                        canonical_git_dir_fd: int | None = None) -> SpawnDetails:
     """Check out the base in a staged worktree; everything else is shared with canonical."""
     sparse = copy_sparse_policy(canonical, stage_repo, linked_worktree=True)
-    _check_out_base(stage_repo, worker, canonical)
+    _check_out_base(
+        stage_repo, worker, canonical, canonical_git_dir_fd=canonical_git_dir_fd,
+    )
     return SpawnDetails(
         source_remote=None,
         alternates_detached=False,
         copied_local_config=[],
         copied_sparse_checkout=sparse,
         copied_auxiliary_refs={},
+        clone_private_refs=None,
         compatibility_warnings=[WORKTREE_SHARING_WARNING],
     )
 
@@ -328,12 +362,14 @@ def _provision_clone(canonical: Path, stage_repo: Path, worker: WorkerRecord, st
     warnings += config_warnings + private_hook_warnings(canonical)
     _check_out_base(stage_repo, worker)
     git(stage_repo, "fsck", "--connectivity-only")
+    private_refs = snapshot_clone_private_refs(stage_repo, str(worker.branch))
     return SpawnDetails(
         source_remote=source_remote,
         alternates_detached=detached,
         copied_local_config=copied_config,
         copied_sparse_checkout=sparse,
         copied_auxiliary_refs=auxiliary_refs,
+        clone_private_refs=private_refs,
         compatibility_warnings=sorted(set(warnings)),
     )
 
@@ -343,7 +379,7 @@ def _record_spawn_failure(ws: Path, worker_id: int, exc: BaseException) -> None:
     with workspace_lock(ws):
         state = WorkspaceState.load(ws)
         worker = WorkerRecord.load(ws, worker_id)
-        published = worker_slot(ws, worker_id).exists()
+        published = os.path.lexists(worker_slot(ws, worker_id))
         if published or worker.status == WorkerStatus.READY:
             # The ordinary exception path keeps a published directory in a
             # recoverable publishing state instead of marking spawn_failed.
@@ -361,7 +397,7 @@ def _record_spawn_failure(ws: Path, worker_id: int, exc: BaseException) -> None:
 
 
 def _discard_unpublished_stage(ws: Path, worker_id: int, stage: Path) -> None:
-    if worker_slot(ws, worker_id).exists():
+    if os.path.lexists(worker_slot(ws, worker_id)):
         return
     stage_error: str | None = None
     try:
@@ -384,13 +420,18 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = False,
           mode: str = "clone") -> dict[str, Any]:
     """Create a worker at ``base`` and return its ``ready`` record.
 
-    The default is a non-strong clone. ``mode`` is ``"clone"`` (an independent
-    repository; ``strong=True`` disables object sharing) or ``"worktree"`` (a
-    linked worktree sharing canonical's Git internals). Stages: allocated ->
+    The default is a non-strong clone with private refs, stash, local config,
+    and default hook directory, but existing object files may be hard-linked.
+    ``strong=True`` makes object files physically independent at spawn.
+    ``mode="worktree"`` instead shares canonical refs, config, stash, hooks,
+    and objects. Stages: allocated ->
     cloning -> configuring -> publishing -> ready. The worker is built under
     ``.cws/staging`` and moved into its numbered slot with one atomic rename.
     Worktree repair and the final ready record occur after that rename while
-    Clonegrown still holds its locks.
+    Clonegrown still holds its locks. A matching request ID rejoins an
+    in-flight request or returns its existing ``ready``, ``collected``, or
+    ``discarded`` outcome; ``abandoned`` and ``spawn_failed`` allocate anew,
+    while ``broken`` remains an error.
     """
     if mode not in WORKER_MODES:
         raise ClonegrownError(f"unknown worker mode: {mode!r}")
@@ -478,7 +519,8 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = False,
                 work_preservation="believed preserved — no worker directory is published",
                 recovery="run `clonegrown recover`, then inspect `clonegrown status`",
             )
-            worker, state, canonical = _advance_spawn(ws, worker_id, WorkerStatus.CLONING)
+            worker, state, verified = _advance_spawn(ws, worker_id, WorkerStatus.CLONING)
+            canonical = verified.canonical
             shutil.rmtree(stage, ignore_errors=True)
             operation_checkpoint(
                 stage="staging-directory creation",
@@ -495,14 +537,18 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = False,
                 work_preservation="believed preserved — staged content is not published as worker work",
                 recovery="run `clonegrown recover`; inspect any reported stage or worktree residue manually",
             )
-            if mode == "worktree":
-                admin = add_worktree(canonical, stage_repo, str(worker.base_sha))
-                _record_worktree_admin(ws, worker_id, admin)
-            else:
-                clone_args: list[str | Path] = ["clone", "--no-checkout"]
-                if strong:
-                    clone_args.append("--no-hardlinks")
-                git(stage, *clone_args, canonical, stage_repo, sensitive=(canonical,))
+            with verified.open_canonical_git_dir() as canonical_git_dir_fd:
+                if mode == "worktree":
+                    admin = add_worktree(
+                        canonical, stage_repo, str(worker.base_sha),
+                        git_dir_fd=canonical_git_dir_fd,
+                    )
+                    _record_worktree_admin(ws, worker_id, admin)
+                else:
+                    clone_args: list[str | Path] = ["clone", "--no-checkout"]
+                    if strong:
+                        clone_args.append("--no-hardlinks")
+                    git(stage, *clone_args, canonical, stage_repo, sensitive=(canonical,))
             operation_checkpoint(
                 stage="staged repository verification",
                 durable_state=f"worker {worker_id} has an unpublished staged repository; no worker slot is published",
@@ -520,11 +566,16 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = False,
                 work_preservation="believed preserved — the numbered worker slot is still absent",
                 recovery="run `clonegrown recover`; inspect reported stage or worktree residue manually",
             )
-            worker, state, canonical = _advance_spawn(ws, worker_id, WorkerStatus.CONFIGURING)
-            if mode == "worktree":
-                details = _provision_worktree(canonical, stage_repo, worker)
-            else:
-                details = _provision_clone(canonical, stage_repo, worker, strong)
+            worker, state, verified = _advance_spawn(ws, worker_id, WorkerStatus.CONFIGURING)
+            canonical = verified.canonical
+            with verified.open_canonical_git_dir() as canonical_git_dir_fd:
+                if mode == "worktree":
+                    details = _provision_worktree(
+                        canonical, stage_repo, worker,
+                        canonical_git_dir_fd=canonical_git_dir_fd,
+                    )
+                else:
+                    details = _provision_clone(canonical, stage_repo, worker, strong)
             operation_checkpoint(
                 stage="staged checkout completion",
                 durable_state=(f"worker {worker_id} is fully staged but not published; publication metadata "
@@ -534,14 +585,17 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = False,
             )
             failpoint("spawn.after_checkout")
 
-            with workspace_lock(ws):
-                state = WorkspaceState.load(ws)
-                state.verify_canonical()
+            pending_spawn_details = asdict(details)
+            slot = worker_slot(ws, worker_id)
+            verified = VerifiedWorkspace.load(ws)
+            with verified.open_canonical_git_dir() as canonical_git_dir_fd, workspace_lock(ws):
+                state = verified.reload_under_lock(ws)
+                canonical = verified.canonical
                 current = WorkerRecord.load(ws, worker_id)
                 if current.worker_token != worker.worker_token or current.status not in WorkerStatus.SPAWNING:
                     raise ClonegrownError("spawn metadata ownership changed")
                 current.take_ownership(WorkerStatus.PUBLISHING)
-                current.pending_spawn_details = asdict(details)
+                current.pending_spawn_details = pending_spawn_details
                 operation_checkpoint(
                     stage="publishing-state commit",
                     durable_state=f"worker {worker_id} is staged; the publishing checkpoint write is unverified",
@@ -550,8 +604,7 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = False,
                               "by custody evidence"),
                 )
                 current.save(ws)
-                slot = worker_slot(ws, worker_id)
-                if slot.exists():
+                if os.path.lexists(slot):
                     raise ClonegrownError("worker final path already exists")
                 operation_checkpoint(
                     stage="worker publication rename",
@@ -571,10 +624,19 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = False,
                     recovery="run `clonegrown recover`; manually inspect the worker if it is reported broken",
                 )
                 failpoint("spawn.after_publish")
+                # A pausepoint or an uncooperative process can replace the canonical
+                # path even while Clonegrown holds its advisory workspace lock. Rematch
+                # the prepared directory identities before any post-publication Git
+                # mutation can target that pathname.
+                state = verified.reload_under_lock(ws)
                 if mode == "worktree":
                     # The rename moved the worktree; Git's pointer back to it is now stale.
-                    repair_worktree(canonical, slot / str(state.repo_name))
+                    repair_worktree(
+                        canonical, slot / str(state.repo_name),
+                        git_dir_fd=canonical_git_dir_fd,
+                    )
                 failpoint("spawn.after_repair")
+                state = verified.reload_under_lock(ws)
                 current.status = WorkerStatus.READY
                 current.ready = time.time()
                 details.apply(current)
@@ -591,7 +653,11 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = False,
                 current.save(ws)
                 # Best effort: the worker is ready either way; a pin that cannot be dropped (a
                 # symbolic ref planted under its name) is reported by status, not by this spawn.
-                delete_ref(state.verify_canonical(), state.base_ref(worker_id), check=False)
+                verified.reload_under_lock(ws)
+                delete_ref(
+                    canonical, state.base_ref(worker_id), str(current.base_sha), check=False,
+                    git_dir_fd=canonical_git_dir_fd,
+                )
                 failpoint("spawn.after_ready")
                 return current.to_json()
 
@@ -601,8 +667,9 @@ def spawn(ws_path: Path, base: str, task: str, strong: bool = False,
 def _rollback_collect(ws: Path, worker_id: int, worker_token: str, error: BaseException) -> None:
     """Return a live worker to ``ready`` after an ordinary collection failure.
 
-    Any fetched immutable result ref is deliberately retained: keeping an
-    extra candidate is safer than deleting evidence.
+    Any immutable result ref already created is deliberately retained; a
+    transferred candidate object may also remain. Keeping evidence is safer
+    than deleting it during rollback.
     """
     with workspace_lock(ws):
         _, current, _ = load_worker(ws, worker_id)
@@ -616,13 +683,49 @@ def _rollback_collect(ws: Path, worker_id: int, worker_token: str, error: BaseEx
         current.save(ws)
 
 
+def _publish_result_ref(canonical: Path, worker_repo: Path, candidate: str, result_ref: str) -> None:
+    """Fetch ``candidate`` and create its content-addressed ref without replacing any occupant."""
+    if is_symbolic_ref(canonical, result_ref):
+        raise ClonegrownError(f"conflicting symbolic result ref already exists at {result_ref}")
+    existing = resolve_ref(canonical, result_ref)
+    if existing == candidate:
+        if is_symbolic_ref(canonical, result_ref):
+            raise ClonegrownError(f"conflicting symbolic result ref appeared at {result_ref}")
+        git(canonical, "cat-file", "-e", f"{candidate}^{{commit}}")
+        if is_symbolic_ref(canonical, result_ref):
+            raise ClonegrownError(f"conflicting symbolic result ref appeared at {result_ref}")
+        return
+    if existing is not None:
+        raise ClonegrownError(
+            f"conflicting result ref already exists at {result_ref}; expected {candidate}, found {existing}"
+        )
+    # Fetch the object only. Publishing the ref is a separate create-only CAS,
+    # so a direct ref planted before or during this fetch is never overwritten.
+    git(canonical, "fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance",
+        str(worker_repo), candidate, sensitive=(worker_repo,))
+    created = write_ref(
+        canonical, result_ref, candidate, absent_marker(candidate), check=False,
+    )
+    if not created and is_symbolic_ref(canonical, result_ref):
+        raise ClonegrownError(f"conflicting symbolic result ref appeared at {result_ref}")
+    if not created and not ref_points_at(canonical, result_ref, candidate):
+        found = resolve_ref(canonical, result_ref)
+        raise ClonegrownError(
+            f"conflicting result ref appeared at {result_ref}; expected {candidate}, "
+            f"found {found or 'a non-commit ref'}"
+        )
+
+
 @operation_boundary("collect")
 def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[str, Any]:
     """Fetch the worker's committed HEAD into canonical under an immutable ref.
 
     The worker is snapshotted before and after the fetch; if it changed in
-    between, the fetched candidate is kept but not accepted. Re-collecting an
-    already collected, unchanged worker is a no-op that refreshes the summary ref.
+    between, any published candidate ref is kept but not accepted, and a
+    transferred candidate object may remain. Re-collecting an
+    already collected, unchanged worker is a no-op that refreshes the summary
+    ref; new commits after collection are rejected. Collection does not merge,
+    rebase, cherry-pick, or update a user branch.
     """
     ws = ws_path.resolve()
     require_worker(ws, worker_id)  # never create a lock file for an id that names no worker
@@ -648,9 +751,7 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
                 snap = snapshot_worker(state, worker, require_ancestry=not allow_rewrite)
                 if snap.head != worker.result_sha:
                     raise ClonegrownError("worker changed after collection; refusing to hide newer work")
-                if not ref_points_at(canonical, worker.result_ref, worker.result_sha):
-                    raise ClonegrownError("collected result ref is missing or changed")
-                _require_plain_refs(canonical, state.summary_ref(worker_id), str(worker.result_ref))
+                summary_ref = state.summary_ref(worker_id)
                 operation_checkpoint(
                     stage="collected summary-ref refresh",
                     durable_state=(f"worker {worker_id} is already collected and its immutable result exists; "
@@ -658,7 +759,11 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
                     work_preservation="believed preserved — the worker and immutable result ref remain in place",
                     recovery="run `clonegrown status`; manually inspect only a reported symbolic or conflicting ref",
                 )
-                write_ref(canonical, state.summary_ref(worker_id), str(worker.result_sha))
+                with result_ref_transaction(
+                    canonical, str(worker.result_ref), summary_ref,
+                    str(worker.result_sha), update_summary=True,
+                ):
+                    pass
                 return worker.to_json()
             if worker.status != WorkerStatus.READY:
                 raise ClonegrownError(f"worker is not collectable from state {worker.status}")
@@ -697,16 +802,16 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
         def roll_back(exc: BaseException) -> None:
             operation_checkpoint(
                 stage="collection rollback",
-                durable_state=(f"worker {worker_id} rollback is in progress; any fetched immutable candidate ref "
-                               "is intentionally retained"),
+                durable_state=(f"worker {worker_id} rollback is in progress; any published immutable candidate "
+                               "ref is intentionally retained and a transferred object may remain"),
                 work_preservation="unverified — the worker record must be checked after rollback",
                 recovery="run `clonegrown recover`, then inspect `clonegrown status`",
             )
             _rollback_collect(ws, worker_id, str(worker.worker_token), exc)
             operation_checkpoint(
                 stage="collection rolled back",
-                durable_state=(f"worker {worker_id} was returned to ready; any fetched immutable candidate ref "
-                               "was retained as evidence"),
+                durable_state=(f"worker {worker_id} was returned to ready; any published immutable candidate ref "
+                               "was retained as evidence and a transferred object may remain"),
                 work_preservation="believed preserved — the worker directory and fetched candidate remain available",
                 recovery="not required; inspect `clonegrown status` and retry collect when ready",
             )
@@ -714,11 +819,10 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
         with _rolling_back(roll_back):
             failpoint("collect.after_mark")
             failpoint("collect.before_fetch")
-            git(canonical, "fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance",
-                str(worker.repo), f"+{candidate}:{result_ref}", sensitive=(worker.repo,))
+            _publish_result_ref(canonical, worker.repo, candidate, result_ref)
             operation_checkpoint(
                 stage="candidate verification",
-                durable_state=(f"immutable candidate ref {result_ref} was fetched; the worker record remains "
+                durable_state=(f"immutable candidate ref {result_ref} was published; the worker record remains "
                                "collecting"),
                 work_preservation="believed preserved — both the worker and fetched candidate are retained",
                 recovery=("run `clonegrown recover`; it validates the candidate before accepting or resetting "
@@ -752,6 +856,7 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
                 state, current, canonical = load_worker(ws, worker_id)
                 if current.status != WorkerStatus.COLLECTING or current.candidate_sha != candidate:
                     raise ClonegrownError("collection metadata changed")
+                summary_ref = state.summary_ref(worker_id)
                 operation_checkpoint(
                     stage="summary-ref commit",
                     durable_state=(f"immutable candidate ref {result_ref} exists; summary-ref update completion "
@@ -759,7 +864,10 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
                     work_preservation="believed preserved — the worker and immutable candidate ref remain available",
                     recovery="run `clonegrown recover`; manually inspect only a reported symbolic or conflicting ref",
                 )
-                write_ref(canonical, state.summary_ref(worker_id), candidate)
+                with result_ref_transaction(
+                    canonical, result_ref, summary_ref, candidate, update_summary=True,
+                ):
+                    pass
                 operation_checkpoint(
                     stage="collected-state commit",
                     durable_state=(f"candidate and summary refs preserve {candidate}; completion of worker "
@@ -769,23 +877,41 @@ def collect(ws_path: Path, worker_id: int, allow_rewrite: bool = False) -> dict[
                     recovery="run `clonegrown recover`; it can finish the represented collection checkpoint",
                 )
                 failpoint("collect.after_summary")
-                current.status = WorkerStatus.COLLECTED
-                current.result_sha = candidate
-                current.result_ref = result_ref
-                current.collected = time.time()
-                current.collected_snapshot = second.to_json()
-                current.release_ownership()
-                current.clear_candidate()
-                current.save(ws)
-                operation_checkpoint(
-                    stage="completed collection",
-                    durable_state=(f"worker {worker_id} is recorded collected and immutable result ref "
-                                   f"{result_ref} preserves its accepted tip"),
-                    work_preservation=("believed preserved — the worker and accepted immutable result remain "
-                                       "available"),
-                    recovery="not required; inspect `clonegrown status` if the result was not returned",
-                )
-                failpoint("collect.after_metadata")
+                try:
+                    with result_ref_transaction(
+                        canonical, result_ref, summary_ref, candidate,
+                        update_summary=False,
+                    ):
+                        current.status = WorkerStatus.COLLECTED
+                        current.result_sha = candidate
+                        current.result_ref = result_ref
+                        current.collected = time.time()
+                        current.collected_snapshot = second.to_json()
+                        current.release_ownership()
+                        current.clear_candidate()
+                        current.save(ws)
+                        operation_checkpoint(
+                            stage="completed collection",
+                            durable_state=(f"worker {worker_id} is recorded collected and immutable result ref "
+                                           f"{result_ref} preserves its accepted tip"),
+                            work_preservation=("believed preserved — the worker and accepted immutable result remain "
+                                               "available"),
+                            recovery="not required; inspect `clonegrown status` if the result was not returned",
+                        )
+                        failpoint("collect.after_metadata")
+                except Exception as exc:
+                    if current.status == WorkerStatus.COLLECTED:
+                        current.status = WorkerStatus.READY
+                        current.result_sha = None
+                        current.result_ref = None
+                        current.collected = None
+                        current.collected_snapshot = None
+                        current.collection_error = public_exception_text(exc)[:1000]
+                        current.collection_failed = time.time()
+                        current.release_ownership()
+                        current.clear_candidate()
+                        current.save(ws)
+                    raise
                 return current.to_json()
 
 
@@ -823,7 +949,7 @@ def claim(ws_path: Path, worker_id: int) -> dict[str, Any]:
 def release(ws_path: Path, worker_id: int) -> dict[str, Any]:
     """Release the cooperative work lease so the worker may be discarded. Repeating it is a no-op.
 
-    Release is the caller's statement that every process it started in the
+    Release is the caller's statement that every process that can write to the
     worker has stopped. Clonegrown records that statement; it cannot verify it.
     """
     ws = ws_path.resolve()
@@ -847,26 +973,34 @@ def release(ws_path: Path, worker_id: int) -> dict[str, Any]:
 
 @operation_boundary("discard")
 def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = False,
-            discard_ignored: bool = False) -> dict[str, Any]:
-    """Delete a released worker through an authenticated quarantine.
+            discard_ignored: bool = False, discard_private_refs: bool = False) -> dict[str, Any]:
+    """Delete an authorized worker through an authenticated quarantine.
+
+    Every published worker requires a released lease. A failed unpublished
+    spawn has no releasable lease, but discarding its authenticated residue
+    still requires ``abandon``.
 
     Each acknowledgement is separate and explicit: an uncollected worker needs
     ``abandon`` (which covers everything it holds); a collected worker needs
     ``force`` for changes detected after collection and ``discard_ignored``
-    for Git-ignored paths, which the collection snapshot never saw. The lease
-    is checked before any flag: none of them overrides it. A collected worker
-    is one-shot, so ``abandon`` does not apply to it.
+    for Git-ignored paths, which the collection snapshot never saw, and an
+    independent clone needs ``discard_private_refs`` when its non-task refs
+    differ from their publication baseline. The lease is checked before any
+    flag: none of them overrides it. A collected worker is one-shot, so
+    ``abandon`` does not apply to it.
 
     Deletion records its intent, fingerprints the worker, moves the slot to
     ``.cws/quarantine/<id>-<token>`` with one rename, rechecks the quarantined
     worker against that fingerprint, deletes it with errors enabled, proves
     the path absent, and cleans canonical's worktree state. The terminal
     status is recorded only when every part succeeded; otherwise the record
-    stays ``discarding`` with the quarantine path and the error, and a later
-    ``recover`` resumes it. A worker preserved in quarantine because it
-    changed can be deleted by running ``discard`` again with the same
-    acknowledgement (``abandon``, or ``force`` for a collected one), which
-    takes a fresh fingerprint.
+    stays ``discarding`` with surviving quarantine or cleanup evidence and a
+    reason, and a later ``recover`` resumes it. A worker preserved intact in
+    quarantine because it changed can be deleted by running ``discard`` again
+    with a fresh acknowledgement (``abandon``, or ``force`` for a collected
+    one, plus ``discard_private_refs`` when its clone refs differ or cannot be
+    verified), which takes a fresh fingerprint. A deletion error after
+    recursive deletion begins may leave only a partial remainder.
     """
     ws = ws_path.resolve()
     require_worker(ws, worker_id)  # never create a lock file for an id that names no worker
@@ -903,11 +1037,19 @@ def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = 
                               "discarding"),
                 )
                 worker.save(ws)  # the withdrawal stands even if the fresh authorization refuses
-                _authorize_discard(ws, state, worker, canonical, worker_id, abandon, force, discard_ignored)
+                _authorize_discard(
+                    ws, state, worker, canonical, worker_id, abandon, force,
+                    discard_ignored, discard_private_refs,
+                )
             elif worker.status == WorkerStatus.DISCARDING:
-                _reauthorize_quarantined(state, worker, canonical, abandon, force)
+                _reauthorize_quarantined(
+                    state, worker, canonical, abandon, force, discard_private_refs,
+                )
             else:
-                _authorize_discard(ws, state, worker, canonical, worker_id, abandon, force, discard_ignored)
+                _authorize_discard(
+                    ws, state, worker, canonical, worker_id, abandon, force,
+                    discard_ignored, discard_private_refs,
+                )
             worker.take_ownership(WorkerStatus.DISCARDING)
             operation_checkpoint(
                 stage="discard-intent commit",
@@ -945,7 +1087,7 @@ def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = 
                 _, current, _ = load_worker(ws, worker_id)
                 if current.status != WorkerStatus.DISCARDING or current.worker_token != worker.worker_token:
                     return
-                slot_present = worker_slot(ws, worker_id).exists()
+                slot_present = os.path.lexists(worker_slot(ws, worker_id))
                 quarantine_present = bool(current.quarantine_path and os.path.lexists(current.quarantine_path))
                 reason = public_exception_text(exc)
                 if slot_present and not quarantine_present:
@@ -1027,13 +1169,14 @@ def discard(ws_path: Path, worker_id: int, abandon: bool = False, force: bool = 
 
 
 def _authorize_discard(ws: Path, state: WorkspaceState, worker: WorkerRecord, canonical: Path, worker_id: int,
-                       abandon: bool, force: bool, discard_ignored: bool) -> None:
+                       abandon: bool, force: bool, discard_ignored: bool,
+                       discard_private_refs: bool) -> None:
     """Every refusal before deletion intent is recorded; the record is not modified here."""
     if worker.status in WorkerStatus.ACTIVE:
         raise ClonegrownError(f"worker has an active operation: {worker.status}")
     # Every destructive path authenticates the published worker first, so that
     # --abandon cannot turn metadata tampering into an accepted deletion.
-    if worker_slot(ws, worker_id).exists():
+    if os.path.lexists(worker_slot(ws, worker_id)):
         verify_worker(state, worker)
     if abandon and worker.status == WorkerStatus.COLLECTED:
         raise ClonegrownError("a collected worker is one-shot; --abandon applies only to an uncollected worker")
@@ -1044,9 +1187,10 @@ def _authorize_discard(ws: Path, state: WorkspaceState, worker: WorkerRecord, ca
     if worker.status == WorkerStatus.COLLECTED:
         if not ref_points_at(canonical, worker.result_ref, worker.result_sha):
             raise ClonegrownError("refusing deletion because collected result is not preserved")
-        if worker.repo.exists():
-            # Two custody questions, answered separately: did the committed tip move,
-            # and is there ignored content the collection snapshot never inspected?
+        if os.path.lexists(worker.repo):
+            # Three custody questions, answered separately: did the committed tip
+            # move, is there ignored content the collection snapshot never inspected,
+            # and did a clone gain or move private refs after publication?
             missing: list[str] = []
             if not force:
                 snap = snapshot_worker(state, worker, require_ancestry=not worker.allow_rewrite)
@@ -1056,6 +1200,14 @@ def _authorize_discard(ws: Path, state: WorkspaceState, worker: WorkerRecord, ca
                 ignored = inspect_ignored_content(worker.repo)
                 if ignored.count:
                     missing.append(f"--discard-ignored: the worker holds {ignored.describe()}")
+            if not worker.is_worktree and not discard_private_refs:
+                private = inspect_clone_private_ref_changes(worker)
+                if private is None:
+                    missing.append(
+                        "--discard-private-refs: this older clone has no private-ref publication baseline"
+                    )
+                elif private.count:
+                    missing.append(f"--discard-private-refs: the worker holds {private.describe()}")
             if missing:
                 raise ClonegrownError(
                     f"refusing to discard collected worker {worker_id} without explicit acknowledgement; "
@@ -1083,12 +1235,12 @@ def _intent_never_moved(ws: Path, worker: WorkerRecord) -> bool:
     if process_alive(worker.owner_pid, worker.owner_start):
         raise ClonegrownError(f"worker has an active operation: {worker.status}")
     quarantined = worker.quarantine_path is not None and os.path.lexists(worker.quarantine_path)
-    return (worker_slot(ws, int(worker.id)).exists() and not quarantined
+    return (os.path.lexists(worker_slot(ws, int(worker.id))) and not quarantined
             and unrecorded_quarantine(ws, worker) is None)
 
 
 def _reauthorize_quarantined(state: WorkspaceState, worker: WorkerRecord, canonical: Path,
-                             abandon: bool, force: bool) -> None:
+                             abandon: bool, force: bool, discard_private_refs: bool) -> None:
     """A worker preserved in quarantine is deleted only by a fresh, matching acknowledgement."""
     if process_alive(worker.owner_pid, worker.owner_start):
         raise ClonegrownError(f"worker has an active operation: {worker.status}")
@@ -1105,7 +1257,7 @@ def _reauthorize_quarantined(state: WorkspaceState, worker: WorkerRecord, canoni
             f"worker {int(worker.id)} is preserved in quarantine at {worker.quarantine_path} "
             f"({worker.quarantine_error or 'deletion did not complete'}); pass --{needed} to delete it anyway")
     repo = Path(worker.quarantine_path) / str(state.repo_name)
-    if worker_slot(ws_for(worker), int(worker.id)).exists():
+    if os.path.lexists(worker_slot(ws_for(worker), int(worker.id))):
         raise ClonegrownError(
             f"worker {int(worker.id)} has content both in its slot and at {worker.quarantine_path}; "
             "nothing is deleted until one of them is moved away by hand")
@@ -1116,5 +1268,20 @@ def _reauthorize_quarantined(state: WorkspaceState, worker: WorkerRecord, canoni
         # Git can no longer read the quarantined checkout, but the path is derived from this
         # record's identity under .cws and the caller has just acknowledged deleting it.
         pass
-    worker.quarantine_snapshot = custody_fingerprint(repo)  # the new baseline the caller just accepted
+    if (worker.discard_intent != WorkerStatus.ABANDONED and not worker.is_worktree
+            and not discard_private_refs):
+        private = inspect_clone_private_ref_changes(worker, repo=repo)
+        if private is None:
+            raise ClonegrownError(
+                "refusing deletion: this older clone has no private-ref publication baseline; "
+                "pass --discard-private-refs to acknowledge its private refs"
+            )
+        if private.count:
+            raise ClonegrownError(
+                f"refusing deletion: the quarantined worker holds {private.describe()}; "
+                "pass --discard-private-refs to delete them intentionally"
+            )
+    worker.quarantine_snapshot = custody_fingerprint(
+        repo, include_git_refs=not worker.is_worktree,
+    )  # the new baseline the caller just accepted
     worker.quarantine_error = None

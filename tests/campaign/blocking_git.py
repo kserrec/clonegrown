@@ -25,6 +25,43 @@ PREFIXES = {
     "worktree-repair": ("worktree", "repair"),
 }
 
+GIT_OPTIONS_WITH_VALUE = {
+    "-C",
+    "-c",
+    "--config-env",
+    "--git-dir",
+    "--namespace",
+    "--work-tree",
+}
+
+
+def command_arguments(args: list[str]) -> list[str]:
+    """Return Git's command and arguments after any leading global options."""
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument == "--":
+            return args[index + 1:]
+        if argument in GIT_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if argument.startswith("-"):
+            index += 1
+            continue
+        return args[index:]
+    return []
+
+
+def inherited_descriptor_fds(args: list[str]) -> tuple[int, ...]:
+    """Keep descriptor-backed Git paths alive when the wrapper starts real Git."""
+    descriptors: set[int] = set()
+    for argument in args:
+        value = argument.partition("=")[2] if "=" in argument else argument
+        for prefix in ("/dev/fd/", "/proc/self/fd/"):
+            if value.startswith(prefix) and value[len(prefix):].isdigit():
+                descriptors.add(int(value[len(prefix):]))
+    return tuple(sorted(descriptors))
+
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
     temporary = path.with_suffix(".tmp")
@@ -37,8 +74,9 @@ def main() -> int:
     control = Path(os.environ["CLONEGROWN_TEST_GIT_CONTROL"])
     target = os.environ["CLONEGROWN_TEST_GIT_TARGET"]
     args = sys.argv[1:]
+    command = command_arguments(args)
     prefix = PREFIXES[target]
-    if tuple(args[:len(prefix)]) != prefix:
+    if tuple(command[:len(prefix)]) != prefix:
         os.execv(real_git, [real_git, *args])
 
     control.mkdir(parents=True, exist_ok=True)
@@ -49,7 +87,7 @@ def main() -> int:
     else:
         os.close(claim)
 
-    write_json(control / "started.json", {"pid": os.getpid(), "args": args})
+    write_json(control / "started.json", {"pid": os.getpid(), "args": command})
     deadline = time.monotonic() + 60
     while not (control / "release").exists():
         if time.monotonic() >= deadline:
@@ -64,6 +102,7 @@ def main() -> int:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        pass_fds=inherited_descriptor_fds(args),
     )
     write_json(control / "result.json", {
         "pid": os.getpid(),

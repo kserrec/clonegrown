@@ -2,7 +2,11 @@
 
 Each agent task can use a linked-worktree or local-clone worker. Collection
 preserves a clean committed tip under a canonical Git ref; integration remains
-explicit. The alpha's current custody limits are documented in the README.
+explicit and a collected worker is one-shot. A cooperative lease, separate
+ignored-content, drift, and clone-private-ref acknowledgements, authenticated
+quarantine, and recovery of represented durable checkpoints govern deletion. Worktree workers
+share broad canonical Git state; default clones may share object files through
+hard links. The alpha's current custody limits are documented in the README.
 
 Public Python API::
 

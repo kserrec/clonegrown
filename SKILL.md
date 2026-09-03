@@ -11,11 +11,21 @@ collection, discard, and recovery. Collection can preserve a worker's clean
 committed tip under a canonical ref; it does not integrate that commit into a
 user branch.
 
-A worker is either a **linked worktree** (`--worktree`, near-instant, shares
-broad Git state with canonical) or a **local clone** (the CLI default, separate
+> **Do not use the 2026-09-02 `main` checkpoint for irreplaceable work.** Its
+> final cold review is a no-go: clone-private dangling symbolic refs can escape
+> discard custody; dangling symbolic task branches and control-file names are
+> not safely reserved; CLI workspace selection can follow a symlink;
+> `GIT_CONFIG` can reach child Git; and repeated collection after an accepted
+> history rewrite can fail. These are verified product defects, not theoretical
+> cautions. See `research/FINAL_COLD_REVIEW.md` in the source repository before
+> treating the affected guarantees below as implemented.
+
+A worker is either a **linked worktree** (`--worktree`, avoids copying a
+second object database but still has repository- and host-dependent checkout
+cost, and shares broad Git state with canonical) or a **local clone** (the CLI default, separate
 refs, stash, local config, and a default private `.git/hooks` location but may
 hard-link existing object files). `--strong` creates a clone with physically
-separate object files.
+separate object files at spawn; it is not an operating-system sandbox.
 
 Choose a worktree when repository history is very large, tasks are short, or
 workers are created and destroyed rapidly. Choose a clone when separate Git
@@ -32,8 +42,8 @@ that resolves outside the worker remains shared. Absolute values receive a
 compatibility warning, but tilde-prefixed and traversal-heavy values can also
 resolve outside the worker without that warning. Treat every copied
 `core.hooksPath` as potentially shared until its resolved location is known.
-Choose `--strong` only when physical object independence justifies copying the
-object database; it does not change this hook behavior.
+Choose `--strong` only when physical object independence at spawn justifies
+copying the object database; it does not change this hook behavior.
 
 ## Core rule
 
@@ -52,6 +62,14 @@ Before using this skill, account for these verified current limits:
   worker that holds ignored paths is refused until `--discard-ignored` is
   given; the refusal lists a count and a few names. Do not pass that flag
   unless the user has authorized destroying that ignored content.
+- Clone workers record resolvable non-task refs at publication. If a later
+  direct private ref or stash differs, collected-clone discard refuses until
+  `--discard-private-refs` is given; an older clone with no recorded baseline
+  fails closed the same way. A dangling symbolic private ref is currently
+  omitted, so do not use clone discard where one may exist. Report changed ref
+  names and do not pass that flag without authorization. The check also omits
+  later local-config, hook, or other non-ref `.git` changes, so review any such
+  clone-private setup before deletion.
 - Every published worker holds a cooperative work lease from spawn until an
   explicit `clonegrown release <worker-id>`. Discard, including `--abandon` and
   `--force`, refuses a leased worker, and recovery never treats a dead process
@@ -62,20 +80,28 @@ Before using this skill, account for these verified current limits:
   before releasing it.
 - Discard moves the worker to `.cws/quarantine/`, rechecks it, deletes it
   with errors enabled, and proves it absent before recording it gone. If the
-  worker changed after the custody check or deletion failed, the worker stays
-  preserved in quarantine and `status` shows `quarantine_path` and
-  `quarantine_error`; report that to the user rather than deleting anything
-  by hand. Running `clonegrown recover` resumes an interrupted deletion.
+  worker changed before deletion, it stays intact in quarantine. If authorized
+  recursive deletion had already begun when an error or interruption occurred,
+  only the remainder may survive. In either case `status` reports the retained
+  `quarantine_path` and `quarantine_error`; report that to the user rather than
+  deleting anything by hand. Running `clonegrown recover` reconciles the
+  recorded intent: it resumes a quarantined or durably authorized deletion,
+  while an untouched normal discard can be withdrawn for a fresh retry.
 - Recovery covers recorded lifecycle checkpoints, not every possible
   filesystem interruption. A published worker whose spawn was interrupted is
   promoted to `ready` if it is untouched and otherwise preserved in place as
   `broken`, with `error` saying how it differs; it is deleted only by an
   explicit release and `discard --abandon`. A worktree task branch is deleted
   only when Clonegrown proves it created it and it has not moved; a retained
-  branch is reported, never forced.
-- A collected worker is one-shot. An unchanged repeat collection is a no-op;
-  new commits after collection are rejected; `--abandon` and `claim` are
-  refused for it. Spawn a new worker for new work.
+  branch is reported, never forced. An interrupted collection is finished only
+  when its exact candidate can be published without replacing a ref and the
+  worker still matches; otherwise recovery returns it to `ready` and leaves
+  any conflicting ref untouched.
+- A collected worker is intended to be one-shot. An ordinary unchanged repeat
+  collection is a no-op; a repeat after an accepted `--allow-rewrite`
+  collection currently fails unless that option is supplied again. New commits
+  after collection are rejected; `--abandon` and `claim` are refused for it.
+  Spawn a new worker for new work.
 - Worktrees share broad Git state. Default clones can share existing object
   files through hard links. Neither mode is an operating-system sandbox.
 - The clone's invalid canonical-source push URL is an accident guard, not a
@@ -93,8 +119,9 @@ Before using this skill, account for these verified current limits:
   operation stage, last known durable mutation, work-preservation confidence,
   and required recovery or manual inspection. Treat `unverified` literally:
   do not infer that a write, rename, publication, or deletion did or did not
-  happen. Follow the stated recovery action, then use `clonegrown status` as
-  the authority. The CLI prints one contextual error without a traceback;
+  happen. Follow the stated recovery action, then use `clonegrown status` to
+  audit the documented workspace and worker invariants. The CLI prints one
+  contextual error without a traceback;
   command causes keep the targeted redaction above. Arbitrary exception text
   receives the same URL-userinfo and Clonegrown-custody-token filtering but is
   not generally secret-scanned. Process-control exceptions are deliberately
@@ -105,7 +132,9 @@ has stopped; release is your statement that the worker is quiet. Do not run
 `discard --abandon` unless the user has explicitly authorized destroying all
 content in that uncollected worker. Do not run `discard --force` unless the
 user has explicitly authorized destroying the detected post-collection
-changes. Neither flag overrides the lease. Never inspect dotenv files while
+changes. Do not run `discard --discard-ignored` or
+`discard --discard-private-refs` unless the user has authorized destroying the
+named category. No flag overrides the lease. Never inspect dotenv files while
 assessing ignored content; ask the user to handle those files themselves.
 
 ## Workspace lifecycle
@@ -122,10 +151,13 @@ assessing ignored content; ask the user to handle those files themselves.
 
    The worker starts from canonical `HEAD` unless `--base <ref-or-sha>` is
    supplied. Add `--worktree` for a linked worktree or `--strong` for a clone
-   with separate object files. Pass `--request-id <stable-id>` only when a
-   caller may retry the same request; matching retries with that ID and the
-   same parameters return the existing allocation. A spawn without a request
-   ID creates a new worker.
+   with physically separate object files at spawn. Pass
+   `--request-id <stable-id>` only when a
+   caller may retry the same request. A matching retry rejoins an in-flight
+   request or returns its existing ready, collected, or discarded outcome;
+   `abandoned` and `spawn_failed` outcomes make the ID retryable and allocate
+   anew, while `broken` must be resolved first. A spawn without a request ID
+   creates a new worker.
 
 3. Work only inside the returned worker repository. Keep unrelated processes
    out of it and retain the worker until all desired content is accounted for.
@@ -156,7 +188,9 @@ assessing ignored content; ask the user to handle those files themselves.
 
    If it refuses because of ignored paths, report them to the user; only with
    their authorization add `--discard-ignored`. If it refuses because of
-   changes after collection, that is `--force`, separately authorized.
+   changes after collection, that is `--force`, separately authorized. If a
+   clone's private refs differ from its publication baseline, report the names
+   and add `--discard-private-refs` only with separate authorization.
 
 9. If an operation was interrupted or durable state is unclear, reconcile the
    checkpoints Clonegrown can represent:
@@ -180,14 +214,17 @@ assessing ignored content; ask the user to handle those files themselves.
   alter a stash you did not create.
 - Do not treat Clonegrown as an operating-system security boundary.
 
-## Target custody contract — implemented
+## Target custody contract — intended; checkpoint not qualified
 
 The accepted protocol adds a durable cooperative work lease with an explicit
 release before deletion (`release`, `claim`), detects ignored paths and
 requires a separate `--discard-ignored` acknowledgement for a collected
-worker, quarantines an authenticated worker before checked deletion, keeps
-workers one-shot after collection, and leaves integration explicit. All of it
-is implemented.
+worker, detects changed direct clone-private refs and requires
+`--discard-private-refs`, quarantines an authenticated worker before checked
+deletion, keeps workers one-shot after collection, retains discarded result
+custody, and leaves integration explicit. The no-go notice at the top names
+the current deviations; do not treat this checkpoint as implementing the whole
+contract.
 
 ## Installation ownership
 

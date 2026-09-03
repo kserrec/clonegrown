@@ -37,7 +37,7 @@ class LeaseTests(unittest.TestCase):
         (item,) = [w for w in listing["workers"] if w["id"] == worker_id]
         return item["lease"]
 
-    # --- the lease blocks every deletion path until an explicit release ---------
+    # --- the lease blocks every published-worker deletion until release ---------
 
     def test_spawned_worker_is_leased_and_every_discard_form_is_refused(self) -> None:
         for mode in MODES:
@@ -184,7 +184,10 @@ class LeaseTests(unittest.TestCase):
     # --- spawn failures carry no lease to release ----------------------------------
 
     def test_failed_spawn_is_discardable_without_a_release(self) -> None:
-        environment = {"CWS_ERRORPOINT": "spawn.after_clone"}
+        environment = {
+            "CLONEGROWN_TEST_MODE": "1",
+            "CLONEGROWN_TEST_ERRORPOINT": "spawn.after_clone",
+        }
         old = {key: os.environ.get(key) for key in environment}
         os.environ.update(environment)
         try:

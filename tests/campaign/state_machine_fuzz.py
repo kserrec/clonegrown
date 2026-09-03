@@ -122,7 +122,7 @@ def one(seed:int,steps:int=100,strong_rate:float=.08):
                     record('discard_refused_changed',wid)
             elif op=='abandon' and (ready or collected):
                 wid=rng.choice(ready+collected); m=ms[wid]; repo=Path(m['path'])
-                # The lease blocks every deletion path until it is released; a collected worker is one-shot.
+                # The lease blocks every published-worker deletion until release; collection is one-shot.
                 try: cws.discard(w,wid,abandon=True); raise AssertionError('abandon accepted a leased worker')
                 except cws.ClonegrownError as exc: assert 'leased' in str(exc) or 'one-shot' in str(exc), exc
                 cws.release(w,wid)

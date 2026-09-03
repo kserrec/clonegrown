@@ -21,6 +21,7 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CAMPAIGN_DIRECTORY))
 
 import campaign_record  # noqa: E402
+import blocking_git  # noqa: E402
 import hardening_suite  # noqa: E402
 import random_kill  # noqa: E402
 import state_machine_fuzz  # noqa: E402
@@ -130,6 +131,38 @@ def workflow_trigger_keys(path: Path) -> set[str]:
 
 
 class CampaignRecordTests(unittest.TestCase):
+    def test_blocking_git_recognizes_fd_backed_commands_and_preserves_the_fd(self) -> None:
+        args = ["--git-dir=/dev/fd/71", "worktree", "repair", "/tmp/worker"]
+        self.assertEqual(blocking_git.command_arguments(args), args[1:])
+        self.assertEqual(blocking_git.inherited_descriptor_fds(args), (71,))
+        self.assertEqual(
+            blocking_git.command_arguments([
+                "-c", "safe.directory=/tmp/repo", "-C", "/tmp/repo", "fetch", "source",
+            ]),
+            ["fetch", "source"],
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory)
+            (control / "release").touch()
+            environment = {
+                "CLONEGROWN_TEST_REAL_GIT": "/usr/bin/git",
+                "CLONEGROWN_TEST_GIT_CONTROL": str(control),
+                "CLONEGROWN_TEST_GIT_TARGET": "worktree-repair",
+            }
+            completed = blocking_git.subprocess.CompletedProcess(
+                args=["/usr/bin/git", *args], returncode=0, stdout="", stderr="",
+            )
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(sys, "argv", ["blocking_git.py", *args]),
+                patch.object(blocking_git.subprocess, "run", return_value=completed) as run,
+            ):
+                self.assertEqual(blocking_git.main(), 0)
+
+            self.assertEqual(json.loads((control / "started.json").read_text())["args"], args[1:])
+            self.assertEqual(run.call_args.kwargs["pass_fds"], (71,))
+
     def test_random_kill_replay_is_one_exact_seed_in_the_recorded_mode(self) -> None:
         for mode in ("clone", "worktree"):
             for operation in ("spawn", "collect", "discard"):

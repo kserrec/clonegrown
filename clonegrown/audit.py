@@ -82,7 +82,7 @@ class NamespaceRefs:
 
 def audit_worker(ws: Path, state: WorkspaceState, canonical: Path, worker: WorkerRecord,
                  refs: NamespaceRefs) -> list[Issue]:
-    """Every way this record disagrees with the workspace, canonical, or the filesystem."""
+    """Documented ways this record can disagree with workspace, canonical, or filesystem state."""
     worker_id = int(worker.id)
     status = str(worker.status)
     issues: list[Issue] = []
@@ -95,8 +95,8 @@ def audit_worker(ws: Path, state: WorkspaceState, canonical: Path, worker: Worke
     owned_refs = refs.by_worker.get(worker_id, {})
 
     # Presence of the things each status owns.
-    if status in _LIVE_ON_DISK or (status == WorkerStatus.BROKEN and slot.exists()):
-        if not repo.exists():
+    if status in _LIVE_ON_DISK or (status == WorkerStatus.BROKEN and os.path.lexists(slot)):
+        if not os.path.lexists(slot) or (not slot.is_symlink() and not os.path.lexists(repo)):
             issue("worker-repository-missing", path=str(repo))
         else:
             try:
@@ -107,7 +107,7 @@ def audit_worker(ws: Path, state: WorkspaceState, canonical: Path, worker: Worke
             and not process_alive(worker.owner_pid, worker.owner_start)):
         issue("owner-process-dead", error=f"{status} owned by process {worker.owner_pid}, which is gone; recover finishes or withdraws it")
     if status in WorkerStatus.TOMBSTONE:
-        if slot.exists():
+        if os.path.lexists(slot):
             issue("tombstone-path-occupied", path=str(slot))
         if unrecorded_quarantine(ws, worker) is not None:
             issue("tombstone-quarantine-occupied", path=str(unrecorded_quarantine(ws, worker)))
@@ -118,7 +118,7 @@ def audit_worker(ws: Path, state: WorkspaceState, canonical: Path, worker: Worke
     if status == WorkerStatus.DISCARDING:
         if worker.quarantine_error:
             issue("quarantine-preserved", path=str(worker.quarantine_path), error=_short(worker.quarantine_error))
-        elif worker.quarantine_path and not os.path.lexists(worker.quarantine_path) and not slot.exists():
+        elif worker.quarantine_path and not os.path.lexists(worker.quarantine_path) and not os.path.lexists(slot):
             issue("deletion-incomplete", path=str(worker.quarantine_path))
         if worker.branch_cleanup_left or worker.worktree_admin_left:
             issue("cleanup-conflict", error=_short(worker.branch_cleanup_left or worker.worktree_admin_left or ""))
@@ -137,8 +137,9 @@ def audit_worker(ws: Path, state: WorkspaceState, canonical: Path, worker: Worke
     elif status in _PIN_DROPPED and pin is not None:
         issue("base-ref-stale", ref=pin_ref, value=pin)
 
-    # Collected results: immutable ref and summary pointer.
-    if status == WorkerStatus.COLLECTED:
+    # Collected and normally discarded results remain in custody indefinitely:
+    # the immutable ref is authoritative and the summary is its repairable pointer.
+    if status in {WorkerStatus.COLLECTED, WorkerStatus.DISCARDED}:
         if not ref_points_at(canonical, worker.result_ref, worker.result_sha):
             issue("result-ref-missing", ref=str(worker.result_ref), value=str(worker.result_sha))
         summary = owned_refs.get("result")

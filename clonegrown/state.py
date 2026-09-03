@@ -14,7 +14,6 @@ import json
 import os
 import re
 import stat
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -126,6 +125,44 @@ def worker_marker_path(repo: Path) -> Path:
     # The per-repository Git directory: .git itself for a clone, the private
     # .git/worktrees/<name> admin directory for a linked worktree.
     return git_dir(repo) / f"{PROTOCOL_NAME}-worker.json"
+
+
+def ensure_real_directory(path: Path, label: str, *, create: bool = False,
+                          parents: bool = False) -> Path:
+    """Create if requested, then prove ``path`` itself is a real directory.
+
+    ``mkdir(exist_ok=True)`` can accept a symlink to a directory, so the
+    non-following ``lstat`` is mandatory before any caller creates children or
+    reads/writes through this parent.
+    """
+    if create:
+        try:
+            path.mkdir(parents=parents, exist_ok=True)
+        except OSError as exc:
+            raise ClonegrownError(f"{label} cannot be created: {exc}") from exc
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        raise ClonegrownError(f"{label} is missing: {path}")
+    except OSError as exc:
+        raise ClonegrownError(f"{label} cannot be inspected: {exc}") from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise ClonegrownError(f"{label} is not a real directory: {path}")
+    return path
+
+
+def load_canonical_marker(path: Path) -> dict[str, Any]:
+    """Read a canonical identity marker only below a real directory and from a real file."""
+    ensure_real_directory(path.parent, "canonical marker directory")
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        raise ClonegrownError(f"canonical identity marker is missing: {path}")
+    except OSError as exc:
+        raise ClonegrownError(f"canonical identity marker cannot be inspected: {exc}") from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise ClonegrownError("canonical identity marker is not a real file")
+    return load_json(path)
 
 
 def validate_control_dir(ws: Path, require_state: bool = False) -> None:
@@ -311,12 +348,109 @@ class WorkspaceState:
             raise ClonegrownError("canonical Git directory identity changed")
         if object_format(canonical) != self.object_format:
             raise ClonegrownError("canonical object format changed")
-        marker = load_json(canonical_marker_path(canonical, str(self.workspace_id)))
+        marker = load_canonical_marker(canonical_marker_path(canonical, str(self.workspace_id)))
         if (marker.get("token") != self.canonical_token
                 or marker.get("workspace_id") != self.workspace_id
                 or lexical_abs(marker.get("canonical", "")) != lexical_abs(canonical)):
             raise ClonegrownError("canonical repository identity marker mismatch")
         return canonical
+
+
+def _directory_identity(path: Path, label: str) -> tuple[int, int]:
+    """A directory identity stable across renames, for one verify-to-lock interval."""
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise ClonegrownError(f"{label} is unavailable after canonical verification: {exc}") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ClonegrownError(f"{label} is no longer a real directory after canonical verification")
+    return metadata.st_dev, metadata.st_ino
+
+
+@dataclass(frozen=True)
+class VerifiedWorkspace:
+    """Canonical proof prepared outside a lock and checked against locked state before use.
+
+    The workspace counter is intentionally excluded from the identity comparison: a
+    concurrent allocation owns that change. Every other state value, both repository
+    directories, and the canonical token marker must still match before a caller may
+    mutate while holding ``workspace_lock``.
+    """
+
+    state: WorkspaceState
+    canonical: Path
+    canonical_git_dir: Path
+    canonical_identity: tuple[int, int]
+    canonical_git_dir_identity: tuple[int, int]
+
+    @classmethod
+    def load(cls, ws: Path) -> "VerifiedWorkspace":
+        state = WorkspaceState.load(ws)
+        canonical = state.verify_canonical()
+        canonical_git_dir = Path(str(state.canonical_git_dir)).resolve()
+        return cls(
+            state=state,
+            canonical=canonical,
+            canonical_git_dir=canonical_git_dir,
+            canonical_identity=_directory_identity(canonical, "canonical root"),
+            canonical_git_dir_identity=_directory_identity(canonical_git_dir, "canonical Git directory"),
+        )
+
+    @contextlib.contextmanager
+    def open_canonical_git_dir(self) -> Iterator[int]:
+        """Hold the verified Git directory by descriptor across later Git mutations.
+
+        A pathname identity check alone has a check/use gap: another process can
+        rename the canonical checkout and put a different repository at the same
+        name before Git starts. Opening before the locked reload and matching the
+        descriptor here lets callers address the already-authenticated repository
+        through ``/dev/fd`` even if its pathname changes afterward.
+        """
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(self.canonical_git_dir, flags)
+        except OSError as exc:
+            raise ClonegrownError(f"cannot open canonical Git directory: {exc}") from exc
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != self.canonical_git_dir_identity:
+                raise ClonegrownError("canonical Git directory identity changed before descriptor binding")
+            if not Path("/dev/fd").is_dir():
+                raise ClonegrownError("this platform cannot bind Git to an open canonical directory")
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    def reload_under_lock(self, ws: Path) -> WorkspaceState:
+        """Reload and match state/identity; the caller must already hold ``workspace_lock``."""
+        current = WorkspaceState.load(ws)
+        if int(current.next_id) < int(self.state.next_id):
+            raise ClonegrownError(
+                "workspace allocation counter moved backwards between canonical verification and locked use"
+            )
+        prepared_json = self.state.to_json()
+        current_json = current.to_json()
+        prepared_json.pop("next_id", None)
+        current_json.pop("next_id", None)
+        if current_json != prepared_json:
+            raise ClonegrownError("workspace identity changed between canonical verification and locked use")
+        if Path(str(current.canonical)).resolve() != self.canonical:
+            raise ClonegrownError("canonical root changed between verification and locked use")
+        if Path(str(current.canonical_git_dir)).resolve() != self.canonical_git_dir:
+            raise ClonegrownError("canonical Git directory changed between verification and locked use")
+        if _directory_identity(self.canonical, "canonical root") != self.canonical_identity:
+            raise ClonegrownError("canonical root identity changed between verification and locked use")
+        if (_directory_identity(self.canonical_git_dir, "canonical Git directory")
+                != self.canonical_git_dir_identity):
+            raise ClonegrownError("canonical Git directory identity changed between verification and locked use")
+        marker = load_canonical_marker(
+            self.canonical_git_dir / PROTOCOL_NAME / f"{current.workspace_id}.json"
+        )
+        if (marker.get("token") != current.canonical_token
+                or marker.get("workspace_id") != current.workspace_id
+                or lexical_abs(marker.get("canonical", "")) != lexical_abs(self.canonical)):
+            raise ClonegrownError("canonical repository identity marker mismatch")
+        return current
 
 
 # --- the worker record -------------------------------------------------------
@@ -347,7 +481,6 @@ class WorkerRecord:
     # ownership of an in-flight operation
     owner_pid: int | None = None
     owner_start: str | None = None
-    heartbeat: float | None = None
     # spawn
     worktree_admin: str | None = None         # .git/worktrees/<name>; cleared once the directory is proved gone
     worktree_admin_left: str | None = None    # why the admin directory was not removed
@@ -362,6 +495,7 @@ class WorkerRecord:
     copied_local_config: list[str] | None = None
     copied_sparse_checkout: bool | None = None
     copied_auxiliary_refs: dict[str, int] | None = None
+    clone_private_refs: dict[str, str] | None = None  # non-task refs at clone publication; absent means unverified
     compatibility_warnings: list[str] | None = None
     # collect
     candidate_sha: str | None = None
@@ -400,7 +534,8 @@ class WorkerRecord:
         return _from_json(cls, data)
 
     _SPAWN_DETAILS = frozenset({"source_remote", "alternates_detached", "copied_local_config",
-                                "copied_sparse_checkout", "copied_auxiliary_refs", "compatibility_warnings"})
+                                "copied_sparse_checkout", "copied_auxiliary_refs", "clone_private_refs",
+                                "compatibility_warnings"})
 
     def to_json(self) -> dict[str, Any]:
         # Spawn details are part of the ready contract: present (possibly null) once the worker was published.
@@ -435,7 +570,6 @@ class WorkerRecord:
         self.status = status
         self.owner_pid = os.getpid()
         self.owner_start = pid_fingerprint(os.getpid())
-        self.heartbeat = time.time()
 
     def release_ownership(self) -> None:
         self.owner_pid = None
@@ -596,6 +730,10 @@ def _is_str_int_dict(value: Any) -> bool:
     return isinstance(value, dict) and all(isinstance(k, str) and type(v) is int for k, v in value.items())
 
 
+def _is_str_str_dict(value: Any) -> bool:
+    return isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+
+
 _COMMIT_FIELDS = ("base_sha", "candidate_sha", "result_sha", "branch_cleanup_sha")
 _UNPUBLISHED = WorkerStatus.SPAWNING | {WorkerStatus.SPAWN_FAILED}
 _DISCARD_STATUSES = frozenset({WorkerStatus.DISCARDING}) | WorkerStatus.GONE
@@ -605,7 +743,6 @@ _DISCARD_ORIGINS = frozenset({WorkerStatus.READY, WorkerStatus.COLLECTED, Worker
 # (field, predicate over a non-None value, description for the error)
 _FIELD_SHAPES: tuple[tuple[str, Callable[[Any], bool], str], ...] = (
     ("created", _is_number, "a timestamp"),
-    ("heartbeat", _is_number, "a timestamp"),
     ("ready", _is_number, "a timestamp"),
     ("failed", _is_number, "a timestamp"),
     ("collect_started", _is_number, "a timestamp"),
@@ -635,6 +772,7 @@ _FIELD_SHAPES: tuple[tuple[str, Callable[[Any], bool], str], ...] = (
     ("copied_local_config", _is_str_list, "a list of config keys"),
     ("copied_sparse_checkout", lambda v: type(v) is bool, "a boolean"),
     ("copied_auxiliary_refs", _is_str_int_dict, "ref counts by namespace"),
+    ("clone_private_refs", _is_str_str_dict, "refs mapped to object IDs or symbolic targets"),
     ("compatibility_warnings", _is_str_list, "a list of warnings"),
     ("allow_rewrite", lambda v: type(v) is bool, "a boolean"),
 )
@@ -659,7 +797,8 @@ _STATUS_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
                               frozenset({"collected", "discarded"}) | _RESULT | _QUARANTINE),
     WorkerStatus.COLLECTED: (frozenset({"ready", "collected"}) | _RESULT, frozenset({"discarded"}) | _CANDIDATE | _QUARANTINE),
     WorkerStatus.DISCARDING: (_DISCARD, frozenset({"discarded"}) | _CANDIDATE),
-    WorkerStatus.DISCARDED: (frozenset({"discarded"}), _CANDIDATE | _QUARANTINE),
+    WorkerStatus.DISCARDED: (frozenset({"ready", "collected", "discarded"}) | _RESULT,
+                             _CANDIDATE | _QUARANTINE),
     WorkerStatus.ABANDONED: (frozenset({"discarded"}), _CANDIDATE | _QUARANTINE),
     WorkerStatus.SPAWN_FAILED: (frozenset({"failed", "error"}), _NOT_YET_PUBLISHED),
     WorkerStatus.BROKEN: (frozenset({"error"}), frozenset()),

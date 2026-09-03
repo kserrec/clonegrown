@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -38,7 +39,12 @@ class QuarantineTests(unittest.TestCase):
         return quarantine_root(self.ws, worker["id"], worker["worker_token"])
 
     def cli_process(self, *args: str, env: dict[str, str] | None = None) -> subprocess.Popen:
-        full_env = {**os.environ, "PYTHONPATH": str(ROOT), **(env or {})}
+        full_env = {
+            **os.environ,
+            "PYTHONPATH": str(ROOT),
+            "CLONEGROWN_TEST_MODE": "1",
+            **(env or {}),
+        }
         return subprocess.Popen([sys.executable, "-m", "clonegrown", *args], cwd=self.repo, env=full_env,
                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -78,8 +84,8 @@ class QuarantineTests(unittest.TestCase):
                 pause_marker = self.root / f"paused-{mode}"
                 process = self.cli_process(
                     "discard", str(worker["id"]),
-                    env={"CWS_PAUSEPOINT": "discard.before_delete", "CWS_PAUSE_MARKER": str(pause_marker),
-                         "CWS_PAUSE_SECONDS": "2"})
+                    env={"CLONEGROWN_TEST_PAUSEPOINT": "discard.before_delete", "CLONEGROWN_TEST_PAUSE_MARKER": str(pause_marker),
+                         "CLONEGROWN_TEST_PAUSE_SECONDS": "2"})
                 deadline = time.monotonic() + 30
                 while not pause_marker.exists():
                     self.assertLess(time.monotonic(), deadline, process.stderr.read() if process.poll() is not None else "")
@@ -114,6 +120,34 @@ class QuarantineTests(unittest.TestCase):
                     discard(self.ws, worker["id"])
                 self.assertEqual(discard(self.ws, worker["id"], force=True)["status"], "discarded")
                 self.assert_gone(worker)
+
+    def test_clone_ref_added_after_custody_check_is_preserved_in_quarantine(self) -> None:
+        worker = self.released_collected("late private ref", "clone")
+        repo = Path(worker["path"])
+        pause_marker = self.root / "private-ref-paused"
+        process = self.cli_process(
+            "discard", str(worker["id"]), "--discard-private-refs",
+            env={"CLONEGROWN_TEST_PAUSEPOINT": "discard.before_delete",
+                 "CLONEGROWN_TEST_PAUSE_MARKER": str(pause_marker),
+                 "CLONEGROWN_TEST_PAUSE_SECONDS": "2"},
+        )
+        deadline = time.monotonic() + 30
+        while not pause_marker.exists():
+            self.assertLess(
+                time.monotonic(), deadline,
+                process.stderr.read() if process.poll() is not None else "",
+            )
+            time.sleep(0.02)
+        run_git(repo, "update-ref", "refs/stash", "HEAD")
+        _, stderr = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 2, stderr)
+        self.assertIn("preserved in quarantine", stderr)
+
+        quarantine_repo = self.quarantine_of(worker) / repo.name
+        self.assertEqual(run_git(quarantine_repo, "rev-parse", "refs/stash").returncode, 0)
+        self.assertIn(("quarantine-preserved", worker["id"]), [
+            (issue["issue"], issue.get("id")) for issue in status(self.ws)["issues"]
+        ])
 
     # --- partial deletion stays recoverable ---------------------------------------------
 
@@ -199,7 +233,7 @@ class QuarantineTests(unittest.TestCase):
             for boundary in boundaries:
                 with self.subTest(mode=mode, boundary=boundary):
                     worker = self.released_collected(f"{boundary} {mode}", mode)
-                    process = self.cli_process("discard", str(worker["id"]), env={"CWS_FAILPOINT": boundary})
+                    process = self.cli_process("discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": boundary})
                     _, stderr = process.communicate(timeout=120)
                     self.assertEqual(process.returncode, 88, stderr)
                     for _ in range(2):
@@ -221,7 +255,7 @@ class QuarantineTests(unittest.TestCase):
                 (Path(worker["path"]) / "scratch.txt").write_text("x\n", encoding="utf-8")
                 release(self.ws, worker["id"])
                 process = self.cli_process("discard", str(worker["id"]), "--abandon",
-                                           env={"CWS_FAILPOINT": "discard.after_mark"})
+                                           env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_mark"})
                 _, stderr = process.communicate(timeout=120)
                 self.assertEqual(process.returncode, 88, stderr)
                 actions = {r.get("action") for r in recover(self.ws) if r.get("id") == worker["id"]}
@@ -233,7 +267,7 @@ class QuarantineTests(unittest.TestCase):
 
     def test_residue_after_a_crash_is_never_labelled_gone(self) -> None:
         worker = self.released_collected("residue")
-        process = self.cli_process("discard", str(worker["id"]), env={"CWS_FAILPOINT": "discard.after_quarantine"})
+        process = self.cli_process("discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_quarantine"})
         _, stderr = process.communicate(timeout=120)
         self.assertEqual(process.returncode, 88, stderr)
         quarantine = self.quarantine_of(worker)
@@ -255,7 +289,7 @@ class QuarantineTests(unittest.TestCase):
         for mode, mutate in (("clone", False), ("worktree", False), ("clone", True), ("worktree", True)):
             with self.subTest(mode=mode, mutate=mutate):
                 worker = self.released_collected(f"intent {mode} {mutate}", mode)
-                process = self.cli_process("discard", str(worker["id"]), env={"CWS_FAILPOINT": "discard.before_delete"})
+                process = self.cli_process("discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.before_delete"})
                 _, stderr = process.communicate(timeout=120)
                 self.assertEqual(process.returncode, 88, stderr)
                 record = self.record(worker["id"])
@@ -288,7 +322,7 @@ class QuarantineTests(unittest.TestCase):
                 worker = spawn(self.ws, "HEAD", f"abandon intent {mode}", strong=False, mode=mode)
                 release(self.ws, worker["id"])
                 process = self.cli_process("discard", str(worker["id"]), "--abandon",
-                                           env={"CWS_FAILPOINT": "discard.before_delete"})
+                                           env={"CLONEGROWN_TEST_FAILPOINT": "discard.before_delete"})
                 _, stderr = process.communicate(timeout=120)
                 self.assertEqual(process.returncode, 88, stderr)
                 if mutate:
@@ -306,7 +340,7 @@ class QuarantineTests(unittest.TestCase):
         for mode in MODES:
             with self.subTest(mode=mode):
                 worker = self.released_collected(f"unrecorded {mode}", mode)
-                process = self.cli_process("discard", str(worker["id"]), env={"CWS_FAILPOINT": "discard.after_quarantine"})
+                process = self.cli_process("discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_quarantine"})
                 process.communicate(timeout=120)
                 path = worker_record_path(self.ws, worker["id"])
                 data = self.record(worker["id"])
@@ -345,8 +379,8 @@ class QuarantineTests(unittest.TestCase):
         pause_marker = self.root / "paused-rewrite"
         process = self.cli_process(
             "discard", str(worker["id"]), "--abandon",
-            env={"CWS_PAUSEPOINT": "discard.before_delete", "CWS_PAUSE_MARKER": str(pause_marker),
-                 "CWS_PAUSE_SECONDS": "2"})
+            env={"CLONEGROWN_TEST_PAUSEPOINT": "discard.before_delete", "CLONEGROWN_TEST_PAUSE_MARKER": str(pause_marker),
+                 "CLONEGROWN_TEST_PAUSE_SECONDS": "2"})
         deadline = time.monotonic() + 30
         while not pause_marker.exists():
             self.assertLess(time.monotonic(), deadline)
@@ -418,9 +452,9 @@ class QuarantineTests(unittest.TestCase):
         self.assert_gone(worker)
 
     def test_recover_continues_past_a_worker_it_cannot_inspect(self) -> None:
-        first = self.cli_process("spawn", "uninspectable", "--request-id", "u", env={"CWS_FAILPOINT": "spawn.after_publish"})
+        first = self.cli_process("spawn", "uninspectable", "--request-id", "u", env={"CLONEGROWN_TEST_FAILPOINT": "spawn.after_publish"})
         first.communicate(timeout=120)
-        second = self.cli_process("spawn", "fine", "--request-id", "f", env={"CWS_FAILPOINT": "spawn.after_publish"})
+        second = self.cli_process("spawn", "fine", "--request-id", "f", env={"CLONEGROWN_TEST_FAILPOINT": "spawn.after_publish"})
         second.communicate(timeout=120)
         workers = {w["request_id"]: w for w in status(self.ws)["workers"]}
         broken_index = Path(workers["u"]["path"]) / ".git" / "index"
@@ -448,6 +482,48 @@ class QuarantineTests(unittest.TestCase):
             self.assertNotIn("tombstone-path-cleaned", actions)
             self.assertTrue((Path(worker["path"]) / "work.txt").is_file())
 
+    def test_dangling_worker_slot_symlink_never_counts_as_absent(self) -> None:
+        worker = self.released_collected("dangling slot")
+        slot = Path(worker["path"]).parent
+        relocated = self.root / "relocated-authentic-worker"
+        record_path = worker_record_path(self.ws, worker["id"])
+        before = record_path.read_bytes()
+        os.rename(slot, relocated)
+        os.symlink(self.root / "missing-target", slot, target_is_directory=True)
+        try:
+            with self.assertRaisesRegex(ClonegrownError, "symlink"):
+                discard(self.ws, worker["id"])
+            self.assertEqual(record_path.read_bytes(), before)
+            self.assertTrue(os.path.lexists(slot) and slot.is_symlink() and not slot.exists())
+            self.assertTrue((relocated / self.repo.name / "work.txt").is_file())
+
+            issues = [issue for issue in status(self.ws)["issues"] if issue.get("id") == worker["id"]]
+            self.assertEqual([issue["issue"] for issue in issues], ["worker-authentication-failed"])
+            reports = [item for item in recover(self.ws) if item.get("id") == worker["id"]]
+            self.assertIn("collected-worker-path-invalid", [item["action"] for item in reports])
+            self.assertEqual(record_path.read_bytes(), before)
+            self.assertTrue(os.path.lexists(slot))
+            self.assertTrue((relocated / self.repo.name / "work.txt").is_file())
+        finally:
+            if os.path.lexists(slot):
+                slot.unlink()
+            if relocated.exists():
+                shutil.rmtree(relocated)
+
+    def test_dangling_tombstone_slot_is_reported_and_left(self) -> None:
+        worker = self.released_collected("dangling tombstone")
+        discard(self.ws, worker["id"])
+        slot = Path(worker["path"]).parent
+        os.symlink(self.root / "missing-after-discard", slot, target_is_directory=True)
+        self.assertEqual(
+            [(issue["issue"], issue["id"]) for issue in status(self.ws)["issues"]],
+            [("tombstone-path-occupied", worker["id"])],
+        )
+        actions = [item["action"] for item in recover(self.ws) if item.get("id") == worker["id"]]
+        self.assertIn("tombstone-path-left", actions)
+        self.assertTrue(os.path.lexists(slot) and not slot.exists())
+        slot.unlink()
+
     def test_quarantine_directory_as_file_or_symlink_is_refused_and_reported(self) -> None:
         worker = self.released_collected("bad root")
         root = self.ws / ".cws" / "quarantine"
@@ -473,7 +549,7 @@ class QuarantineTests(unittest.TestCase):
         for mode in MODES:
             with self.subTest(mode=mode):
                 worker = self.released_collected(f"stale intent {mode}", mode)
-                process = self.cli_process("discard", str(worker["id"]), env={"CWS_FAILPOINT": "discard.after_mark"})
+                process = self.cli_process("discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_mark"})
                 _, stderr = process.communicate(timeout=120)
                 self.assertEqual(process.returncode, 88, stderr)
                 repo = Path(worker["path"])
@@ -507,8 +583,8 @@ class QuarantineTests(unittest.TestCase):
                 pause_marker = self.root / f"paused-ignored-{mode}"
                 process = self.cli_process(
                     "discard", str(worker["id"]), "--abandon",
-                    env={"CWS_PAUSEPOINT": "discard.before_delete", "CWS_PAUSE_MARKER": str(pause_marker),
-                         "CWS_PAUSE_SECONDS": "2"})
+                    env={"CLONEGROWN_TEST_PAUSEPOINT": "discard.before_delete", "CLONEGROWN_TEST_PAUSE_MARKER": str(pause_marker),
+                         "CLONEGROWN_TEST_PAUSE_SECONDS": "2"})
                 deadline = time.monotonic() + 30
                 while not pause_marker.exists():
                     self.assertLess(time.monotonic(), deadline)
@@ -531,7 +607,7 @@ class QuarantineTests(unittest.TestCase):
         x = spawn(self.ws, "HEAD", "x", strong=False, mode="worktree")
         y = spawn(self.ws, "HEAD", "y", strong=False, mode="worktree")
         release(self.ws, x["id"])
-        process = self.cli_process("discard", str(x["id"]), "--abandon", env={"CWS_FAILPOINT": "discard.after_mark"})
+        process = self.cli_process("discard", str(x["id"]), "--abandon", env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_mark"})
         process.communicate(timeout=120)
         target = self.quarantine_of(x)
         target.parent.mkdir(exist_ok=True)
@@ -560,7 +636,7 @@ class QuarantineTests(unittest.TestCase):
 
     def test_occupied_derived_path_withdraws_a_normal_discard(self) -> None:
         worker = self.released_collected("occupied normal")
-        process = self.cli_process("discard", str(worker["id"]), env={"CWS_FAILPOINT": "discard.after_mark"})
+        process = self.cli_process("discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_mark"})
         process.communicate(timeout=120)
         target = self.quarantine_of(worker)
         target.mkdir(parents=True)
@@ -596,8 +672,8 @@ class QuarantineTests(unittest.TestCase):
         pause_marker = self.root / "paused-nested"
         process = self.cli_process(
             "discard", str(worker["id"]), "--abandon",
-            env={"CWS_PAUSEPOINT": "discard.before_delete", "CWS_PAUSE_MARKER": str(pause_marker),
-                 "CWS_PAUSE_SECONDS": "2"})
+            env={"CLONEGROWN_TEST_PAUSEPOINT": "discard.before_delete", "CLONEGROWN_TEST_PAUSE_MARKER": str(pause_marker),
+                 "CLONEGROWN_TEST_PAUSE_SECONDS": "2"})
         deadline = time.monotonic() + 30
         while not pause_marker.exists():
             self.assertLess(time.monotonic(), deadline)
@@ -615,7 +691,7 @@ class QuarantineTests(unittest.TestCase):
     def test_quarantined_worktree_whose_admin_was_pruned_is_still_deletable_with_acknowledgement(self) -> None:
         import shutil
         worker = self.released_collected("pruned admin", "worktree")
-        process = self.cli_process("discard", str(worker["id"]), env={"CWS_FAILPOINT": "discard.after_quarantine"})
+        process = self.cli_process("discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_quarantine"})
         process.communicate(timeout=120)
         shutil.rmtree(Path(worker["worktree_admin"]))  # what `git worktree prune` would do to a moved checkout
         actions = {r.get("action") for r in recover(self.ws) if r.get("id") == worker["id"]}
@@ -638,7 +714,7 @@ class QuarantineTests(unittest.TestCase):
                 worker = spawn(self.ws, "HEAD", f"two copies {mode}", strong=False, mode=mode)
                 release(self.ws, worker["id"])
                 process = self.cli_process("discard", str(worker["id"]), "--abandon",
-                                           env={"CWS_FAILPOINT": "discard.after_quarantine"})
+                                           env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_quarantine"})
                 process.communicate(timeout=120)
                 quarantine = self.quarantine_of(worker)
                 shutil.copytree(quarantine, Path(worker["path"]).parent)  # an authentic copy is put back in the slot
@@ -660,7 +736,7 @@ class QuarantineTests(unittest.TestCase):
         stuck = self.released_collected("unreadable")
         fine = self.released_collected("fine")
         for worker in (stuck, fine):
-            process = self.cli_process("discard", str(worker["id"]), env={"CWS_FAILPOINT": "discard.after_quarantine"})
+            process = self.cli_process("discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_quarantine"})
             process.communicate(timeout=120)
         stuck_repo = self.quarantine_of(stuck) / Path(stuck["path"]).name
         stuck_repo.chmod(0)  # Git cannot even enter it: a bare OSError, not a Clonegrown error
@@ -758,7 +834,7 @@ class QuarantineTests(unittest.TestCase):
 
     def test_cli_status_shows_quarantine_without_bookkeeping(self) -> None:
         worker = self.released_collected("cli view")
-        process = self.cli_process("discard", str(worker["id"]), env={"CWS_FAILPOINT": "discard.after_quarantine"})
+        process = self.cli_process("discard", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_quarantine"})
         process.communicate(timeout=120)
         rc, listing = run_cli(self.repo, "status")
         self.assertEqual(rc, 0)
