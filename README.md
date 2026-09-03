@@ -14,17 +14,25 @@ cherry-pick, or otherwise integrate that result into a user branch.
 > that ignores it. Do not use unattended cleanup for valuable work. Read [Current alpha safety
 > boundary](#current-alpha-safety-boundary) before using `discard`.
 
-> **Qualification checkpoint — no-go (2026-09-02):** Current `main` is a
-> preservation checkpoint, not a release. Fresh real-repository probes found
-> six open contract defects: clone discard can miss a dangling symbolic private
-> ref; worktree spawn can overwrite a dangling symbolic task-branch name;
-> dangling workspace-state, request-index, and worker-record links can be
-> treated as absent; CLI init can follow a selected workspace symlink;
-> `GIT_CONFIG` can reach child Git commands; and an unchanged repeat collection
-> can reject a previously accepted history rewrite. Do not rely on the affected
-> guarantees or use this checkpoint for irreplaceable work. The exact
-> reproductions, causes, passing gates, and pending remediation Steps are in
-> [the Phase 7 cold-review record](research/FINAL_COLD_REVIEW.md).
+> **Qualification pending (2026-09-02):** This tree is not yet a release. The
+> second fresh cold review found six contract defects: clone discard could miss
+> a dangling symbolic private ref; worktree spawn could overwrite a dangling
+> symbolic task-branch name; dangling workspace-state, request-index, and
+> worker-record links could be treated as absent; CLI init could follow a
+> selected workspace symlink; `GIT_CONFIG` could reach child Git commands; and
+> an unchanged repeat collection could reject a previously accepted history
+> rewrite. All six are repaired on this tree, each with a class regression
+> (Steps 7.5j–7.5o in [`PLAN.md`](PLAN.md)). Eight further fresh reviews of
+> the repaired tree found and Steps 7.5p–7.5ae repaired: an inherited
+> `GIT_*` override or a worker-local replace ref or graft file could fake
+> ancestry; quarantine re-authorization skipped the ignored-content
+> category; dangling symbolic refs, non-ref files, filesystem symlinks, FIFOs,
+> and FIFO-backed symbolic chains under Clonegrown's ref names were not all
+> treated as foreign occupants or could still block Git.
+> Release still requires a fresh
+> no-open-finding cold review and green hosted CI on the pushed revision; until
+> then do not use it for irreplaceable work. The reproductions and causes are
+> in [the Phase 7 cold-review record](research/FINAL_COLD_REVIEW.md).
 
 ## Install
 
@@ -332,8 +340,10 @@ section.
   evidence behind.
 - Worker allocation and lifecycle metadata updates use workspace and worker
   locks.
-- The Python API refuses a selected workspace path that is itself a symlink;
-  the current CLI adapter does not preserve that lexical check. Init then
+- The Python API and the CLI both refuse a selected workspace path that is
+  itself a symlink, leaving the link and its target untouched; a symlink
+  higher up the selected path is followed, and the workspace is recorded at
+  its resolved location. Init then
   refuses symlinked workspace-control and canonical-marker parents before
   creating children or writing markers through them. Collection and normal
   deletion authenticate the published worker path and marker before acting on
@@ -357,9 +367,8 @@ section.
   deleting an uncollected worker requires explicit `--abandon`; detected
   post-collection drift requires explicit `--force`; a collected worker's
   Git-ignored paths require explicit `--discard-ignored`; and changed or
-  unverified direct clone-private refs require explicit
-  `--discard-private-refs`; dangling symbolic private refs remain the open
-  Step 7.5j gap.
+  unverified clone-private refs, direct or symbolic and whether or not a
+  symbolic target exists, require explicit `--discard-private-refs`.
   A collected worker cannot be abandoned or claimed again. A failed
   unpublished spawn owns no published worker and has no releasable lease;
   discarding its authenticated residue still requires `--abandon`.
@@ -401,12 +410,30 @@ not hypothetical platform concerns:
 - Collection and drift snapshots omit Git-ignored paths. Discard of a
   collected worker enumerates them by name through Git's own ignore rules and
   refuses without `--discard-ignored`; `--abandon` on an uncollected worker
-  authorizes deleting everything, ignored content included.
-- A clone records resolvable non-task refs at publication. Normal
-  collected-clone discard compares their direct object IDs and resolvable
-  symbolic targets, including `refs/stash`, and refuses differences or an
-  absent legacy baseline without `--discard-private-refs`. It currently omits
-  a dangling symbolic ref, so do not rely on this safeguard for such refs. The
+  authorizes deleting everything, ignored content included. A worker
+  preserved in quarantine is asked every category again against the
+  quarantined content before a second `discard` deletes it, one missing
+  category per refusal, and no normal deletion resumes or is re-authorized
+  while the collected result is no longer preserved in canonical. A
+  collected worker whose result ref disappears is never marked `broken` for
+  that alone: `recover` re-creates the ref from the recorded identity when
+  the object is still present and the name is free, and otherwise reports it
+  and leaves the worker collected and undeleted. A `broken` worker that
+  still records a collected result keeps that result audited by `status`
+  until it is abandoned. A quarantined worktree whose admin directory was
+  pruned needs `--discard-ignored` because its ignored paths cannot be
+  enumerated; a quarantined clone whose Git directory no longer works is
+  refused outright and stays in quarantine for manual inspection.
+- A clone records a raw inventory of its non-task refs at publication:
+  `for-each-ref` for everything that resolves plus a walk of the loose ref
+  files under `refs/`, so a symbolic ref is recorded by its target whether or
+  not that target exists. Pseudo-refs outside `refs/` such as `ORIG_HEAD`,
+  `FETCH_HEAD`, and `MERGE_HEAD` are not refs and are not in the baseline;
+  a commit reachable only from one of them is not protected by it. Normal collected-clone discard compares that inventory,
+  including `refs/stash`, and refuses differences or an absent baseline
+  without `--discard-private-refs`. A clone whose refs are not stored as files
+  (`extensions.refstorage` other than `files`) has no raw walk and fails
+  closed the same way. The
   assigned task branch remains covered by the result and drift checks. This ref
   baseline does not inspect or preserve other changes inside `.git`, such as
   later local-config or hook edits; review any such clone-private setup before
@@ -416,8 +443,8 @@ not hypothetical platform concerns:
   fingerprint. The fingerprint covers Git's status listing plus the size and
   modification time of every entry in the worker directory tree except
   `.git` (nested repositories, FIFOs, and sockets included), and for clones it
-  also covers the same resolvable ref listing; a dangling symbolic ref, a
-  non-ref `.git` change, or a file-tree rewrite that keeps both size and
+  also covers the same raw ref inventory, dangling symbolic refs included; a
+  non-ref `.git` change or a file-tree rewrite that keeps both size and
   timestamp is not detected.
 - The deletion unit is the slot directory `<workspace>/<id>/`. Anything
   placed beside the repository inside it is fingerprinted but never
@@ -443,11 +470,16 @@ not hypothetical platform concerns:
   URL-userinfo and Clonegrown-custody-token filtering but is not generally
   secret-scanned. Process-control exceptions such as `KeyboardInterrupt`,
   `SystemExit`, and `GeneratorExit` pass through untouched.
-- A collected worker is intended to be one-shot: collecting the same unchanged
-  tip is normally a no-op, while new commits after collection are rejected. A
-  repeat after collection accepted with `--allow-rewrite` currently fails
-  unless the policy is supplied again; Step 7.5o owns that defect. Start a new
-  worker for new work.
+- A collected worker is one-shot: collecting the same unchanged tip is a
+  no-op judged by the rewrite policy the original collection recorded, so a
+  repeat after `--allow-rewrite` needs no flag, while new commits or a new
+  rewrite after collection are rejected under any argument. Ancestry is
+  judged by object content: replace refs and graft files, whether inherited
+  through the environment or planted inside the worker, are ignored, and the
+  judgement is repeated on canonical's copy of the objects after the fetch,
+  again by recovery before it finishes an interrupted collection, and by
+  `status`, which reports drift for a collected result canonical cannot
+  confirm. Start a new worker for new work.
 - Clonegrown provides Git-state separation, not an operating-system sandbox.
   An unrestricted process can traverse into other directories.
 - Worktree workers share broad Git state. Default clones separate refs, stash,
@@ -461,9 +493,9 @@ The intended target custody contract is recorded in [`PLAN.md`](PLAN.md) and
 [Architecture](ARCHITECTURE.md#target-custody-contract--intended-checkpoint-not-qualified):
 a durable cooperative lease, explicit acknowledgement for ignored content,
 authenticated quarantine before checked deletion, one-shot workers after
-collection, and explicit integration. The no-go warning above lists the six
-current deviations that must be repaired before this contract is called
-implemented.
+collection, and explicit integration. The qualification notice above records
+the six deviations repaired on this tree and the review still required before
+this contract is called implemented.
 
 Git LFS remains unsupported in 0.x: `git-lfs` is not a Clonegrown dependency,
 and Clonegrown neither installs it nor simulates its filter-process, object

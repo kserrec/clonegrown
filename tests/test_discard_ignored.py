@@ -176,6 +176,62 @@ class DiscardIgnoredTests(unittest.TestCase):
         self.assertEqual(discarded["status"], "discarded")
         self.assertFalse(repo.exists())
 
+    def test_symbolic_private_refs_are_in_custody_whether_or_not_they_resolve(self) -> None:
+        """The baseline is a raw ref inventory: a dangling symbolic ref is invisible to
+        for-each-ref but is still clone-private state, in every direction of change."""
+        ref, target = "refs/local/bookmark", "refs/heads/future-work"
+        cases = {
+            "unchanged": (target, None),
+            "changed": (target, "refs/heads/other-future"),
+            "removed": (target, "delete"),
+            "added": (None, target),
+        }
+        for label, (baseline_target, after) in cases.items():
+            with self.subTest(case=label):
+                worker = self.collected_worker(f"symbolic {label}")
+                repo = Path(worker["path"])
+                record_path = worker_record_path(self.ws, worker["id"])
+                if baseline_target is not None:
+                    # Planted before the record's baseline is fixed: the same raw entry the
+                    # publication snapshot records for a symbolic ref, dangling or not.
+                    run_git(repo, "symbolic-ref", ref, baseline_target)
+                    self.assertEqual(run_git(repo, "for-each-ref", ref).stdout, "")  # dangling: Git hides it
+                    record = json.loads(record_path.read_text(encoding="utf-8"))
+                    record["clone_private_refs"][ref] = f"symref:{baseline_target}"
+                    record_path.write_text(json.dumps(record), encoding="utf-8")
+                if after == "delete":
+                    run_git(repo, "symbolic-ref", "--delete", ref)
+                elif after is not None:
+                    run_git(repo, "symbolic-ref", ref, after)
+                if label == "unchanged":
+                    self.assertEqual(discard(self.ws, worker["id"])["status"], "discarded")
+                    continue
+                with self.assertRaisesRegex(ClonegrownError, "--discard-private-refs.*" + ref):
+                    discard(self.ws, worker["id"])
+                self.assertTrue(repo.is_dir())
+                if after != "delete":
+                    self.assertEqual(run_git(repo, "symbolic-ref", ref).stdout.strip(), after or target)
+                self.assertEqual(discard(self.ws, worker["id"], discard_private_refs=True)["status"], "discarded")
+                self.assertFalse(repo.exists())
+
+    def test_publication_baseline_records_dangling_symbolic_refs_raw(self) -> None:
+        from clonegrown.worker import snapshot_clone_private_refs
+        worker = self.collected_worker("raw inventory")
+        repo = Path(worker["path"])
+        run_git(repo, "symbolic-ref", "refs/local/dangling", "refs/heads/absent")
+        run_git(repo, "symbolic-ref", "refs/local/live", "refs/heads/" + worker["branch"])
+        run_git(repo, "update-ref", "refs/local/direct", "HEAD")
+        head = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+        snapshot = snapshot_clone_private_refs(repo, worker["branch"])
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["refs/local/dangling"], "symref:refs/heads/absent")
+        self.assertEqual(snapshot["refs/local/live"], "symref:refs/heads/" + worker["branch"])
+        self.assertEqual(snapshot["refs/local/direct"], head)
+        self.assertNotIn("refs/heads/" + worker["branch"], snapshot)
+        # Packed refs are still covered once the loose files are gone.
+        run_git(repo, "pack-refs", "--all")
+        self.assertEqual(snapshot_clone_private_refs(repo, worker["branch"]), snapshot)
+
     def test_task_branch_result_is_not_reported_as_a_private_ref_change(self) -> None:
         worker = self.collected_worker("ordinary result")
         self.assertEqual(discard(self.ws, worker["id"])["status"], "discarded")

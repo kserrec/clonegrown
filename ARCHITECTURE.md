@@ -3,14 +3,18 @@
 Clonegrown is a single Python package with no runtime dependencies beyond the
 standard library, Git 2.29.0+, and Python 3.11+.
 
-> **Current implementation status (2026-09-02): no-go.** This document states
-> the intended alpha protocol, but the checkpoint on `main` has six verified
-> deviations involving dangling symbolic private/task refs, dangling control
-> paths, CLI workspace-symlink handling, inherited `GIT_CONFIG`, and repeated
-> collection after an accepted rewrite. Do not interpret the corresponding
-> guarantees below as release evidence. See
-> [`research/FINAL_COLD_REVIEW.md`](research/FINAL_COLD_REVIEW.md) and pending
-> Steps 7.5j–7.5o in [`PLAN.md`](PLAN.md).
+> **Current implementation status (2026-09-02): repaired, review pending.**
+> The second cold review found six deviations involving dangling symbolic
+> private/task refs, dangling control paths, CLI workspace-symlink handling,
+> inherited `GIT_CONFIG`, and repeated collection after an accepted rewrite;
+> later reviews found inherited or worker-local history overrides faking
+> ancestry, a skipped ignored-content re-authorization, foreign occupants of
+> owned ref names not all refused, and Git commands still reachable through
+> FIFO-backed symbolic chains. Steps 7.5j–7.5ae in [`PLAN.md`](PLAN.md)
+> repair each with a class regression.
+> Nothing here is release evidence until a fresh no-open-finding review and
+> green hosted CI are recorded. See
+> [`research/FINAL_COLD_REVIEW.md`](research/FINAL_COLD_REVIEW.md).
 
 ```text
 clonegrown/
@@ -341,8 +345,12 @@ The task branch is intended to have the same compare-and-swap ownership. Worktre
 provisioning creates `refs/heads/<branch>` and the worker's private ownership
 ref `refs/cws/<ws>/workers/<id>/branch-owner` in one `git update-ref --stdin`
 transaction with create-only semantics, before checkout: a direct branch that
-already exists under the deterministic name aborts both, untouched. A dangling
-symbolic occupant is currently overwritten; Step 7.5k owns that deviation.
+already exists under the deterministic name aborts both, untouched. Because
+Git's create-only check treats a symbolic ref with an absent target as
+nonexistent, the transaction is held prepared, with both ref locks taken,
+while each name's raw type is read; any symbolic occupant aborts it untouched.
+Allocation also lists any raw occupant of the generated name as evidence, so
+the ID is never consumed over a collision.
 Before cleanup, discard records the branch's current tip
 (`branch_cleanup_sha`), or
 the all-zero id if the branch is already absent. Cleanup deletes the branch
@@ -369,8 +377,11 @@ alone.
 Recovery of an interrupted published spawn never deletes the worker. It
 repairs a worktree's back-pointer, authenticates the directory, and promotes
 an untouched worker (clean, on its task branch, `HEAD` at the recorded base,
-no Git operation in progress) to `ready`. Anything else is marked `broken`
-and preserved exactly as it is, with `error` naming the kind of difference
+no Git operation in progress) to `ready`. A worker recovery cannot inspect
+because another worker's foreign ref would block Git is left untouched and
+reported as `recovery-failed` until that occupant is removed. Anything else
+is marked `broken` and preserved exactly as it is, with `error` naming the
+kind of difference
 (uncommitted or untracked changes, `HEAD` moved, off the branch, operation in
 progress) and never a path or content; its base pin, branch, and admin
 directory stay until the user releases and abandons it. An unpublished spawn
@@ -482,7 +493,9 @@ file (an advisory control file for an id with no record, which would
 otherwise block that id's allocation) is removed and reported. No operation
 creates a lock file for an id that names no worker. Every write or deletion
 of a ref under `refs/cws/<ws>/` uses `--no-deref` and is refused outright for
-a symbolic ref: a symbolic ref planted under one of Clonegrown's names is
+a symbolic ref: a symbolic ref planted under one of Clonegrown's names,
+whether or not its target exists, or a filesystem symlink at that name
+(`is_foreign_ref`), is
 reported as `namespace-ref-symbolic`, excluded from every per-worker view,
 and never used to reach the branch it points at. Each represented recovery
 transition uses identity or expected-value checks so it can be retried without
@@ -599,12 +612,14 @@ when one applies, and bounded context (`path`, `ref`, `value`, or a short
 `worker-repository-missing`, `worker-authentication-failed`,
 `stage-residue`, `base-ref-missing`, `base-ref-stale`, `result-ref-missing`,
 `summary-ref-mismatch`, `candidate-ref-retained`, `task-branch-missing`,
-`branch-owner-ref-missing`, `worktree-admin-missing`, `quarantine-preserved`,
+`task-branch-foreign`, `branch-owner-ref-missing`, `worktree-admin-missing`,
+`quarantine-preserved`,
 `deletion-incomplete`, `cleanup-conflict`, `cleanup-evidence-retained`,
 `owner-process-dead`, `tombstone-path-occupied`,
 `tombstone-quarantine-occupied`, `namespace-ref-symbolic`, and
 `orphan-stage`. `status` runs Git only in read-only forms
-(`--no-optional-locks status`, `rev-parse`, `for-each-ref`), so it does not
+(`--no-optional-locks status`, `rev-parse`, `for-each-ref`, `symbolic-ref`,
+`config --get`, `cat-file -e`, `merge-base --is-ancestor`), so it does not
 refresh a worker's index either. Two issues have a manual remedy by design:
 a `request-index-invalid`/`request-index-stale` file blocks its request ID
 until the named file under `.cws/requests/` is removed by hand, and a
@@ -617,15 +632,19 @@ canonical, object_format, repo_name, created}`.
 
 ## Intended safeguards and current checkpoint gaps
 
-Except where the opening no-go notice or text below identifies an open
-deviation, these safeguards are implemented and covered by the recorded tests.
+These safeguards are implemented and covered by the recorded tests; the
+opening notice states what qualification still requires.
 
 - Worker allocation and transactional metadata updates use advisory workspace
   and per-worker locks. Those locks do not coordinate with an agent or another
   process writing directly inside the worker.
 - The lifecycle API validates an existing selected workspace path without
-  following it, but the current CLI resolves that option before the check.
-  Init then preflights every existing workspace/control parent
+  following it, and the CLI hands `--workspace` over lexically so both entry
+  points refuse the same selected symlink; a symlink above the selected name
+  is followed, and init creates the real control subdirectories in
+  parent-before-child order before it inspects an existing state file, so a
+  dangling `state.json` link is refused after those directories exist but
+  before any file is written or replaced. Init then preflights every existing workspace/control parent
   and the canonical marker directory before mutation, then creates and
   `lstat`-validates real
   directories in parent-before-child order. Canonical identity-marker reads
@@ -668,10 +687,10 @@ deviation, these safeguards are implemented and covered by the recorded tests.
   detected post-collection drift requires `--force`; ignored paths, which the
   drift snapshot omits, are enumerated by name with
   `git ls-files -z --others --ignored --exclude-standard --directory` and
-  require `--discard-ignored`. A clone's resolvable non-task refs are recorded
-  at publication; changed refs or an absent legacy baseline require
-  `--discard-private-refs`. The inventory currently omits dangling symbolic
-  refs. A failed unpublished spawn has no releasable lease;
+  require `--discard-ignored`. A clone's non-task refs are recorded raw at
+  publication (`for-each-ref` plus a walk of the loose ref files, so dangling
+  symbolic refs are included); changed refs or an unverifiable baseline
+  require `--discard-private-refs`. A failed unpublished spawn has no releasable lease;
   authenticated residue still requires `--abandon`. The refusal reports an
   exact count and a bounded sample of path/ref names, never contents.
 - Worker markers, workspace identity, and recorded tokens authenticate paths
@@ -679,14 +698,105 @@ deviation, these safeguards are implemented and covered by the recorded tests.
   checked before nested paths, so live and dangling symlinks are authentication
   failures rather than absence. A request-index hit is validated field by
   field and its settled worker and retained result are authenticated before it
-  is returned. A dangling request-index, workspace-state, or worker-record link
-  is currently mishandled at allocation preflight. Worktree admin cleanup is
+  is returned. Occupancy of a workspace-state, request-index, or worker-record
+  name is decided with `lstat`, so a dangling link there is an unauthenticated
+  occupant: it is refused without being replaced, consuming an ID, or creating
+  a lock, and every durable JSON write preflights its destination the same
+  way. Worktree admin cleanup is
   targeted instead of using blanket pruning.
 - Every Git command, including clone operations, raw-byte listings, and a
   custom `CLONEGROWN_GIT` executable, runs through the same sanitizer and has
-  terminal prompts disabled. The current exact denylist omits `GIT_CONFIG`;
-  other covered process-level `GIT_*` overrides are stripped. The generic
-  non-Git runner keeps its caller-supplied environment semantics.
+  terminal prompts disabled. Every `GIT_*` variable is stripped except the
+  author and committer identity names (`GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`,
+  `GIT_AUTHOR_DATE`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`,
+  `GIT_COMMITTER_DATE`), and `SSH_ASKPASS` is stripped too, so a process-level
+  override Git adds later (graft or replace files, alternate object stores,
+  config injection, ref storage, pathspec modes, helpers) cannot reach a
+  Clonegrown Git command. User, system, and global config files still apply.
+  The generic non-Git runner keeps its caller-supplied environment semantics.
+- Ancestry ("does the result descend from the pinned base") is judged by
+  object content: `is_ancestor` runs `merge-base --is-ancestor` with
+  `--no-replace-objects` and the graft mechanism pointed at the null device,
+  so neither an inherited override nor a replace ref or graft file planted in
+  the worker can fake it. Because Git does not verify a parent object's hash
+  while walking history, a forged loose object inside the worker can still
+  fool the worker-side judgement; therefore `collect` repeats the judgement
+  on canonical's copy of the objects after the fetch, recovery repeats it on
+  canonical before finishing an interrupted collection, and `status` reports
+  `drift` for a collected record whose result canonical cannot confirm
+  descends from its base. A shallow boundary can only hide ancestry, never
+  invent it. A collected worker whose immutable result ref has disappeared
+  is not marked `broken`: recovery re-creates the ref from the recorded
+  content-addressed identity when the object is still present and the name
+  is free (`collected-result-restored`), and otherwise reports
+  `collected-result-missing`, leaves the record `collected`, and keeps
+  refusing its deletion. The canonical-side judgement protects only where canonical's
+  copy of the objects is physically separate from the worker's: a strong
+  clone, or objects the fetch actually transfers. A worktree worker shares
+  canonical's object store and a default clone may share hard-linked object
+  files, so a forged object written there is canonical's object too; that is
+  the stated shared-store boundary of those modes, not a separate guarantee.
+- Every owned ref name is `lstat`-inspected before any Git command reads it
+  (`loose_ref_occupant`, applied by `is_foreign_ref`, `resolve_ref`,
+  `ref_points_at`, the result/summary transaction, and allocation evidence):
+  a filesystem symlink is a foreign occupant reported as
+  `namespace-ref-symbolic`; a directory (empty or not) at a ref-shaped name,
+  a FIFO or other non-regular file, and a loose file that is not a ref are
+  reported as `orphan-namespace-ref`; none is ever opened by Git (a FIFO
+  would block it), written through, replaced, or deleted, and any of them at
+  the base-pin or task-branch name is allocation evidence so the ID is not
+  consumed; every such report carries the worker `id` when the name has a
+  worker's shape. An empty directory at a container name is ordinary Git
+  residue and is not reported; a FIFO, plain file, or symlink at a container
+  name of the namespace, or at the namespace root itself, is reported
+  (`orphan-namespace-ref` or `namespace-ref-symbolic`) and every name below
+  it is treated as foreign: the occupant inspection walks every path
+  component, so a ref below a symlinked, FIFO, or plain-file container never
+  resolves, never counts as a preserved result, and is never written. Git
+  itself follows a symlinked container, so refs created below one by Git
+  land in its target; Clonegrown's create-only and compare-and-swap writes
+  never overwrite what is there. A worktree worker's
+  own Git commands resolve its `HEAD` through the shared task-branch name, so
+  a worker whose branch name holds a symbolic ref, symlink, or FIFO is
+  reported as `task-branch-foreign` and every operation on it (status drift,
+  collect, discard, recovery) is refused before a Git command that resolves
+  its `HEAD` runs in the worker; nothing is deleted and the occupant is left
+  for manual removal. Canonical-side `git worktree add`, `git worktree
+  repair`, `git worktree list`, the collect fetch, and the clone that
+  starts every clone-mode spawn resolve every registered linked worktree's
+  `HEAD`, so before any of them Clonegrown reads each admin entry's `HEAD`
+  with plain file reads, follows a symbolic ref's target raw, and refuses,
+  naming the worktree, when the chain ends at a symlink or non-regular file,
+  when the `HEAD` file itself is not a regular file, or when the admin entry
+  is a symlink; other workers' operations therefore fail closed instead of
+  blocking, and recovery of an untouched interrupted spawn reports that
+  refusal as `recovery-failed` and promotes the worker once the occupant is
+  gone rather than marking it `broken`. The inventory of Clonegrown's own
+  namespace is confined to `refs/cws/<workspace>/`, walks the loose files
+  raw before it asks Git for the packed ones, and when a symbolic ref below
+  the subtree leads to a symlink or non-regular file it does not ask Git at
+  all and reads `packed-refs` raw instead (packed refs are never symbolic),
+  so intact packed custody refs stay visible to the audit; `resolve_ref`,
+  `ref_points_at`, and `is_symbolic_ref` read a loose symbolic ref and its
+  chain raw (Git's `symbolic-ref` recurses) and answer "absent" or "symbolic"
+  rather than let Git resolve into such an occupant. Allocation evidence
+  uses the same helpers, so a symbolic ref leading to a FIFO at the next
+  ID's base-pin or task-branch name is evidence, not a block. The
+  same preflight walks both of a workspace's subtrees (`refs/cws/<ws>/` and
+  `refs/heads/agent/<ws>/`) before the collect fetch, the clone that starts
+  a clone-mode spawn, and every worktree command, whether or not the task
+  branch is checked out anywhere, and also refuses a linked worktree whose
+  admin `gitdir` file is not a regular file; Clonegrown's own reads of admin
+  pointer files open only regular files, so a refused worktree spawn's
+  rollback returns as well. A symbolic ref at a name
+  Clonegrown does not own whose target is a FIFO is outside this inspection:
+  Git's own ref enumeration (`git branch`, `fetch`, `clone`) blocks on it for
+  every user of the repository, and so would Clonegrown's collect and
+  clone-mode spawn; that is a stated boundary.
+- User and global Git configuration still applies inside spawn. A global
+  `clone.defaultRemoteName` other than `origin` makes every clone spawn fail
+  closed ("local clone did not create its source remote") with a
+  `spawn_failed` record and no damage; unset it for the workspace's user.
 - The canonical-source remote in each clone worker has an invalid push URL.
   This is a best-effort accident guard, not a security boundary.
 
@@ -722,7 +832,8 @@ Collection preserves a clean committed tip under an immutable Clonegrown ref.
 It does not integrate the tip into a user branch. Current collection is
 intended to be one-shot: an ordinary unchanged repeat is a no-op, while a
 changed collected worker is rejected. An unchanged repeat after an accepted
-history rewrite currently consults the new call's default policy and can fail.
+history rewrite is judged by the rewrite policy the original collection
+recorded, so it stays a no-op under either argument.
 Request-keyed spawn retries are idempotent only when the caller
 supplies the same nonempty request ID and matching parameters; request-less
 spawns allocate new workers. A request whose worker was `discarded` is
@@ -738,9 +849,9 @@ per record.
 
 ## Target custody contract — intended; checkpoint not qualified
 
-The roadmap froze the following contract for the remediation work. The opening
-no-go notice and Steps 7.5j–7.5o identify six deviations that remain before the
-whole contract can be called implemented.
+The roadmap froze the following contract for the remediation work. Steps
+7.5j–7.5o repaired the six deviations the second review found; the whole
+contract is called implemented only after the fresh review in Step 7.5.
 
 1. Every published worker has a durable cooperative work lease
    (implemented). The record's `lease` field is `active` or `released`; an
@@ -758,10 +869,11 @@ whole contract can be called implemented.
    categories. A collected
    worker with ignored paths requires a separate `--discard-ignored`
    acknowledgement in addition to any acknowledgement of post-collection
-   drift. A clone compares every resolvable non-task ref with its publication
-   baseline; changed refs (including `refs/stash`) or an absent legacy baseline
-   require `--discard-private-refs`. A dangling symbolic ref is currently
-   omitted. One refusal names every missing
+   drift. A clone compares its raw inventory of non-task refs under `refs/`
+   with its publication baseline; changed refs (including `refs/stash` and
+   dangling symbolic refs, but not pseudo-refs outside `refs/`)
+   or an unverifiable baseline require `--discard-private-refs`. One refusal
+   names every missing
    acknowledgement. `--abandon` applies only to an uncollected worker and
    authorizes abandoning all of its content. The custody inspections are
    separate from the collection snapshot and read no file contents; ignored
@@ -779,7 +891,7 @@ whole contract can be called implemented.
    every entry in the worker directory tree except `.git`, walked directly so
    that nested repositories, FIFOs, sockets, and anything else Git does not
    list are covered, and of every entry beside the repository in the slot. A
-   clone fingerprint additionally includes the same resolvable ref listing so
+   clone fingerprint additionally includes the same raw ref inventory so
    a covered private-ref change after authorization is caught; worktrees omit that
    listing because their refs are canonical shared state. A quarantined worktree whose admin directory was
    pruned gets a Git-free walk fingerprint for its acknowledged deletion; the location and that fingerprint
@@ -797,9 +909,20 @@ whole contract can be called implemented.
    reports it without touching it, `recover` resumes the same flow from the
    persisted fingerprint and reports `quarantine-preserved` when it still
    cannot proceed, and `discard` run again with the original acknowledgement
-   (`--abandon`, or the separately required `--force` and
-   `--discard-private-refs` acknowledgements for a collected clone) takes a
-   fresh fingerprint and deletes. A quarantine entry no record claims is reported as
+   (`--abandon`, or for a collected worker `--force` plus
+   `--discard-ignored` when the quarantined content now holds ignored paths
+   and `--discard-private-refs` when a clone's refs differ or cannot be
+   verified; each refusal names the first missing category) takes a fresh
+   fingerprint and deletes. A normal deletion also requires the immutable
+   result to still be preserved at every stage: if the result ref disappears
+   while the worker sits in quarantine, `recover` reports
+   `quarantine-preserved` and `result-ref-missing` and a re-authorized
+   `discard` is refused, because the quarantine is then the last copy of the
+   collected work. A quarantined worktree whose admin directory was
+   pruned cannot enumerate ignored paths and therefore needs
+   `--discard-ignored`; a quarantined clone whose Git directory no longer
+   works is refused under every flag combination and preserved for manual
+   inspection. A quarantine entry no record claims is reported as
    `orphan-quarantine` and never touched. Branch or admin-directory cleanup
    that cannot complete also keeps the record `discarding`, with the reason
    in `branch_cleanup_left` / `worktree_admin_left`.

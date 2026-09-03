@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import os
 import shutil
 import sys
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 from clonegrown import cli
 import clonegrown.core as core
+from clonegrown import ClonegrownError
 from clonegrown.lifecycle import init_workspace
 from clonegrown.repository import prepared_ref_transaction
 from support import make_repo, run_git
@@ -47,7 +49,7 @@ import sys
 from pathlib import Path
 
 keys = [
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
     "GIT_CONFIG_VALUE_0", "GIT_TRACE_PACKET", "GIT_TERMINAL_PROMPT",
 ]
 Path(os.environ["CLONEGROWN_TEST_CAPTURE"]).write_text(
@@ -61,6 +63,7 @@ os.execv(%r, [%r, *sys.argv[1:]])
             "CLONEGROWN_TEST_CAPTURE": str(capture),
             "GIT_DIR": str(self.root / "attacker.git"),
             "GIT_WORK_TREE": str(self.root / "attacker-tree"),
+            "GIT_CONFIG": str(self.root / "attacker-config"),
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "alias.status",
             "GIT_CONFIG_VALUE_0": "!false",
@@ -82,6 +85,104 @@ os.execv(%r, [%r, *sys.argv[1:]])
             if key.startswith("GIT_") and key != "GIT_TERMINAL_PROMPT":
                 self.assertIsNone(observed[key], key)
         self.assertEqual(observed["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_every_git_variable_is_stripped_except_the_identity_allowlist(self) -> None:
+        """The class rule: any ``GIT_*`` name, including ones Git has not invented yet, is
+        stripped from every Clonegrown Git command; only author/committer identity passes."""
+        capture = self.root / "git-environment-all.json"
+        wrapper = self.executable(
+            "capturing-git",
+            """import json
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["CLONEGROWN_TEST_CAPTURE"]).write_text(
+    json.dumps({k: v for k, v in os.environ.items() if k.startswith("GIT_") or k == "SSH_ASKPASS"}),
+    encoding="utf-8",
+)
+os.execv(%r, [%r, *sys.argv[1:]])
+""" % (self.real_git, self.real_git),
+        )
+        hostile = {name: f"hostile-{name.lower()}" for name in (
+            "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS", "GIT_ATTR_SOURCE",
+            "GIT_REF_FORMAT", "GIT_DEFAULT_HASH", "GIT_INDEX_VERSION", "GIT_LITERAL_PATHSPECS",
+            "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_REFLOG_ACTION",
+            "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_ADVICE", "GIT_SSL_NO_VERIFY",
+            "GIT_CURL_VERBOSE", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_DIR", "GIT_WORK_TREE",
+            "GIT_FUTURE_OVERRIDE_NOT_YET_INVENTED", "SSH_ASKPASS", "GIT_TERMINAL_PROMPT",
+        )}
+        identity = {"GIT_AUTHOR_NAME": "Allowed Author", "GIT_AUTHOR_EMAIL": "author@example.test",
+                    "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z", "GIT_COMMITTER_NAME": "Allowed Committer",
+                    "GIT_COMMITTER_EMAIL": "committer@example.test", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"}
+        env = {**hostile, **identity, "CLONEGROWN_GIT": str(wrapper), "CLONEGROWN_TEST_CAPTURE": str(capture),
+               "UNRELATED_VARIABLE": "kept"}
+        with patch.dict(os.environ, env, clear=False):
+            sanitized = core.clean_git_env()
+            with patch.object(core, "GIT_BIN", core._find_git()):
+                core.git(self.repo, "rev-parse", "HEAD")
+        observed = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual(observed, {**identity, "GIT_TERMINAL_PROMPT": "0"})
+        self.assertEqual(sanitized["UNRELATED_VARIABLE"], "kept")
+        for name in hostile:
+            self.assertTrue(core.git_env_is_stripped(name), name)
+        for name in identity:
+            self.assertFalse(core.git_env_is_stripped(name), name)
+
+    def test_graft_file_override_cannot_make_a_rewrite_collectable(self) -> None:
+        """A process-level history override must not change a custody decision: the
+        ancestry gate refuses a non-descending result whatever the parent's environment."""
+        from clonegrown import collect, init_workspace, spawn
+        workspace = self.root / "workspace"
+        init_workspace(self.repo, workspace)
+        worker = spawn(self.ws_or(workspace), "HEAD", "graft")
+        repo = Path(worker["path"])
+        run_git(repo, "config", "user.name", "T")
+        run_git(repo, "config", "user.email", "t@example.test")
+        empty_tree = run_git(repo, "hash-object", "-t", "tree", "/dev/null").stdout.strip()
+        orphan = subprocess.run(["git", "commit-tree", empty_tree], cwd=repo, check=True, text=True,
+                                input="orphan\n", stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip()
+        run_git(repo, "reset", "-q", "--hard", orphan)
+        grafts = self.root / "grafts"
+        grafts.write_text(f"{orphan} {worker['base_sha']}\n", encoding="utf-8")
+        with patch.dict(os.environ, {"GIT_GRAFT_FILE": str(grafts)}, clear=False):
+            # The ambient shell's Git is fooled; Clonegrown's is not.
+            self.assertEqual(run_git(repo, "merge-base", "--is-ancestor", worker["base_sha"], orphan,
+                                     check=False).returncode, 0)
+            with self.assertRaisesRegex(ClonegrownError, "does not descend"):
+                collect(workspace, worker["id"])
+            self.assertEqual(collect(workspace, worker["id"], allow_rewrite=True)["result_sha"], orphan)
+
+    def ws_or(self, workspace: Path) -> Path:
+        return workspace
+
+    def test_git_config_override_never_reaches_any_clonegrown_git_command(self) -> None:
+        """``GIT_CONFIG`` makes ``git config`` read one arbitrary file and refuse ``--local``;
+        inherited from a hostile parent it must be stripped like ``GIT_CONFIG_COUNT`` while
+        unrelated variables and the repository's own configuration keep applying."""
+        from clonegrown import collect, init_workspace, spawn
+        override = self.root / "injected-git-config"
+        override.write_text("[core]\n\tsparseCheckout = false\n[user]\n\tname = Injected\n", encoding="utf-8")
+        run_git(self.repo, "config", "--local", "user.name", "Configured Locally")
+        workspace = self.root / "workspace"
+        hostile = {"GIT_CONFIG": str(override), "CLONEGROWN_UNRELATED_MARKER": "kept"}
+        with patch.dict(os.environ, hostile, clear=False):
+            sanitized = core.clean_git_env()
+            self.assertNotIn("GIT_CONFIG", sanitized)
+            self.assertEqual(sanitized["CLONEGROWN_UNRELATED_MARKER"], "kept")
+            # Direct proof: the hostile shell sees the override, Clonegrown's runner does not.
+            self.assertEqual(run_git(self.repo, "config", "--get", "user.name").stdout.strip(), "Injected")
+            self.assertEqual(core.git(self.repo, "config", "--get", "user.name").stdout.strip(),
+                             "Configured Locally")
+            self.assertEqual(core.git(self.repo, "config", "--local", "--list").returncode, 0)
+            # End to end: every Git command of init, spawn, and collect runs clean.
+            init_workspace(self.repo, workspace)
+            worker = spawn(workspace, "HEAD", "hostile GIT_CONFIG")
+            self.assertEqual(worker["status"], "ready")
+            (Path(worker["path"]) / "work.txt").write_text("work\n", encoding="utf-8")
+            run_git(Path(worker["path"]), "add", "work.txt")
+            run_git(Path(worker["path"]), "-c", "user.email=t@example.test", "commit", "-q", "-m", "work")
+            self.assertEqual(collect(workspace, worker["id"])["status"], "collected")
 
     def test_generic_run_keeps_non_git_environment_semantics(self) -> None:
         with patch.dict(os.environ, {"GIT_DIR": "generic-command-value"}, clear=False):

@@ -205,7 +205,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "init":
             def init_inputs() -> tuple[Path, Path]:
                 canonical = validate_primary_repo(Path(args.canonical or "."))
-                workspace = (Path(args.workspace).expanduser().resolve()
+                # The selected workspace is handed over lexically: init_workspace validates
+                # the exact path the user named (a symlink there is refused untouched) and
+                # only then resolves it, exactly as the Python API does.
+                workspace = (Path(args.workspace).expanduser()
                              if args.workspace else default_workspace(canonical))
                 return canonical, workspace
 

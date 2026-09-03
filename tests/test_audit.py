@@ -54,6 +54,343 @@ class AuditTests(unittest.TestCase):
         return subprocess.run([sys.executable, "-m", "clonegrown", *args], cwd=self.repo, env=full_env,
                               text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
+    def test_dangling_symbolic_namespace_refs_are_reported_wherever_they_sit(self) -> None:
+        """for-each-ref omits a symbolic ref whose target is absent; status must still
+        report it under every Clonegrown name, and never write through or delete it."""
+        worker = spawn(self.ws, "HEAD", "namespace", strong=False)
+        state = WorkspaceState.load(self.ws)
+        wid = worker["id"]
+        planted = {
+            f"{state.ref_prefix}/workers/{wid}/branch-owner": "refs/heads/absent-owner",
+            f"{state.ref_prefix}/workers/{wid}/results/{'0' * 40}": "refs/heads/absent-result",
+            state.summary_ref(wid): "refs/heads/absent-summary",
+            f"{state.ref_prefix}/bases/{wid + 7}": "refs/heads/absent-base",
+        }
+        for ref, target in planted.items():
+            run_git(self.repo, "symbolic-ref", ref, target)
+        reported = {i["ref"] for i in status(self.ws)["issues"] if i["issue"] == "namespace-ref-symbolic"}
+        self.assertEqual(reported, set(planted))
+        recover(self.ws)
+        for ref, target in planted.items():
+            self.assertEqual(git_out(self.repo, "symbolic-ref", ref), target)
+        # A loose file under our namespace that is not a ref at all is reported, not used.
+        garbage = self.repo / ".git" / state.ref_prefix / "bases" / str(wid + 8)
+        garbage.write_bytes(b"not a ref\n")
+        self.assertIn((f"{state.ref_prefix}/bases/{wid + 8}", "orphan-namespace-ref"),
+                      [(i.get("ref"), i["issue"]) for i in status(self.ws)["issues"]])
+        self.assertEqual(garbage.read_bytes(), b"not a ref\n")
+
+    def test_filesystem_symlink_at_a_namespace_name_is_reported_and_never_replaced(self) -> None:
+        """A symlink planted as the loose file of a summary or result name, pointing outside
+        refs/, is not a symbolic ref to Git but is still a foreign occupant: status reports it,
+        collect refuses, and the link and its target are left exactly as they were."""
+        worker = spawn(self.ws, "HEAD", "symlink summary", strong=False)
+        commit(Path(worker["path"]), "work.txt")
+        state = WorkspaceState.load(self.ws)
+        external = self.root / "external-ref-file"
+        external.write_text("0" * 40 + "\n", encoding="utf-8")
+        summary = self.repo / ".git" / state.summary_ref(worker["id"])
+        summary.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(external, summary)
+        self.assertIn((state.summary_ref(worker["id"]), "namespace-ref-symbolic"),
+                      [(i.get("ref"), i["issue"]) for i in status(self.ws)["issues"]])
+        with self.assertRaisesRegex(ClonegrownError, "symbolic ref"):
+            collect(self.ws, worker["id"])
+        self.assertTrue(summary.is_symlink())
+        self.assertEqual(os.readlink(summary), str(external))
+        self.assertEqual(external.read_text(encoding="utf-8"), "0" * 40 + "\n")
+        recover(self.ws)
+        self.assertTrue(summary.is_symlink())
+        self.assertEqual(self.record_status(worker["id"]), "ready")
+
+    def test_fifo_at_an_owned_name_is_refused_without_asking_git(self) -> None:
+        """Git blocks forever opening a FIFO it takes for a loose ref; every owned name is
+        lstat-checked first, so status, allocation, and collect refuse instead of hanging."""
+        worker = spawn(self.ws, "HEAD", "fifo", strong=False)
+        commit(Path(worker["path"]), "work.txt")
+        state = WorkspaceState.load(self.ws)
+        summary = self.repo / ".git" / state.summary_ref(worker["id"])
+        summary.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(summary)
+        self.assertIn((state.summary_ref(worker["id"]), "orphan-namespace-ref"),
+                      [(i.get("ref"), i["issue"]) for i in status(self.ws)["issues"]])
+        with self.assertRaisesRegex(ClonegrownError, "symbolic ref"):
+            collect(self.ws, worker["id"])
+        self.assertTrue(os.path.exists(summary) and not summary.is_file())
+        recover(self.ws)
+        self.assertTrue(os.path.exists(summary) and not summary.is_file())
+        summary.unlink()
+
+    def test_fifo_occupants_of_a_collected_worker_are_refused_not_opened(self) -> None:
+        """A FIFO, or a symlink to one, at a collected worker's summary, base-pin, or result
+        name must never be opened by Git: status, recover, a repeat collect, discard, and a
+        request retry all return with a refusal instead of blocking."""
+        import signal
+        fifo_target = self.root / "external-fifo"
+        os.mkfifo(fifo_target)
+
+        def alarm(*_: object) -> None:
+            raise AssertionError("a Git command blocked on the planted FIFO")
+        previous = signal.signal(signal.SIGALRM, alarm)
+        try:
+            for kind in ("fifo", "link"):
+                request = f"fifo-retry-{kind}"
+                worker = spawn(self.ws, "HEAD", f"fifo collected {kind}", strong=False, request_id=request)
+                commit(Path(worker["path"]), "work.txt")
+                collected = collect(self.ws, worker["id"])
+                release(self.ws, worker["id"])
+                state = WorkspaceState.load(self.ws)
+                # The result name goes last: recovery of a worker whose result is gone marks it broken.
+                for name, plant in (
+                    ("summary", state.summary_ref(worker["id"])),
+                    ("base pin", state.base_ref(worker["id"])),
+                    ("results", collected["result_ref"]),
+                ):
+                    with self.subTest(name=name, occupant=kind):
+                        loose = self.repo / ".git" / plant
+                        run_git(self.repo, "update-ref", "--no-deref", "-d", plant, check=False)
+                        loose.parent.mkdir(parents=True, exist_ok=True)
+                        if kind == "fifo":
+                            os.mkfifo(loose)
+                        else:
+                            os.symlink(fifo_target, loose)
+                        signal.alarm(30)
+                        try:
+                            issues = [(i.get("ref"), i["issue"]) for i in status(self.ws)["issues"]]
+                            self.assertTrue(any(ref == plant for ref, _ in issues), issues)
+                            if name == "summary":
+                                with self.assertRaisesRegex(ClonegrownError, "symbolic ref"):
+                                    collect(self.ws, worker["id"])
+                                self.assertEqual(
+                                    sorted(p.name for p in loose.parent.iterdir() if p.name.endswith(".lock")), [])
+                            if name == "results":
+                                with self.assertRaisesRegex(ClonegrownError, "not preserved"):
+                                    discard(self.ws, worker["id"])
+                                with self.assertRaisesRegex(ClonegrownError, "missing or moved"):
+                                    spawn(self.ws, "HEAD", f"fifo collected {kind}", strong=False, request_id=request)
+                            recover(self.ws)
+                        finally:
+                            signal.alarm(0)
+                        self.assertTrue(os.path.lexists(loose))
+                        loose.unlink()
+                        if name in ("summary", "results"):
+                            run_git(self.repo, "update-ref", plant, collected["result_sha"])
+                        if name == "results":
+                            # The name is occupied, so recovery cannot re-publish the result: the record
+                            # stays collected, reported, and the worker is never deleted.
+                            self.assertEqual(self.record_status(worker["id"]), "collected")
+                            self.assertTrue(Path(worker["path"]).is_dir())
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+    def test_empty_directory_at_an_owned_name_is_reported(self) -> None:
+        state = WorkspaceState.load(self.ws)
+        name = f"{state.ref_prefix}/bases/{int(state.next_id) + 3}"
+        (self.repo / ".git" / name).mkdir(parents=True)
+        self.assertIn((name, "orphan-namespace-ref"),
+                      [(i.get("ref"), i["issue"]) for i in status(self.ws)["issues"]])
+        self.assertTrue((self.repo / ".git" / name).is_dir())
+
+    def test_non_regular_occupants_of_a_recorded_worker_names_get_one_correct_code(self) -> None:
+        """A non-empty directory, an empty directory, a FIFO, or a non-ref file at a recorded
+        worker's base-pin or summary name is reported once, as orphan-namespace-ref with the
+        worker id, never as a dangling symbolic ref."""
+        worker = spawn(self.ws, "HEAD", "codes", strong=False)
+        commit(Path(worker["path"]), "work.txt")
+        collect(self.ws, worker["id"])
+        state = WorkspaceState.load(self.ws)
+        for name in (state.base_ref(worker["id"]), state.summary_ref(worker["id"])):
+            loose = self.repo / ".git" / name
+            run_git(self.repo, "update-ref", "--no-deref", "-d", name, check=False)
+            for kind in ("directory", "empty directory", "fifo", "garbage"):
+                with self.subTest(name=name.rsplit("/", 1)[-1], occupant=kind):
+                    loose.parent.mkdir(parents=True, exist_ok=True)
+                    if kind == "directory":
+                        loose.mkdir()
+                        (loose / "child").write_bytes(b"x\n")
+                    elif kind == "empty directory":
+                        loose.mkdir()
+                    elif kind == "fifo":
+                        os.mkfifo(loose)
+                    else:
+                        loose.write_bytes(b"not a ref\n")
+                    reports = [(i["issue"], i.get("id")) for i in status(self.ws)["issues"] if i.get("ref") == name]
+                    self.assertEqual(reports, [("orphan-namespace-ref", worker["id"])])
+                    if kind.endswith("directory"):
+                        shutil.rmtree(loose)
+                    else:
+                        loose.unlink()
+
+    def test_foreign_occupant_at_a_container_name_is_reported_not_crashed(self) -> None:
+        worker = spawn(self.ws, "HEAD", "container", strong=False)
+        state = WorkspaceState.load(self.ws)
+        for container in (f"{state.ref_prefix}/bases", f"{state.ref_prefix}/workers/{worker['id']}"):
+            path = self.repo / ".git" / container
+            for kind in ("fifo", "garbage"):
+                with self.subTest(container=container.rsplit("/", 1)[-1], occupant=kind):
+                    shutil.rmtree(path, ignore_errors=True)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if kind == "fifo":
+                        os.mkfifo(path)
+                    else:
+                        path.write_bytes(b"junk\n")
+                    reports = {(i.get("ref"), i["issue"]) for i in status(self.ws)["issues"]}
+                    self.assertIn((container, "orphan-namespace-ref"), reports)
+                    recover(self.ws)
+                    self.assertTrue(os.path.lexists(path))
+                    path.unlink()
+        # The namespace root itself: a symlink there is reported rather than silently followed.
+        root = self.repo / ".git" / state.ref_prefix
+        external = self.root / "external-namespace"
+        external.mkdir()
+        shutil.rmtree(root, ignore_errors=True)
+        os.symlink(external, root)
+        self.assertIn((state.ref_prefix, "namespace-ref-symbolic"),
+                      {(i.get("ref"), i["issue"]) for i in status(self.ws)["issues"]})
+        root.unlink()
+
+    def test_packed_namespace_refs_stay_visible_when_git_enumeration_is_skipped(self) -> None:
+        """When a symbolic ref below the namespace leads to a FIFO, Git is not asked to enumerate;
+        the packed refs are read raw instead, so intact packed custody refs are not reported missing."""
+        import signal
+        worker = spawn(self.ws, "HEAD", "packed", strong=False)
+        commit(Path(worker["path"]), "work.txt")
+        collect(self.ws, worker["id"])
+        wt = spawn(self.ws, "HEAD", "packed worktree", strong=False, mode="worktree")
+        run_git(self.repo, "pack-refs", "--all")
+        state = WorkspaceState.load(self.ws)
+        fifo = self.repo / ".git" / "refs" / "zz-fifo"
+        os.mkfifo(fifo)
+        planted = state.summary_ref(int(state.next_id))
+        loose = self.repo / ".git" / planted
+        loose.parent.mkdir(parents=True, exist_ok=True)
+        loose.write_bytes(b"ref: refs/zz-fifo\n")
+
+        def alarm(*_: object) -> None:
+            raise AssertionError("a Git command blocked on the planted FIFO")
+        previous = signal.signal(signal.SIGALRM, alarm)
+        signal.alarm(45)
+        try:
+            issues = [(i["issue"], i.get("id")) for i in status(self.ws)["issues"]]
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertIn(("namespace-ref-symbolic", int(state.next_id)), issues)
+        for false_code in ("summary-ref-mismatch", "branch-owner-ref-missing", "base-ref-missing", "result-ref-missing"):
+            self.assertNotIn(false_code, {i for i, _ in issues})
+        loose.unlink()
+        fifo.unlink()
+
+    def test_names_below_a_symlinked_container_are_foreign(self) -> None:
+        """A symlink at a container of the namespace is reported and every name below it is
+        treated as foreign: the result no longer counts as preserved, so discard is refused."""
+        import shutil
+        worker = spawn(self.ws, "HEAD", "container link", strong=False)
+        commit(Path(worker["path"]), "work.txt")
+        collect(self.ws, worker["id"])
+        release(self.ws, worker["id"])
+        state = WorkspaceState.load(self.ws)
+        container = self.repo / ".git" / f"{state.ref_prefix}/workers/{worker['id']}"
+        moved = self.root / "moved-worker-refs"
+        shutil.move(str(container), str(moved))
+        os.symlink(moved, container)
+        reports = {(i.get("ref"), i["issue"]) for i in status(self.ws)["issues"]}
+        self.assertIn((f"{state.ref_prefix}/workers/{worker['id']}", "namespace-ref-symbolic"), reports)
+        self.assertIn((worker["result_ref"] if "result_ref" in worker else self.record(worker["id"])["result_ref"],
+                       "result-ref-missing"), reports)
+        with self.assertRaisesRegex(ClonegrownError, "not preserved"):
+            discard(self.ws, worker["id"])
+        self.assertTrue(Path(worker["path"]).is_dir())
+        container.unlink()
+        shutil.move(str(moved), str(container))
+        self.assertEqual(discard(self.ws, worker["id"])["status"], "discarded")
+
+    def record(self, worker_id: int) -> dict:
+        return json.loads(worker_record_path(self.ws, worker_id).read_text(encoding="utf-8"))
+
+    def test_missing_result_is_restored_when_safe_and_reported_otherwise(self) -> None:
+        """A collected worker's immutable result is content-addressed and recorded: recovery
+        re-creates the ref when the object is still present and the name is free, and otherwise
+        leaves the worker collected and reported, never broken and never deleted."""
+        worker = spawn(self.ws, "HEAD", "restore result", strong=False)
+        commit(Path(worker["path"]), "work.txt")
+        collected = collect(self.ws, worker["id"])
+        release(self.ws, worker["id"])
+        run_git(self.repo, "update-ref", "--no-deref", "-d", collected["result_ref"])
+        self.assertIn((collected["result_ref"], "result-ref-missing"),
+                      {(i.get("ref"), i["issue"]) for i in status(self.ws)["issues"]})
+        actions = {r.get("action") for r in recover(self.ws) if r.get("id") == worker["id"]}
+        self.assertIn("collected-result-restored", actions)
+        self.assertEqual(run_git(self.repo, "rev-parse", collected["result_ref"]).stdout.strip(), collected["result_sha"])
+        self.assertEqual(self.record_status(worker["id"]), "collected")
+        self.assertNotIn("result-ref-missing", {i["issue"] for i in status(self.ws)["issues"]})
+        # A foreign occupant at the name: nothing is replaced, the worker stays collected and reported.
+        run_git(self.repo, "update-ref", "--no-deref", "-d", collected["result_ref"])
+        loose = self.repo / ".git" / collected["result_ref"]
+        loose.parent.mkdir(parents=True, exist_ok=True)
+        loose.write_bytes(b"not a ref\n")
+        actions = {r.get("action") for r in recover(self.ws) if r.get("id") == worker["id"]}
+        self.assertIn("collected-result-missing", actions)
+        self.assertEqual(self.record_status(worker["id"]), "collected")
+        self.assertEqual(loose.read_bytes(), b"not a ref\n")
+        with self.assertRaisesRegex(ClonegrownError, "not preserved"):
+            discard(self.ws, worker["id"])
+        self.assertTrue(Path(worker["path"]).is_dir())
+
+    def test_symbolic_ref_to_a_fifo_inside_the_namespace_is_refused_without_enumeration(self) -> None:
+        """A symbolic ref at an owned namespace name whose chain ends at a FIFO would block Git's
+        enumeration; the namespace is walked raw first, so status, recover, both spawns, collect,
+        and discard all return with the occupant reported and untouched."""
+        import signal
+        worker = spawn(self.ws, "HEAD", "namespace symref", strong=False)
+        commit(Path(worker["path"]), "work.txt")
+        collected = collect(self.ws, worker["id"])
+        release(self.ws, worker["id"])
+        other = spawn(self.ws, "HEAD", "other", strong=False)
+        commit(Path(other["path"]), "work.txt")
+        state = WorkspaceState.load(self.ws)
+        fifo = self.repo / ".git" / "refs" / "zz-fifo"
+        os.mkfifo(fifo)
+        for which in ("summary", "next pin", "result"):
+            state = WorkspaceState.load(self.ws)  # refused spawns consume IDs: plant at the *current* next pin
+            name = {"summary": state.summary_ref(worker["id"]), "next pin": state.base_ref(int(state.next_id)),
+                    "result": collected["result_ref"]}[which]
+            with self.subTest(name=which):
+                loose = self.repo / ".git" / name
+                run_git(self.repo, "update-ref", "--no-deref", "-d", name, check=False)
+                loose.parent.mkdir(parents=True, exist_ok=True)
+                loose.write_bytes(b"ref: refs/zz-fifo\n")
+
+                def alarm(*_: object) -> None:
+                    raise AssertionError("a Git command blocked on the planted FIFO")
+                previous = signal.signal(signal.SIGALRM, alarm)
+                signal.alarm(45)
+                try:
+                    reports = {(i.get("ref"), i["issue"]) for i in status(self.ws)["issues"]}
+                    self.assertIn((name, "namespace-ref-symbolic"), reports)
+                    recover(self.ws)
+                    with self.assertRaisesRegex(ClonegrownError, "symbolic ref leading to|occupied|task branch"):
+                        spawn(self.ws, "HEAD", "clone spawn", strong=False)
+                    with self.assertRaisesRegex(ClonegrownError, "symbolic ref leading to|occupied|task branch"):
+                        spawn(self.ws, "HEAD", "worktree spawn", strong=False, mode="worktree")
+                    with self.assertRaisesRegex(ClonegrownError, "symbolic ref leading to"):
+                        collect(self.ws, other["id"])
+                    if name == collected["result_ref"]:
+                        with self.assertRaisesRegex(ClonegrownError, "not preserved"):
+                            discard(self.ws, worker["id"])
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
+                self.assertEqual(loose.read_bytes(), b"ref: refs/zz-fifo\n")
+                loose.unlink()
+                if name in (state.summary_ref(worker["id"]), collected["result_ref"]):
+                    run_git(self.repo, "update-ref", name, collected["result_sha"])
+        fifo.unlink()
+
+    def record_status(self, worker_id: int) -> str:
+        return json.loads(worker_record_path(self.ws, worker_id).read_text(encoding="utf-8"))["status"]
+
     def issues(self) -> list[tuple[str, int | None]]:
         return sorted(((i["issue"], i.get("id")) for i in status(self.ws)["issues"]),
                       key=lambda pair: (pair[0], -1 if pair[1] is None else pair[1]))
@@ -121,13 +458,14 @@ class AuditTests(unittest.TestCase):
                                  "candidate-ref-retained", "base-ref-stale"})
         for issue in status(self.ws)["issues"]:
             self.assertNotIn("worker_token", json.dumps(issue))
-        # Recovery marks the collected worker broken because its result is gone; a broken worker's
-        # pin is never dropped (it may be preserving an interrupted spawn); the retained candidate stays.
+        # The result object is still in canonical and its content-addressed name is free, so
+        # recovery re-publishes exactly the recorded result instead of breaking the worker;
+        # the retained candidate stays.
         first = {r.get("action") for r in recover(self.ws) if r.get("id") == worker["id"]}
-        self.assertIn("collected-marked-broken", first)
-        self.assertNotIn("base-ref-dropped", first)
+        self.assertIn("collected-result-restored", first)
+        self.assertEqual(run_git(self.repo, "rev-parse", result["result_ref"]).stdout.strip(), result["result_sha"])
         self.assertEqual(run_git(self.repo, "rev-parse", "--verify", self.state.result_ref(worker["id"], "a" * 40)).returncode, 0)
-        self.assertEqual(run_git(self.repo, "rev-parse", "--verify", self.state.base_ref(worker["id"])).returncode, 0)
+        self.assertEqual(self.record_status(worker["id"]), "collected")
 
     def test_collect_refuses_a_conflicting_content_addressed_result_ref(self) -> None:
         worker = self.ready("result conflict")

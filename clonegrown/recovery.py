@@ -32,7 +32,7 @@ from .audit import (
     NamespaceRefs, _PIN_DROPPED, audit_lock_files, audit_namespace, audit_request_indexes, audit_stages, audit_worker,
 )
 from .repository import (
-    absent_marker, delete_ref, is_symbolic_ref, ref_points_at, resolve_ref,
+    ForeignWorktreeHead, absent_marker, delete_ref, is_ancestor, is_foreign_ref, ref_points_at, resolve_ref,
     result_ref_transaction, write_ref,
 )
 from .state import WorkerRecord, WorkerStatus, WorkspaceState, worker_lock_path, worker_slot, workspace_lock, ws_paths
@@ -123,7 +123,7 @@ class _Recovery:
         value = resolve_ref(self.canonical, ref)
         if value is None:
             return
-        if value != self.worker.base_sha or is_symbolic_ref(self.canonical, ref):
+        if value != self.worker.base_sha or is_foreign_ref(self.canonical, ref):
             self.report("base-ref-ambiguous")
             return
         delete_ref(self.canonical, ref, value)
@@ -141,7 +141,7 @@ class _Recovery:
         value = resolve_ref(self.canonical, ref)
         if value is None:
             return
-        if value != worker.base_sha or is_symbolic_ref(self.canonical, ref):
+        if value != worker.base_sha or is_foreign_ref(self.canonical, ref):
             self.report("base-ref-ambiguous")
             return
         delete_ref(self.canonical, ref, value)
@@ -221,6 +221,8 @@ class _Recovery:
         try:
             repair_owned_worktree(self.canonical, worker, repo)
             verify_worker(self.state, worker)
+        except ForeignWorktreeHead:
+            raise  # another worker's foreign branch name blocks Git; this record is untouched and retryable
         except ClonegrownError as exc:
             self.mark_broken(f"unverified path exists after interrupted spawn: {exc}", "spawn-broken-unverified-path")
             return
@@ -258,13 +260,13 @@ class _Recovery:
             object_present = git(
                 self.canonical, "cat-file", "-e", f"{candidate}^{{commit}}", check=False,
             ).returncode == 0
-            if object_present and not is_symbolic_ref(self.canonical, ref):
+            if object_present and not is_foreign_ref(self.canonical, ref):
                 write_ref(
                     self.canonical, ref, candidate, absent_marker(candidate), check=False,
                 )
         can_finish = (
             bool(candidate)
-            and not is_symbolic_ref(self.canonical, str(ref))
+            and not is_foreign_ref(self.canonical, str(ref))
             and ref_points_at(self.canonical, ref, candidate)
         )
         if can_finish:
@@ -273,6 +275,11 @@ class _Recovery:
                 can_finish = snap.head == candidate
             except Exception:
                 can_finish = False
+        if can_finish and not worker.allow_rewrite and not is_ancestor(
+                self.canonical, str(worker.base_sha), str(candidate)):
+            # Judged on canonical's own objects, exactly as collect does after its fetch: the
+            # worker-side judgement can be lied to by an object planted in the worker's store.
+            can_finish = False
         if can_finish:
             entered = False
             try:
@@ -400,15 +407,27 @@ class _Recovery:
                 self.report("collected-worker-path-invalid")
                 return
         if not ref_points_at(self.canonical, worker.result_ref, worker.result_sha):
-            self.mark_broken("preserved result ref missing", "collected-marked-broken")
-            return
+            # The immutable result is content-addressed and recorded: if the object is still in
+            # canonical and the name is free, recreating the ref is exactly the publication that
+            # was already made; otherwise the record stays collected, reported, and undeleted.
+            result_ref, result_sha = str(worker.result_ref), str(worker.result_sha)
+            object_present = git(self.canonical, "cat-file", "-e", f"{result_sha}^{{commit}}",
+                                 check=False).returncode == 0
+            if (object_present and resolve_ref(self.canonical, result_ref) is None
+                    and not is_foreign_ref(self.canonical, result_ref)):
+                write_ref(self.canonical, result_ref, result_sha, absent_marker(result_sha), check=False)
+            if ref_points_at(self.canonical, result_ref, result_sha):
+                self.report("collected-result-restored")
+            else:
+                self.report("collected-result-missing")
+                return
         self._repair_summary()
 
     def _repair_summary(self) -> None:
         """Repair only the mutable summary pointer from a verified immutable result."""
         worker = self.worker
         summary = self.state.summary_ref(self.worker_id)
-        if is_symbolic_ref(self.canonical, summary):
+        if is_foreign_ref(self.canonical, summary):
             self.report("summary-ref-symbolic-left")
             return
         current = resolve_ref(self.canonical, summary)
@@ -420,7 +439,7 @@ class _Recovery:
                 ):
                     pass
             except ClonegrownError:
-                if is_symbolic_ref(self.canonical, summary):
+                if is_foreign_ref(self.canonical, summary):
                     self.report("summary-ref-symbolic-left")
                 else:
                     self.report("summary-ref-conflict-left")
@@ -651,6 +670,11 @@ def status(ws_path: Path) -> dict[str, Any]:
                     snap = snapshot_worker(state, worker, require_ancestry=not worker.allow_rewrite)
                     if worker.status == WorkerStatus.COLLECTED and snap.head != worker.result_sha:
                         item["drift"] = "changed-after-collection"
+                    elif (worker.status == WorkerStatus.COLLECTED and not worker.allow_rewrite
+                          and worker.result_sha and not is_ancestor(canonical, str(worker.base_sha),
+                                                                    str(worker.result_sha))):
+                        # Canonical's own view of the objects, never the worker's.
+                        item["drift"] = "collected result does not descend from its assigned base in canonical"
                 except Exception as exc:
                     item["drift"] = public_exception_text(exc)[:200]
             workers.append(item)

@@ -11,14 +11,19 @@ collection, discard, and recovery. Collection can preserve a worker's clean
 committed tip under a canonical ref; it does not integrate that commit into a
 user branch.
 
-> **Do not use the 2026-09-02 `main` checkpoint for irreplaceable work.** Its
-> final cold review is a no-go: clone-private dangling symbolic refs can escape
-> discard custody; dangling symbolic task branches and control-file names are
-> not safely reserved; CLI workspace selection can follow a symlink;
-> `GIT_CONFIG` can reach child Git; and repeated collection after an accepted
-> history rewrite can fail. These are verified product defects, not theoretical
-> cautions. See `research/FINAL_COLD_REVIEW.md` in the source repository before
-> treating the affected guarantees below as implemented.
+> **Do not use this tree for irreplaceable work until it is qualified.** The
+> 2026-09-02 cold review found six product defects: clone-private dangling
+> symbolic refs could escape discard custody; dangling symbolic task branches
+> and control-file names were not safely reserved; CLI workspace selection
+> could follow a symlink; `GIT_CONFIG` could reach child Git; and repeated
+> collection after an accepted history rewrite could fail. Eight later
+> reviews found that inherited `GIT_*` overrides or worker-local replace refs and
+> graft files could fake ancestry, that quarantine re-authorization skipped
+> ignored content, and that some foreign occupants of Clonegrown's ref names
+> (symbolic refs, symlinks, FIFOs, and chains between them) were not refused
+> or could still block Git. All are repaired with class regressions; a fresh
+> no-open-finding review and green hosted CI are still required. See `research/FINAL_COLD_REVIEW.md` and `PLAN.md` in the
+> source repository.
 
 A worker is either a **linked worktree** (`--worktree`, avoids copying a
 second object database but still has repository- and host-dependent checkout
@@ -62,12 +67,17 @@ Before using this skill, account for these verified current limits:
   worker that holds ignored paths is refused until `--discard-ignored` is
   given; the refusal lists a count and a few names. Do not pass that flag
   unless the user has authorized destroying that ignored content.
-- Clone workers record resolvable non-task refs at publication. If a later
-  direct private ref or stash differs, collected-clone discard refuses until
-  `--discard-private-refs` is given; an older clone with no recorded baseline
-  fails closed the same way. A dangling symbolic private ref is currently
-  omitted, so do not use clone discard where one may exist. Report changed ref
-  names and do not pass that flag without authorization. The check also omits
+- Recovery of an interrupted spawn has three outcomes: an untouched worker
+  is promoted to `ready`, a changed one is preserved as `broken`, and one
+  that recovery cannot inspect because another worker's foreign ref blocks
+  Git is left untouched and reported as `recovery-failed` until that
+  occupant is removed.
+- Clone workers record a raw inventory of their non-task refs at publication,
+  symbolic refs included whether or not their targets exist. If a later
+  private ref or stash differs, collected-clone discard refuses until
+  `--discard-private-refs` is given; a clone with no verifiable baseline (an
+  older record, or refs not stored as files) fails closed the same way. Report
+  changed ref names and do not pass that flag without authorization. The check also omits
   later local-config, hook, or other non-ref `.git` changes, so review any such
   clone-private setup before deletion.
 - Every published worker holds a cooperative work lease from spawn until an
@@ -97,11 +107,11 @@ Before using this skill, account for these verified current limits:
   when its exact candidate can be published without replacing a ref and the
   worker still matches; otherwise recovery returns it to `ready` and leaves
   any conflicting ref untouched.
-- A collected worker is intended to be one-shot. An ordinary unchanged repeat
-  collection is a no-op; a repeat after an accepted `--allow-rewrite`
-  collection currently fails unless that option is supplied again. New commits
-  after collection are rejected; `--abandon` and `claim` are refused for it.
-  Spawn a new worker for new work.
+- A collected worker is one-shot. An unchanged repeat collection is a no-op
+  judged by the rewrite policy the original collection recorded, so a repeat
+  after an accepted `--allow-rewrite` needs no option; new commits or a new
+  rewrite after collection are rejected under any option, and `--abandon` and
+  `claim` are refused for it. Spawn a new worker for new work.
 - Worktrees share broad Git state. Default clones can share existing object
   files through hard links. Neither mode is an operating-system sandbox.
 - The clone's invalid canonical-source push URL is an accident guard, not a
@@ -219,12 +229,12 @@ assessing ignored content; ask the user to handle those files themselves.
 The accepted protocol adds a durable cooperative work lease with an explicit
 release before deletion (`release`, `claim`), detects ignored paths and
 requires a separate `--discard-ignored` acknowledgement for a collected
-worker, detects changed direct clone-private refs and requires
-`--discard-private-refs`, quarantines an authenticated worker before checked
+worker, detects changed clone-private refs (direct or symbolic, dangling
+included) and requires `--discard-private-refs`, quarantines an authenticated worker before checked
 deletion, keeps workers one-shot after collection, retains discarded result
-custody, and leaves integration explicit. The no-go notice at the top names
-the current deviations; do not treat this checkpoint as implementing the whole
-contract.
+custody, and leaves integration explicit. The notice at the top records the
+repaired deviations and the review still required; do not treat this tree as
+qualified until that review is recorded.
 
 ## Installation ownership
 

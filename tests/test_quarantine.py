@@ -122,32 +122,106 @@ class QuarantineTests(unittest.TestCase):
                 self.assert_gone(worker)
 
     def test_clone_ref_added_after_custody_check_is_preserved_in_quarantine(self) -> None:
-        worker = self.released_collected("late private ref", "clone")
-        repo = Path(worker["path"])
-        pause_marker = self.root / "private-ref-paused"
-        process = self.cli_process(
-            "discard", str(worker["id"]), "--discard-private-refs",
-            env={"CLONEGROWN_TEST_PAUSEPOINT": "discard.before_delete",
-                 "CLONEGROWN_TEST_PAUSE_MARKER": str(pause_marker),
-                 "CLONEGROWN_TEST_PAUSE_SECONDS": "2"},
-        )
-        deadline = time.monotonic() + 30
-        while not pause_marker.exists():
-            self.assertLess(
-                time.monotonic(), deadline,
-                process.stderr.read() if process.poll() is not None else "",
-            )
-            time.sleep(0.02)
-        run_git(repo, "update-ref", "refs/stash", "HEAD")
-        _, stderr = process.communicate(timeout=60)
-        self.assertEqual(process.returncode, 2, stderr)
-        self.assertIn("preserved in quarantine", stderr)
+        for label, plant in (
+            ("direct", lambda repo: run_git(repo, "update-ref", "refs/stash", "HEAD")),
+            ("dangling symbolic", lambda repo: run_git(repo, "symbolic-ref", "refs/local/late", "refs/heads/absent")),
+        ):
+            with self.subTest(ref=label):
+                worker = self.released_collected(f"late private ref {label}", "clone")
+                repo = Path(worker["path"])
+                pause_marker = self.root / f"private-ref-paused-{worker['id']}"
+                process = self.cli_process(
+                    "discard", str(worker["id"]), "--discard-private-refs",
+                    env={"CLONEGROWN_TEST_PAUSEPOINT": "discard.before_delete",
+                         "CLONEGROWN_TEST_PAUSE_MARKER": str(pause_marker),
+                         "CLONEGROWN_TEST_PAUSE_SECONDS": "2"},
+                )
+                deadline = time.monotonic() + 30
+                while not pause_marker.exists():
+                    self.assertLess(
+                        time.monotonic(), deadline,
+                        process.stderr.read() if process.poll() is not None else "",
+                    )
+                    time.sleep(0.02)
+                plant(repo)
+                _, stderr = process.communicate(timeout=60)
+                self.assertEqual(process.returncode, 2, stderr)
+                self.assertIn("preserved in quarantine", stderr)
 
-        quarantine_repo = self.quarantine_of(worker) / repo.name
-        self.assertEqual(run_git(quarantine_repo, "rev-parse", "refs/stash").returncode, 0)
-        self.assertIn(("quarantine-preserved", worker["id"]), [
-            (issue["issue"], issue.get("id")) for issue in status(self.ws)["issues"]
-        ])
+                quarantine_repo = self.quarantine_of(worker) / repo.name
+                if label == "direct":
+                    self.assertEqual(run_git(quarantine_repo, "rev-parse", "refs/stash").returncode, 0)
+                else:
+                    self.assertEqual(run_git(quarantine_repo, "symbolic-ref", "refs/local/late").stdout.strip(),
+                                     "refs/heads/absent")
+                self.assertIn(("quarantine-preserved", worker["id"]), [
+                    (issue["issue"], issue.get("id")) for issue in status(self.ws)["issues"]
+                ])
+
+    def test_ignored_content_added_after_custody_check_needs_its_flag_at_reauthorization(self) -> None:
+        """A quarantined worker is asked every custody category again: ignored paths that
+        appeared after authorization need --discard-ignored, not just --force."""
+        (self.repo / ".gitignore").write_text("*.log\n", encoding="utf-8")
+        commit(self.repo, ".gitignore", "*.log\n")
+        for mode in MODES:
+            with self.subTest(mode=mode):
+                worker = self.released_collected(f"late ignored {mode}", mode)
+                repo = Path(worker["path"])
+                pause_marker = self.root / f"ignored-paused-{worker['id']}"
+                process = self.cli_process(
+                    "discard", str(worker["id"]),
+                    env={"CLONEGROWN_TEST_PAUSEPOINT": "discard.after_quarantine",
+                         "CLONEGROWN_TEST_PAUSE_MARKER": str(pause_marker),
+                         "CLONEGROWN_TEST_PAUSE_SECONDS": "2"},
+                )
+                deadline = time.monotonic() + 30
+                while not pause_marker.exists():
+                    self.assertLess(time.monotonic(), deadline,
+                                    process.stderr.read() if process.poll() is not None else "")
+                    time.sleep(0.02)
+                quarantine_repo = self.quarantine_of(worker) / repo.name
+                (quarantine_repo / "secret.log").write_text("late ignored content\n", encoding="utf-8")
+                _, stderr = process.communicate(timeout=60)
+                self.assertEqual(process.returncode, 2, stderr)
+                self.assertIn("preserved in quarantine", stderr)
+
+                with self.assertRaisesRegex(ClonegrownError, "secret.log.*--discard-ignored"):
+                    discard(self.ws, worker["id"], force=True)
+                self.assertTrue((quarantine_repo / "secret.log").is_file())
+                self.assertEqual(discard(self.ws, worker["id"], force=True, discard_ignored=True)["status"],
+                                 "discarded")
+                self.assert_gone(worker)
+
+    def test_quarantined_collected_worker_is_kept_when_its_result_disappears(self) -> None:
+        """Normal deletion requires a preserved result at every stage: a resumed deletion and a
+        re-authorized one both refuse once the immutable result ref is gone, leaving the
+        quarantine (now the last copy of the collected work) in place."""
+        for mode in MODES:
+            with self.subTest(mode=mode):
+                worker = self.released_collected(f"result vanishes {mode}", mode)
+                process = self.cli_process("discard", str(worker["id"]),
+                                           env={"CLONEGROWN_TEST_FAILPOINT": "discard.after_quarantine"})
+                process.communicate(timeout=120)
+                self.assertEqual(process.returncode, 88)
+                quarantine = self.quarantine_of(worker)
+                self.assertTrue(quarantine.is_dir())
+                collected = self.record(worker["id"])
+                run_git(self.repo, "update-ref", "--no-deref", "-d", collected["result_ref"])
+                for _ in range(2):
+                    actions = {r.get("action") for r in recover(self.ws) if r.get("id") == worker["id"]}
+                    self.assertIn("quarantine-preserved", actions)
+                    self.assertTrue(quarantine.is_dir())
+                    self.assertEqual(self.record(worker["id"])["status"], "discarding")
+                with self.assertRaisesRegex(ClonegrownError, "no longer preserved"):
+                    discard(self.ws, worker["id"], force=True, discard_ignored=True, discard_private_refs=True)
+                self.assertTrue(quarantine.is_dir())
+                self.assertIn(("result-ref-missing", worker["id"]),
+                              [(i["issue"], i.get("id")) for i in status(self.ws)["issues"]])
+                # Restoring the result lets the recorded deletion finish.
+                run_git(self.repo, "update-ref", collected["result_ref"], collected["result_sha"])
+                actions = {r.get("action") for r in recover(self.ws) if r.get("id") == worker["id"]}
+                self.assertIn("discard-finished", actions)
+                self.assert_gone(worker)
 
     # --- partial deletion stays recoverable ---------------------------------------------
 
@@ -702,7 +776,12 @@ class QuarantineTests(unittest.TestCase):
         self.assertTrue(self.quarantine_of(worker).is_dir())
         with self.assertRaisesRegex(ClonegrownError, "pass --force"):
             discard(self.ws, worker["id"])
-        self.assertEqual(discard(self.ws, worker["id"], force=True)["status"], "discarded")
+        # Git can no longer enumerate the checkout's ignored paths, so that category fails
+        # closed: --force alone is refused and the flag is named.
+        with self.assertRaisesRegex(ClonegrownError, "cannot be enumerated.*--discard-ignored"):
+            discard(self.ws, worker["id"], force=True)
+        self.assertTrue(self.quarantine_of(worker).is_dir())
+        self.assertEqual(discard(self.ws, worker["id"], force=True, discard_ignored=True)["status"], "discarded")
         self.assert_gone(worker)
         self.assertNotEqual(run_git(self.repo, "rev-parse", "--verify", f"refs/heads/{worker['branch']}",
                                     check=False).returncode, 0)

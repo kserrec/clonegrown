@@ -50,21 +50,40 @@ def _find_git() -> Path:
 
 GIT_BIN = _find_git()
 
-# Environment variables that can retarget Git, inject config, or replace its helpers.
-# User/system/global config files still apply; only per-process injection is stripped.
+# Every ``GIT_*`` variable is stripped from child Git environments except a
+# reviewed identity allowlist. Git honours dozens of process-level overrides
+# (config injection, alternate object stores, graft and replace files, ref
+# storage, pathspec modes, helpers) and gains new ones over time; a denylist
+# closes only the names someone already thought of, while a custody decision
+# such as ancestry must not depend on which variable a hostile parent set.
+# User, system, and global config *files* still apply: only per-process
+# injection is stripped. Legacy denylist names are kept for documentation and
+# tests; they are all covered by the ``GIT_`` rule.
+GIT_ENV_ALLOWED = {
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+}
 GIT_ENV_EXACT = {
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
     "GIT_PREFIX", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    "GIT_QUARANTINE_PATH", "GIT_SHALLOW_FILE", "GIT_EXEC_PATH", "GIT_TEMPLATE_DIR",
-    "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
-    "GIT_CONFIG_NOSYSTEM", "GIT_ATTR_NOSYSTEM", "GIT_ALLOW_PROTOCOL",
-    "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE",
+    "GIT_QUARANTINE_PATH", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE", "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_ATTR_NOSYSTEM", "GIT_ATTR_SOURCE",
+    "GIT_ALLOW_PROTOCOL", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE",
+    "GIT_REF_FORMAT", "GIT_DEFAULT_HASH", "GIT_INDEX_VERSION",
     "GIT_PROTOCOL_FROM_USER", "GIT_PROTOCOL", "GIT_SSH", "GIT_SSH_COMMAND",
     "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXTERNAL_DIFF",
     "GIT_DIFF_OPTS", "GIT_OPTIONAL_LOCKS", "GIT_FLUSH", "GIT_CONFIG_COUNT",
 }
-GIT_ENV_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TRACE")
+GIT_ENV_PREFIXES = ("GIT_",)
+
+
+def git_env_is_stripped(key: str) -> bool:
+    """Whether ``clean_git_env`` removes ``key``: every ``GIT_*`` name outside the identity allowlist, plus ``SSH_ASKPASS``."""
+    if key in GIT_ENV_ALLOWED:
+        return False
+    return key in GIT_ENV_EXACT or key.startswith(GIT_ENV_PREFIXES)
 
 
 class ClonegrownError(RuntimeError):
@@ -279,7 +298,7 @@ class CommandFailure(ClonegrownError):
 def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     for key in list(env):
-        if key in GIT_ENV_EXACT or key.startswith(GIT_ENV_PREFIXES):
+        if git_env_is_stripped(key):
             env.pop(key, None)
     # Every Git runner uses this environment, including a custom executable.
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -324,10 +343,15 @@ def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
 def git(repo: Path, *args: str | Path, check: bool = True,
         timeout: float | None = None, input: str | None = None,
         sensitive: Iterable[str | Path] = (),
-        pass_fds: Iterable[int] = ()) -> subprocess.CompletedProcess[str]:
-    """Run the configured Git executable with a sanitized, noninteractive environment."""
+        pass_fds: Iterable[int] = (),
+        env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """Run the configured Git executable with a sanitized, noninteractive environment.
+
+    ``env_extra`` adds Clonegrown's own settings on top of the sanitized
+    environment; it is never a way to pass the caller's variables through.
+    """
     return run(
-        [GIT_BIN, *args], cwd=repo, check=check, env=clean_git_env(), timeout=timeout,
+        [GIT_BIN, *args], cwd=repo, check=check, env=clean_git_env(env_extra), timeout=timeout,
         input=input, operation=_git_operation(args), sensitive=sensitive, pass_fds=pass_fds,
     )
 
@@ -360,9 +384,32 @@ def git_bytes(repo: Path, *args: str | Path, timeout: float | None = None,
 
 # --- durable JSON ------------------------------------------------------------
 
+def refuse_unowned_occupant(path: Path, what: str = "metadata") -> None:
+    """A name we are about to write must be free or hold a regular non-symlink file.
+
+    ``os.replace`` would silently replace a symbolic link, dangling or not, or
+    any other occupant; such an object under one of our names was not written
+    by us and is never ours to replace. ``lstat`` sees a dangling link where
+    ``exists()`` reports absence.
+    """
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ClonegrownError(f"cannot inspect {what} {path}: {exc}") from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise ClonegrownError(f"refusing to replace {what} {path}: it is not a regular non-symlink file")
+
+
 def atomic_json(path: Path, data: Any) -> None:
-    """Write JSON via a fsynced temp file and rename, then fsync the directory."""
+    """Write JSON via a fsynced temp file and rename, then fsync the directory.
+
+    The destination is preflighted with ``refuse_unowned_occupant``: only an
+    absent name or a regular file is ever replaced.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    refuse_unowned_occupant(path)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -370,6 +417,7 @@ def atomic_json(path: Path, data: Any) -> None:
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
+        refuse_unowned_occupant(path)  # rechecked as late as possible, before the replace
         os.replace(tmp, path)
         dfd = os.open(path.parent, os.O_RDONLY)
         try:

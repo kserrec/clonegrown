@@ -170,6 +170,37 @@ class ClonegrownCliTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(Path(initialized["workspace"]).resolve(), custom.resolve())
 
+    def test_init_refuses_a_symlink_selected_as_workspace_through_the_cli(self) -> None:
+        """The CLI hands --workspace to the lifecycle lexically, so a symlink selected as the
+        workspace is refused exactly as through the Python API: the link and its external
+        target are left untouched, and nothing is written into the canonical repository."""
+        import os
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            repo = make_repo(root)
+            external = root / "external"
+            external.mkdir()
+            selected = root / "selected"
+            os.symlink(external, selected, target_is_directory=True)
+            for label, argument in (("absolute", str(selected)), ("relative", os.path.relpath(selected, repo))):
+                with self.subTest(path=label):
+                    process = subprocess.run(
+                        [sys.executable, "-m", "clonegrown", "init", str(repo), "--workspace", argument],
+                        cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        env={**os.environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parent.parent)},
+                    )
+                    self.assertEqual(process.returncode, 2, process.stderr)
+                    self.assertIn("workspace directory is not a real directory", process.stderr)
+                    self.assertTrue(selected.is_symlink())
+                    self.assertEqual(list(external.iterdir()), [])
+                    self.assertFalse((repo / ".git" / "cws").exists())
+            # A relative real path still works and lands where it lexically names.
+            rc, initialized = self.cli(repo, "init", str(repo), "--workspace", "../real-workers")
+            self.assertEqual(rc, 0)
+            self.assertEqual(Path(initialized["workspace"]), root / "real-workers")
+
     def test_spawn_requires_task(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args(["spawn"])

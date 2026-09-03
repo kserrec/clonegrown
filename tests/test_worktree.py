@@ -185,6 +185,332 @@ class WorktreeWorkerTests(unittest.TestCase):
     def owner_ref(self, worker: dict) -> str:
         return f"refs/cws/{worker['workspace_id']}/workers/{worker['id']}/branch-owner"
 
+    def test_symbolic_task_branch_name_aborts_spawn_untouched(self) -> None:
+        """A symbolic ref under the generated branch name, whether or not its target exists,
+        is an occupant: spawn refuses before consuming the ID and leaves it byte-for-byte."""
+        from clonegrown.state import WorkspaceState
+        for label, target in (("dangling", "refs/heads/not-yet-created"), ("live", "refs/heads/trunk")):
+            with self.subTest(symbolic=label):
+                state = WorkspaceState.load(self.ws)
+                next_id = int(state.next_id)
+                branch = state.worker_branch(next_id, f"symbolic {label}")
+                loose = self.repo / ".git" / "refs" / "heads" / branch
+                run_git(self.repo, "symbolic-ref", f"refs/heads/{branch}", target)
+                raw_before = loose.read_bytes()
+                # A live symbolic ref resolves, so it is reported as the branch it names;
+                # a dangling one is invisible to resolution and is named by its raw type.
+                with self.assertRaisesRegex(ClonegrownError, "task branch"):
+                    spawn(self.ws, "HEAD", f"symbolic {label}", strong=False, mode="worktree")
+                self.assertEqual(loose.read_bytes(), raw_before)
+                self.assertEqual(git_out(self.repo, "symbolic-ref", f"refs/heads/{branch}"), target)
+                self.assertEqual(int(WorkspaceState.load(self.ws).next_id), next_id)
+                self.assertEqual(status(self.ws)["workers"], [])
+                self.assertEqual(self.worktree_paths(), {str(self.repo.resolve())})
+                run_git(self.repo, "symbolic-ref", "--delete", f"refs/heads/{branch}")
+
+    def test_create_transaction_refuses_a_dangling_symbolic_occupant(self) -> None:
+        """Git's create-only check treats a dangling symbolic ref as absent; the reservation
+        must not. Both the branch name and the ownership ref are checked raw under the locks."""
+        from clonegrown.repository import create_task_branch
+        base = git_out(self.repo, "rev-parse", "HEAD")
+        for occupied in ("refs/heads/agent/x/9-taken", "refs/cws/x/workers/9/branch-owner"):
+            with self.subTest(occupied=occupied):
+                run_git(self.repo, "symbolic-ref", occupied, "refs/heads/absent-target")
+                with self.assertRaisesRegex(ClonegrownError, "symbolic ref"):
+                    create_task_branch(self.repo, "agent/x/9-taken", "refs/cws/x/workers/9/branch-owner", base)
+                self.assertEqual(git_out(self.repo, "symbolic-ref", occupied), "refs/heads/absent-target")
+                for ref in ("refs/heads/agent/x/9-taken", "refs/cws/x/workers/9/branch-owner"):
+                    if ref != occupied:
+                        self.assertNotEqual(run_git(self.repo, "rev-parse", "--verify", ref, check=False).returncode, 0)
+                        self.assertNotEqual(run_git(self.repo, "symbolic-ref", "-q", ref, check=False).returncode, 0)
+                run_git(self.repo, "symbolic-ref", "--delete", occupied)
+        create_task_branch(self.repo, "agent/x/9-taken", "refs/cws/x/workers/9/branch-owner", base)
+        self.assertEqual(git_out(self.repo, "rev-parse", "refs/heads/agent/x/9-taken"), base)
+
+    def test_cleanup_never_deletes_a_foreign_occupant_of_the_task_branch_name(self) -> None:
+        """Someone deleted the worker's real branch and planted a symbolic ref or a filesystem
+        symlink under its name: discard retains the name untouched and says so, and status
+        names the occupant while the worker is live."""
+        for label in ("symbolic ref", "filesystem symlink"):
+            with self.subTest(occupant=label):
+                worker = spawn(self.ws, "HEAD", f"occupied {label}", strong=False, mode="worktree")
+                tip = commit(Path(worker["path"]), "work.txt")
+                collect(self.ws, worker["id"])
+                release(self.ws, worker["id"])
+                branch_ref = f"refs/heads/{worker['branch']}"
+                run_git(self.repo, "update-ref", "refs/heads/other", tip)
+                run_git(self.repo, "update-ref", "--no-deref", "-d", branch_ref)
+                loose = self.repo / ".git" / branch_ref
+                if label == "symbolic ref":
+                    run_git(self.repo, "symbolic-ref", branch_ref, "refs/heads/other")
+                else:
+                    loose.parent.mkdir(parents=True, exist_ok=True)  # Git pruned the empty parent with the branch
+                    os.symlink(self.repo / ".git" / "refs" / "heads" / "other", loose)
+                raw_before = loose.read_bytes() if label == "symbolic ref" else os.readlink(loose)
+                issues = [(i["issue"], i.get("id")) for i in status(self.ws)["issues"]]
+                self.assertIn(("task-branch-foreign", worker["id"]), issues)
+                # Refused before anything is deleted: the worker's HEAD resolves through the occupant.
+                with self.assertRaisesRegex(ClonegrownError, "task-branch-foreign"):
+                    discard(self.ws, worker["id"], force=True)
+                record = json.loads((self.ws / ".cws" / "workers" / f"{worker['id']}.json").read_text(encoding="utf-8"))
+                self.assertEqual(record["status"], "collected")
+                self.assertTrue(Path(worker["path"]).is_dir())
+                self.assertTrue(os.path.lexists(loose))
+                self.assertEqual(loose.read_bytes() if label == "symbolic ref" else os.readlink(loose), raw_before)
+                self.assertEqual(git_out(self.repo, "rev-parse", "refs/heads/other"), tip)
+                recover(self.ws)
+                self.assertTrue(os.path.lexists(loose))
+                run_git(self.repo, "update-ref", "-d", "refs/heads/other")
+                if label == "symbolic ref":
+                    run_git(self.repo, "symbolic-ref", "--delete", branch_ref)
+                else:
+                    loose.unlink()
+
+    def test_fifo_at_a_live_worker_branch_name_is_reported_and_refused_without_blocking(self) -> None:
+        import signal
+        worker = spawn(self.ws, "HEAD", "fifo branch", strong=False, mode="worktree")
+        branch_ref = f"refs/heads/{worker['branch']}"
+        run_git(self.repo, "update-ref", "--no-deref", "-d", branch_ref)
+        loose = self.repo / ".git" / branch_ref
+        loose.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(loose)
+
+        def alarm(*_: object) -> None:
+            raise AssertionError("a Git command blocked on the planted FIFO")
+        previous = signal.signal(signal.SIGALRM, alarm)
+        signal.alarm(30)
+        try:
+            report = status(self.ws)
+            self.assertIn(("task-branch-foreign", worker["id"]), [(i["issue"], i.get("id")) for i in report["issues"]])
+            with self.assertRaisesRegex(ClonegrownError, "task-branch-foreign"):
+                collect(self.ws, worker["id"])
+            with self.assertRaisesRegex(ClonegrownError, "task-branch-foreign"):
+                discard(self.ws, worker["id"], abandon=True)
+            actions = [r.get("action") for r in recover(self.ws) if r.get("id") == worker["id"]]
+            self.assertNotIn("collect-finished", actions)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertTrue(os.path.exists(loose) and not loose.is_file())
+        self.assertTrue(Path(worker["path"]).is_dir())
+        loose.unlink()
+
+    def test_fifo_behind_another_worktree_head_is_refused_before_canonical_git_resolves_it(self) -> None:
+        """Canonical-side worktree commands and the collect fetch resolve every linked worktree's
+        HEAD; a FIFO behind one worker's branch must be refused by name, not opened, when other
+        workers collect, spawn, or discard."""
+        import signal
+        victim = spawn(self.ws, "HEAD", "victim", strong=False, mode="worktree")
+        other_clone = spawn(self.ws, "HEAD", "other clone", strong=False)
+        commit(Path(other_clone["path"]), "work.txt")
+        other_wt = spawn(self.ws, "HEAD", "other worktree", strong=False, mode="worktree")
+        commit(Path(other_wt["path"]), "work.txt")
+        collect(self.ws, other_wt["id"])
+        release(self.ws, other_wt["id"])
+        branch_ref = f"refs/heads/{victim['branch']}"
+        run_git(self.repo, "update-ref", "--no-deref", "-d", branch_ref)
+        loose = self.repo / ".git" / branch_ref
+        loose.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(loose)
+
+        def alarm(*_: object) -> None:
+            raise AssertionError("a Git command blocked on the planted FIFO")
+        previous = signal.signal(signal.SIGALRM, alarm)
+        signal.alarm(45)
+        try:
+            with self.assertRaisesRegex(ClonegrownError, "linked worktree .* Git would block"):
+                collect(self.ws, other_clone["id"])
+            with self.assertRaisesRegex(ClonegrownError, "linked worktree .* Git would block"):
+                spawn(self.ws, "HEAD", "new worktree", strong=False, mode="worktree")
+            with self.assertRaisesRegex(ClonegrownError, "linked worktree .* Git would block"):
+                discard(self.ws, other_wt["id"])
+            recover(self.ws)
+            report = status(self.ws)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertTrue(os.path.exists(loose) and not loose.is_file())
+        self.assertEqual({w["id"]: w["status"] for w in report["workers"]}[other_clone["id"]], "ready")
+        loose.unlink()
+        run_git(self.repo, "update-ref", branch_ref, victim["base_sha"])
+        self.assertEqual(collect(self.ws, other_clone["id"])["status"], "collected")
+
+    def test_foreign_head_refusal_leaves_another_interrupted_spawn_retryable(self) -> None:
+        """A FIFO on worker A's branch must not turn worker B's untouched interrupted spawn into a
+        durable broken state: recovery reports the refusal, and once the occupant is gone the next
+        recovery promotes B."""
+        import signal
+        import subprocess
+        import sys
+        victim = spawn(self.ws, "HEAD", "victim", strong=False, mode="worktree")
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent), "CLONEGROWN_TEST_MODE": "1",
+               "CLONEGROWN_TEST_FAILPOINT": "spawn.after_publish"}
+        process = subprocess.run([sys.executable, "-m", "clonegrown", "spawn", "interrupted", "--worktree",
+                                  "--workspace", str(self.ws)], cwd=self.repo, env=env, text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(process.returncode, 88, process.stderr)
+        interrupted_id = victim["id"] + 1
+        branch_ref = f"refs/heads/{victim['branch']}"
+        run_git(self.repo, "update-ref", "--no-deref", "-d", branch_ref)
+        loose = self.repo / ".git" / branch_ref
+        loose.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(loose)
+
+        def alarm(*_: object) -> None:
+            raise AssertionError("a Git command blocked on the planted FIFO")
+        previous = signal.signal(signal.SIGALRM, alarm)
+        signal.alarm(45)
+        try:
+            actions = {(r.get("action"), r.get("id")) for r in recover(self.ws)}
+            self.assertIn(("recovery-failed", interrupted_id), actions)
+            self.assertNotIn(("spawn-broken-unverified-path", interrupted_id), actions)
+            record = json.loads((self.ws / ".cws" / "workers" / f"{interrupted_id}.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["status"], "publishing")
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        loose.unlink()
+        run_git(self.repo, "update-ref", branch_ref, victim["base_sha"])
+        actions = {(r.get("action"), r.get("id")) for r in recover(self.ws)}
+        self.assertIn(("spawn-publish-finished", interrupted_id), actions)
+        self.assertEqual({w["id"]: w["status"] for w in status(self.ws)["workers"]}[interrupted_id], "ready")
+
+    def test_symbolic_ref_whose_target_is_a_fifo_is_refused_without_git_enumeration(self) -> None:
+        """A symbolic ref at a worker's branch name pointing at a FIFO: Git's own enumeration would
+        block, so the namespace inventory is prefixed and symbolic targets are read raw."""
+        import signal
+        victim = spawn(self.ws, "HEAD", "symref victim", strong=False, mode="worktree")
+        other = spawn(self.ws, "HEAD", "other clone", strong=False)
+        commit(Path(other["path"]), "work.txt")
+        branch_ref = f"refs/heads/{victim['branch']}"
+        fifo_ref = "refs/heads/zz-fifo"
+        run_git(self.repo, "update-ref", "--no-deref", "-d", branch_ref)
+        # Planted with plain writes: Git itself would open the FIFO while validating the target.
+        os.mkfifo(self.repo / ".git" / fifo_ref)
+        loose = self.repo / ".git" / branch_ref
+        loose.parent.mkdir(parents=True, exist_ok=True)
+        loose.write_bytes(f"ref: {fifo_ref}\n".encode())
+
+        def alarm(*_: object) -> None:
+            raise AssertionError("a Git command blocked on the planted FIFO")
+        previous = signal.signal(signal.SIGALRM, alarm)
+        signal.alarm(45)
+        try:
+            report = status(self.ws)
+            self.assertIn(("task-branch-foreign", victim["id"]), [(i["issue"], i.get("id")) for i in report["issues"]])
+            with self.assertRaisesRegex(ClonegrownError, "linked worktree .* Git would block"):
+                spawn(self.ws, "HEAD", "clone would enumerate", strong=False)  # git clone reads every ref
+            with self.assertRaisesRegex(ClonegrownError, "task-branch-foreign"):
+                collect(self.ws, victim["id"])
+            with self.assertRaisesRegex(ClonegrownError, "linked worktree .* Git would block"):
+                collect(self.ws, other["id"])
+            with self.assertRaisesRegex(ClonegrownError, "linked worktree .* Git would block"):
+                spawn(self.ws, "HEAD", "new worktree", strong=False, mode="worktree")
+            recover(self.ws)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertEqual(loose.read_bytes(), f"ref: {fifo_ref}\n".encode())
+        loose.unlink()
+        (self.repo / ".git" / fifo_ref).unlink()
+
+    def test_detached_worktree_branch_symref_to_fifo_is_refused_before_clone_or_fetch(self) -> None:
+        """With the worktree worker's HEAD detached, its branch name is not in any admin HEAD;
+        the workspace's task-branch subtree is still walked raw before clone and fetch."""
+        import signal
+        victim = spawn(self.ws, "HEAD", "detached victim", strong=False, mode="worktree")
+        other = spawn(self.ws, "HEAD", "other clone", strong=False)
+        commit(Path(other["path"]), "work.txt")
+        run_git(Path(victim["path"]), "checkout", "-q", "--detach")
+        branch_ref = f"refs/heads/{victim['branch']}"
+        fifo = self.repo / ".git" / "refs" / "zz-fifo"
+        os.mkfifo(fifo)
+        run_git(self.repo, "update-ref", "--no-deref", "-d", branch_ref)
+        loose = self.repo / ".git" / branch_ref
+        loose.parent.mkdir(parents=True, exist_ok=True)
+        loose.write_bytes(b"ref: refs/zz-fifo\n")
+
+        def alarm(*_: object) -> None:
+            raise AssertionError("a Git command blocked on the planted FIFO")
+        previous = signal.signal(signal.SIGALRM, alarm)
+        signal.alarm(45)
+        try:
+            with self.assertRaisesRegex(ClonegrownError, "symbolic ref leading to"):
+                spawn(self.ws, "HEAD", "clone spawn", strong=False)
+            with self.assertRaisesRegex(ClonegrownError, "symbolic ref leading to"):
+                collect(self.ws, other["id"])
+            status(self.ws)
+            recover(self.ws)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertEqual(loose.read_bytes(), b"ref: refs/zz-fifo\n")
+        loose.unlink()
+        fifo.unlink()
+
+    def test_fifo_admin_gitdir_refuses_a_worktree_spawn_and_its_rollback_returns(self) -> None:
+        import signal
+        victim = spawn(self.ws, "HEAD", "gitdir victim", strong=False, mode="worktree")
+        gitdir = Path(victim["worktree_admin"]) / "gitdir"
+        saved = gitdir.read_bytes()
+        gitdir.unlink()
+        os.mkfifo(gitdir)
+
+        def alarm(*_: object) -> None:
+            raise AssertionError("a command blocked on the planted FIFO")
+        previous = signal.signal(signal.SIGALRM, alarm)
+        signal.alarm(45)
+        try:
+            with self.assertRaisesRegex(ClonegrownError, "linked worktree"):
+                spawn(self.ws, "HEAD", "new worktree", strong=False, mode="worktree")
+            recover(self.ws)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        gitdir.unlink()
+        gitdir.write_bytes(saved)
+        recover(self.ws)
+        self.assertEqual(spawn(self.ws, "HEAD", "after cleanup", strong=False, mode="worktree")["status"], "ready")
+
+    def test_non_regular_admin_head_and_symlinked_admin_entry_are_refused(self) -> None:
+        import signal
+        import shutil
+        victim = spawn(self.ws, "HEAD", "admin victim", strong=False, mode="worktree")
+        other = spawn(self.ws, "HEAD", "other clone", strong=False)
+        commit(Path(other["path"]), "work.txt")
+        admin = Path(victim["worktree_admin"])
+        head = admin / "HEAD"
+        for label in ("fifo head", "symlinked admin entry"):
+            with self.subTest(case=label):
+                if label == "fifo head":
+                    saved = head.read_bytes()
+                    head.unlink()
+                    os.mkfifo(head)
+                else:
+                    moved = self.root / "moved-admin"
+                    shutil.move(str(admin), str(moved))
+                    os.symlink(moved, admin)
+
+                def alarm(*_: object) -> None:
+                    raise AssertionError("a Git command blocked on the planted admin occupant")
+                previous = signal.signal(signal.SIGALRM, alarm)
+                signal.alarm(45)
+                try:
+                    with self.assertRaisesRegex(ClonegrownError, "linked worktree"):
+                        collect(self.ws, other["id"])
+                    with self.assertRaisesRegex(ClonegrownError, "linked worktree"):
+                        spawn(self.ws, "HEAD", "new worktree", strong=False, mode="worktree")
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
+                if label == "fifo head":
+                    head.unlink()
+                    head.write_bytes(saved)
+                else:
+                    admin.unlink()
+                    shutil.move(str(moved), str(admin))
+        self.assertEqual(collect(self.ws, other["id"])["status"], "collected")
+
     def test_pre_existing_task_branch_aborts_spawn_untouched(self) -> None:
         from clonegrown.state import WorkspaceState
         state = WorkspaceState.load(self.ws)
@@ -192,14 +518,16 @@ class WorktreeWorkerTests(unittest.TestCase):
         branch = state.worker_branch(int(state.next_id), "taken")
         run_git(self.repo, "branch", branch, foreign_sha)
         base = git_out(self.repo, "rev-parse", "HEAD~1")
-        with self.assertRaisesRegex(ClonegrownError, "already exists"):
+        # The generated name is reserved before allocation: no ID is consumed and no record exists.
+        with self.assertRaisesRegex(ClonegrownError, "already has a task branch"):
             spawn(self.ws, base, "taken", strong=False, mode="worktree")
         recover(self.ws)
         # The foreign branch is exactly where it was; no ownership ref, no admin directory, no worktree.
         self.assertEqual(git_out(self.repo, "rev-parse", branch), foreign_sha)
-        worker = status(self.ws)["workers"][0]
-        self.assertEqual(worker["status"], "spawn_failed")
-        self.assertNotEqual(run_git(self.repo, "rev-parse", "--verify", self.owner_ref(worker), check=False).returncode, 0)
+        self.assertEqual(status(self.ws)["workers"], [])
+        self.assertEqual(int(WorkspaceState.load(self.ws).next_id), int(state.next_id))
+        owner_ref = f"refs/cws/{state.workspace_id}/workers/{int(state.next_id)}/branch-owner"
+        self.assertNotEqual(run_git(self.repo, "rev-parse", "--verify", owner_ref, check=False).returncode, 0)
         self.assertEqual(self.worktree_paths(), {str(self.repo.resolve())})
         self.assertEqual(sorted(p.name for p in (self.repo / ".git" / "worktrees").iterdir())
                          if (self.repo / ".git" / "worktrees").exists() else [], [])

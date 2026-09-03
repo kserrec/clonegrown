@@ -189,7 +189,7 @@ def validate_control_dir(ws: Path, require_state: bool = False) -> None:
     else:
         if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
             raise ClonegrownError("workspace quarantine directory is unsafe: it is not a real directory")
-    if paths["state"].exists() or require_state:
+    if os.path.lexists(paths["state"]) or require_state:  # a dangling link is an occupant, not absence
         try:
             mode = os.lstat(paths["state"]).st_mode
         except FileNotFoundError:

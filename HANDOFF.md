@@ -1,305 +1,226 @@
 # Session handoff
 
-Updated 2026-09-02 during `$wrapup` after the second Phase 7 cold review.
+Updated 2026-09-02 during final Step 7.5, after Steps 7.5j–7.5ae were executed by `$next`.
 `PLAN.md` is the normative roadmap; `research/PLAN-ARCHIVE.md` preserves the
-completed dated transcript that formerly made this file and the plan difficult
-to use.
+completed dated transcript.
 
 ## Exact current state
 
-- Work is on `main`. This handoff is part of the combined Phase 6–7 checkpoint
-  being committed and pushed from base revision
-  `354d16bc662f15f65dded911d3c26729bf5804aa`. The checkpoint deliberately
-  preserves an incomplete Phase 7 and must not be treated as a release.
-- Phases 1–6 and Phase 7 Steps 7.1–7.5i are complete in the checkpoint. The
-  second fresh cold review returned a no-go with six independently reproduced
-  in-contract defects. Remediation Steps 7.5j–7.5o and final Step 7.5 remain
-  incomplete.
-- Kyle authorized Apache License 2.0 and authorized completion of these
-  refactor/rework phases without another `$next` or permission prompt unless
-  genuinely required. Kyle then explicitly invoked `$wrapup` and asked to stop
-  this session after documenting, committing, and pushing the checkpoint. The
-  approved product boundary remains the end of Phase 7: do not begin outreach,
-  comparative agent-behavior claims, or new product work.
-- The tree has 43 recognized changed paths: 9 product modules; 23 tests and
-  campaign paths, including 4 intentional deletions and 3 new paths; and 11
-  documentation, research, licensing, or package-metadata paths. No dependency
-  or workflow file is changed.
+- Work is on `main`, uncommitted, on top of the pushed checkpoint
+  `c9728a0` (Phase 6–7 checkpoint with the no-go record). Kyle's convention
+  is to commit only at `$wrapup`.
+- Phases 1–6 and Phase 7 Steps 7.1–7.5ae are complete in the working tree.
+  The findings of the second (7.5j–7.5o), third (7.5p–7.5s), fourth
+  (7.5t–7.5v), fifth (7.5w–7.5z), sixth (7.5aa), seventh (7.5ab), eighth (7.5ac),
+  ninth (7.5ad), and tenth (7.5ae) fresh cold reviews are repaired, each
+  starting from its recorded independent reproducer and closed with a class
+  regression. Final Step 7.5's local part is complete: the eleventh fresh reviewer
+  returned GO on this exact tree. What remains is commit, push, hosted CI on
+  that SHA, and an evidence-only commit.
+- Kyle authorized completion of these refactor/rework phases without another
+  `$next` or permission prompt unless genuinely required. The approved product
+  boundary remains the end of Phase 7: do not begin outreach, comparative
+  agent-behavior claims, or new product work.
 - No dotenv file has been opened, read, searched, printed, diffed, parsed, or
   sourced. Repository-wide searches and copies must continue to exclude
   `.env`, `*.env`, `.env.*`, and `*.env.*`.
 
-## Changed boundary
+## What this session changed
 
-Executable product changes are in:
+Product modules: `clonegrown/core.py`, `clonegrown/cli.py`,
+`clonegrown/lifecycle.py`, `clonegrown/repository.py`, `clonegrown/state.py`,
+`clonegrown/worker.py`.
 
-- `clonegrown/__init__.py`
-- `clonegrown/audit.py`
-- `clonegrown/cli.py`
-- `clonegrown/core.py`
-- `clonegrown/lifecycle.py`
-- `clonegrown/recovery.py`
-- `clonegrown/repository.py`
-- `clonegrown/state.py`
-- `clonegrown/worker.py`
+- **7.5j** `worker.raw_ref_inventory` unions `for-each-ref` with a
+  symlink-free walk of the loose ref files, so a dangling symbolic ref is
+  recorded as `symref:<target>`. The publication baseline and the quarantine
+  custody fingerprint both use it. A repository whose `extensions.refstorage`
+  is not `files` has no raw walk and fails closed like a legacy record.
+- **7.5k** `repository.create_task_branch` is a prepared transaction that
+  reads both names' raw types under the locks and aborts on any symbolic
+  occupant. `allocation_evidence` lists a direct or symbolic occupant of the
+  generated branch as evidence for worktree spawns. The transaction helper now
+  carries Git's redacted stderr when `prepare` is refused.
+- **7.5l** Workspace-state, request-index, and worker-record occupancy uses
+  `os.path.lexists`; `core.atomic_json` preflights its destination with
+  `refuse_unowned_occupant`; `require_worker` refuses a non-regular record
+  before any lock file exists.
+- **7.5m** The CLI passes `--workspace` to `init_workspace` lexically
+  (`expanduser()` only).
+- **7.5n** `GIT_CONFIG` is in `GIT_ENV_EXACT`.
+- **7.5o** The collected branch of `collect` snapshots with the recorded
+  `worker.allow_rewrite`.
+- **7.5p** `clean_git_env` strips every `GIT_*` name except the six
+  author/committer identity variables (`git_env_is_stripped`), still strips
+  `SSH_ASKPASS`, and forces `GIT_TERMINAL_PROMPT=0`.
+- **7.5q** `_reauthorize_quarantined` takes `discard_ignored`, enumerates
+  ignored paths on the quarantined checkout for a normal discard, and fails
+  closed when Git cannot read it.
+- **7.5r** `raw_ref_inventory` lives in `repository.py`, walks `refs/` with
+  `dir_fd`-relative `O_NOFOLLOW` opens (optionally anchored on the held
+  canonical descriptor), and feeds `NamespaceRefs` (with a `malformed` list
+  and per-worker attribution of symbolic reports) and the worker-ref
+  allocation evidence.
+- **7.5s** Public docs corrected; `research/FINAL_COLD_REVIEW.md` now records
+  the third review verbatim.
+- **7.5t** `repository.is_ancestor` judges ancestry with `--no-replace-objects`
+  and `GIT_GRAFT_FILE=/dev/null` (via a new `env_extra` argument on the
+  sanitized Git runner); `snapshot_worker` uses it and `collect` re-judges on
+  canonical after the fetch.
+- **7.5u** `repository.loose_ref_occupant` and `is_foreign_ref`; every
+  write-path symbolic check uses `is_foreign_ref`; allocation evidence lists
+  any raw inventory entry at the base-pin or task-branch name.
+- **7.5v** Notices and architecture wording updated; fourth review recorded
+  verbatim in `research/FINAL_COLD_REVIEW.md`.
+- **7.5w** `_recover_collecting` requires canonical-side `is_ancestor` before
+  finishing; `status` reports canonical-view drift for collected records.
+- **7.5x** `is_foreign_ref` and `resolve_ref` `lstat` first; allocation
+  evidence `lstat`-inspects the base-pin and task-branch names.
+- **7.5y** `_release_task_branch` / `release_task_branch` retain a foreign
+  branch-name occupant; new `task-branch-foreign` status code.
+- **7.5z** Wording; fifth review recorded verbatim.
+- **7.5aa** `resolve_ref`/`ref_points_at`/`result_ref_transaction` and the
+  collected-repeat `collect` path inspect before Git; `verify_worker`
+  refuses a worktree worker with a foreign branch name; audit reporting
+  precision; sixth review recorded verbatim.
+- **7.5ab** Result preservation rechecked at resumed and re-authorized
+  deletion; `require_plain_worktree_heads` before worktree commands and the
+  collect fetch; `ENOTDIR` as a foreign occupant; audit codes and ids;
+  seventh review recorded verbatim.
+- **7.5ac** Component-aware `loose_ref_occupant`; `loose_symbolic_target`;
+  `ForeignWorktreeHead` re-raised by recovery; preflight before clone-mode
+  spawn's clone; prefixed namespace inventory; eighth review recorded.
+- **7.5ad** Raw-first inventory that skips Git when a symbolic chain ends
+  foreign; chain-aware `resolve_ref`/`ref_points_at`; `ref_prefixes` walked
+  before every worktree command, the fetch, and the clone; admin `gitdir`
+  inspected; `collected-result-restored` / `collected-result-missing`
+  instead of `broken`; ninth review recorded.
+- **7.5ae** `is_symbolic_ref` raw-first with `--no-recurse`; regular-file
+  pointer reads; `packed-refs` read raw when enumeration is skipped; wording;
+  tenth review recorded.
 
-The cumulative Phase 6 implementation preserves promised auxiliary refs in
-clone workers and removes redundant canonical verification while retaining
-locked identity reconciliation. The Phase 7 remediation adds these observable
-contracts:
+Tests: modified `tests/test_allocation.py`, `tests/test_audit.py`,
+`tests/test_cli.py`, `tests/test_core.py`, `tests/test_discard_ignored.py`,
+`tests/test_quarantine.py`, `tests/test_safety_errors.py`,
+`tests/test_worktree.py`; new `tests/test_collect_policy.py`. The direct
+branch-collision expectation in `test_worktree.py` was tightened to the
+earlier pre-allocation refusal (no worker record is created any more).
 
-- `discard(..., discard_private_refs=False)` and CLI
-  `--discard-private-refs` separately authorize deletion of changed or
-  unverified clone-private refs. New clone records carry
-  `clone_private_refs`; non-ref `.git` state such as local config and hooks is
-  explicitly outside that baseline. The current inventory correctly covers
-  direct refs but misses dangling symbolic private refs; Step 7.5j owns that
-  open defect.
-- Collection transfers a candidate object without a destination ref and
-  creates the immutable result only through an absent-ref compare-and-swap.
-  Direct conflicts and all symbolic refs are preserved and refused. Prepared
-  Git transactions hold result and summary locks while raw types are checked,
-  commit the summary, and hold both values stable across collected metadata.
-  Recovery can finish an object-only interrupted transfer through that same
-  compare-and-swap and locked finalization.
-- A normal `discarded` record must retain its result fields. Audit, request
-  reuse, and recovery continue authenticating that terminal result custody.
-- Live and dangling worker-slot symlinks are occupied unauthenticated paths,
-  not absence.
-- Init refuses symlinked or non-directory workspace-control and canonical
-  marker parents before creating children or writing markers through them. The
-  Python API also validates the exact selected workspace path before resolving
-  it. The CLI currently defeats that check by resolving `--workspace` first;
-  Step 7.5m owns that open adapter defect.
+Documentation: `README.md`, `SKILL.md`, `ARCHITECTURE.md`, `PLAN.md`, and this
+file describe the repaired behavior and a qualification that is pending.
+`research/FINAL_COLD_REVIEW.md` gained the third review's record and verbatim
+report; it is the record every later fresh reviewer receives.
 
-Test and campaign changes are:
+No dependency, workflow, installer, or package-metadata file changed. The
+public API and CLI surface are unchanged; the only new error texts are the
+refusals recorded in `PLAN.md`.
 
-- Modified:
-  `tests/campaign/blocking_git.py`,
-  `tests/campaign/hardening_suite.py`,
-  `tests/campaign/real_repository_qualification.py`,
-  `tests/campaign/state_machine_fuzz.py`,
-  `tests/test_allocation.py`,
-  `tests/test_audit.py`,
-  `tests/test_campaign_records.py`,
-  `tests/test_cli.py`,
-  `tests/test_core.py`,
-  `tests/test_discard_ignored.py`,
-  `tests/test_lease.py`,
-  `tests/test_parent_interruption.py`,
-  `tests/test_quarantine.py`,
-  `tests/test_safety_errors.py`,
-  `tests/test_state.py`, and
-  `tests/test_worktree.py`.
-- New:
-  `tests/campaign/auxiliary_ref_benchmark.py`,
-  `tests/test_auxiliary_refs.py`, and
-  `tests/test_package_metadata.py`.
-- Deleted after deterministic replacements were proved:
-  `tests/campaign/concurrency_v2.py`,
-  `tests/campaign/io_fault_probe.py`,
-  `tests/campaign/run_crash_case.py`, and
-  `tests/campaign/shared_state_compare.py`.
+## Verification on the current tree
 
-Documentation, research, licensing, and metadata changes are:
+All results below come from the final tree (Steps 7.5j–7.5ae applied), on
+Linux with CPython 3.12.3 and Git 2.43.0.
 
-- Modified: `README.md`, `SKILL.md`, `ARCHITECTURE.md`, `PLAN.md`, this file,
-  `research/REPRODUCE.md`, and `pyproject.toml`.
-- New: canonical Apache-2.0 `LICENSE`, the verbatim historical
-  `research/PLAN-ARCHIVE.md`, qualitative
-  `research/ORCHESTRATOR_SIMULATION.md`, and current-package
-  `research/FINAL_COLD_REVIEW.md`.
+- Full discovered unit suite: 294/294 passed in 389.573 seconds.
+- Clone and worktree hardening each reported 57 defined, 56 exercised passes,
+  one conditional reftable skip (this Git lacks reftable), and zero failures.
+  Result hashes were `3f8800b4cc47d5d66de10fdffe1e2a3e61d4d997c282e4dc63bbcfd554e8a3bc`
+  for clone and `6ac4e9f2ccbe7112071241c5bccfa3cfd98b0112fe1f1b537a31556d7542eb66` for worktree.
+- All 12 bounded random-kill runs passed: two seeds each for spawn, collect,
+  and discard in both modes; every selected process was killed and every
+  return code was `-9`. Result hashes were clone spawn
+  `70e97b32d5de8e5a2cc6b32369d379a4a5ea94b24db72ce0fccb39516781dcdd`, collect
+  `4b2facc801283619b1020139ae3a7e10015a21f97f885a7fec580aea66d2b677`, discard
+  `8714d4c4f01ba7a8ef54db0ea0147f432e6b1bb50fb36a40d91243584730cc2d`, worktree spawn
+  `33544b71efb48af1eb52e33122575294f4b0f40394a89956b2f8041552756b1d`, collect
+  `6e66be838aba3da6b2982e12f9974ddae6c7eb457e4a77ac9ee57ad71a25348e`, and discard
+  `38faa4b492ce3a7b595051b2fbe29cdd353101f0e49c3cb7c1e3762b7af0632d`.
+- Both 50-step state-machine seeds passed in both modes. Result hashes were
+  `120e798f8cb0bc36ef1bb6904d8ae3ec7524d4803c672f0803b84ff44dc02b12` for clone and
+  `00fd6a2b19168cf7005276197006570d711f1003a1a848cb4e030f20b0456fed` for worktree.
+- Package gate: wheel and source archives built with an isolated `build`
+  toolchain and installed into two fresh venvs; both entry points report
+  `0.1.0a1`; `Apache-2.0`, `Requires-Python >=3.11`, the public import, and
+  the canonical license hash
+  `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30` passed.
+  Artifact hashes: wheel
+  `95b3d689be30ecaa4d4b6d6baa7f6e9fc38f6ccd8b9a39ad50baf402568ad4fc`, source
+  `9c858efd8c1e8b8e753dabf0202267fab8616be03e0f579a8ed1e5c313492927`.
+- `python -m compileall`, `sh -n install.sh`, `git diff --check`, and the
+  repository Markdown link audit (33 links and anchors) passed.
 
-There is no runtime dependency addition. The API adds one backward-compatible
-optional discard argument. New records add one optional clone-only baseline;
-legacy clone records fail closed before deletion. Normal terminal `discarded`
-records now require the result fields that successful collection already
-created. CLI output continues to hide internal baseline and token fields.
+## Verification recorded after Steps 7.5j–7.5o (superseded by the section above)
 
-## Verified final-review findings
+Every module gate for each Step passed as recorded in `PLAN.md`
+(discard-ignored 16/16, quarantine race 1/1, worktree 26/26, allocation 20/20,
+repository 8/8, safety errors 21/21, state 12/12, core 15/15, CLI 7/7,
+collect policy 3/3). All nine `/tmp` probes were rerun before and after each
+change: each reproduced the defect on the checkpoint tree and each now shows
+the required refusal or success.
 
-The first fresh cold review was a no-go. Disposable real-repository probes
-independently reproduced five product defects before repair:
+Whole-tree gates on the repaired tree:
 
-1. normal clone discard could silently lose a unique stash or another private
-   ref;
-2. collect could force-overwrite a conflicting exact result-ref name;
-3. a discarded result could disappear without status, request-retry, or record
-   validation refusing it;
-4. a dangling worker-slot symlink could be treated as absence while discard
-   recorded success; and
-5. init could create children or markers through symlinked control parents.
+- Full discovered unit suite: 266/266 passed in 568.861 seconds on the
+  final tree (Linux, CPython 3.12.3, Git 2.43.0). An earlier whole-tree run
+  had failed two Step 7.5i transaction-window tests because the 7.5k
+  transaction-helper change relabeled the prepare-refusal error; the label was
+  restored to `git update-ref transaction` and the suite rerun in full.
+- Hardening and campaigns: see "Local gate results" below.
+- Package gate: wheel and source archives built (isolated `build` toolchain),
+  installed into two fresh CPython 3.12.3 venvs; both CLI and module entry
+  points report `0.1.0a1`; `Apache-2.0`, `Requires-Python >=3.11`, public
+  imports, and the canonical license hash
+  `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30` passed.
+  Artifact hashes: wheel
+  `0d13f802b45b044844bb079835bb3a03186dc931e656e27749d5a0c1c87dafc6`, source
+  `e6574d9432347a5ff6dc1ef73687415816d3776f03e77cfcc2fdef8243e8114f`.
+- `python -m compileall`, `sh -n install.sh`, `git diff --check`, and the
+  repository Markdown link audit (33 links and anchors) passed.
 
-Steps 7.5b–7.5e repair those classes. The restarted 246-test suite then passed
-244 tests and exposed one stale expected error string plus one real product
-regression: an object-only successful fetch child was reset to `ready` instead
-of being completed by recovery. Inspection led to reproduced symbolic-ref
-races during fetch and between the first type/value checks, followed by a
-direct result-ref move between the worker recheck and final metadata. Step
-7.5g closed those product gaps, updated the stale assertion, and corrected
-rollback wording that had conflated transferred objects with published refs.
+## Local gate results
 
-A subsequent disposable probe found that selecting the workspace itself as a
-symlink still redirected initialization into the target because init resolved
-the path before preflight. Step 7.5h validates the lexical selection first;
-the link and empty external target now remain unchanged.
+All results below come from the final tree, after the full 266/266 suite.
 
-The fresh re-review then reproduced a symbolic result planted between final
-type and value observations and a direct result moved while summary publication
-began. Independent probes reproduced both. Step 7.5i replaces the separate
-observations with prepared Git transactions that hold both ref locks while raw
-types are inspected and across the collected-record write.
-
-The second fresh cold review was also a no-go. Its full suite and both
-hardening modes passed, but independent disposable probes established six
-remaining blocker roots:
-
-1. `/tmp/clonegrown_probe_dangling_private_ref.py` proved that a collected
-   clone can lose a changed dangling symbolic private ref without
-   `--discard-private-refs`. `for-each-ref` omits that ref from both the
-   publication baseline and deletion fingerprint. Step 7.5j owns the raw
-   direct/symbolic inventory and class regression.
-2. `/tmp/clonegrown_probe_dangling_task_branch.py` proved worktree spawn can
-   overwrite a dangling symbolic task-branch name. The create transaction has
-   no raw symbolic-occupancy preflight and allocation evidence omits the
-   generated branch. Step 7.5k owns this class.
-3. The workspace-state, request-index, and worker-record probes proved one
-   `Path.exists()` occupancy root: dangling control-file symlinks can be
-   replaced, and spawn can consume an ID and advance `next_id` before refusal.
-   Step 7.5l owns every atomic-write preflight in that class.
-4. `/tmp/clonegrown_probe_init_symlink.py` proved the CLI resolves a selected
-   workspace symlink before the Step 7.5h lifecycle check. It creates `.cws`
-   in the external target and exits successfully. Step 7.5m owns CLI/API
-   parity at the lexical boundary.
-5. `/tmp/clonegrown_probe_git_config_env.py` proved `GIT_CONFIG` survives
-   `clean_git_env()` and reaches child Git. Step 7.5n owns the exact denylist
-   addition and end-to-end hostile-environment regression.
-6. `/tmp/clonegrown_probe_recollect_rewrite.py` proved an unchanged repeat
-   collection fails after an accepted history rewrite because it uses the new
-   call's default `allow_rewrite=False` rather than stored
-   `worker.allow_rewrite`. Step 7.5o owns durable-policy reuse.
-
-The reviewer separately confirmed the Step 7.5i collection timing properties:
-direct and symbolic conflicts stayed untouched, result and summary moves were
-blocked while their locks were held, and object-only recovery used the exact
-all-zero expected-old compare-and-swap. A late writer that continued after
-lease release was reproduced but is not a defect under the documented
-cooperative lease boundary. `research/FINAL_COLD_REVIEW.md` contains the full
-review, cause, reproduction, coverage, and evidence record.
-
-## Verification completed on the current tree
-
-- Before the first cold review: 233/233 tests passed in 280.715 seconds;
-  installer tests passed 25/25; package build and isolated wheel/source installs
-  passed with Apache-2.0 metadata; clone and worktree hardening each reported
-  56 exercised passes, one conditional reftable skip, and zero failures; two
-  random-kill seeds per operation/mode and two 50-step state-machine seeds per
-  mode passed.
-- Step 7.5b affected gates: discard 14/14, quarantine 35/35, CLI 6/6, state
-  12/12, plus the post-authorization ref race.
-- Step 7.5c affected gates: audit 23/23, allocation 19/19, state 12/12, and all
-  collection crash boundaries in both modes.
-- Step 7.5d affected gates: quarantine 35/35, audit 23/23, allocation 19/19,
-  plus dangling/live symlink and discard-crash cases in both modes.
-- Step 7.5e affected gates: safety errors 18/18, core 14/14, state 12/12, API
-  6/6, both init crash matrices, and the control/lock-symlink case.
-- Step 7.5g direct regressions passed 7/7. Complete affected modules passed:
-  audit/recovery 27/27, parent interruption 6/6, allocation 19/19, and safety
-  errors 18/18.
-- Step 7.5h's direct regression passed 1/1 and the complete safety/error module
-  passed 19/19.
-- Step 7.5i's three transaction-window regressions passed 3/3; audit/recovery,
-  parent interruption, core, and repository modules passed 30/30, 6/6, 14/14,
-  and 8/8.
-- The coordinating exact-tree full suite passed 254/254 in 278.176 seconds.
-  The second fresh reviewer independently repeated 254/254 in 295.072 seconds
-  on Linux with CPython 3.12.3 and Git 2.43.0.
-- Exact-tree hardening passed in both modes: clone and worktree each reported
-  57 defined, 56 exercised passes, one conditional reftable skip, and zero
-  failures. Result hashes were
-  `1187f15cc753f88d2c9120f055f4fab37913afea885c65fc3cc8a604f149d83a`
-  for clone and
-  `b957a705996843646a098e284400a458b012cbe8c541a322c93fbe1e7cae0fd7`
-  for worktree.
-- All 12 bounded random-kill runs passed: two seeds for spawn, collect, and
-  discard in both modes, every selected process was killed, and every return
-  code was `-9`. Aggregate hashes were clone spawn
-  `57bf2c478476eebd3f6f43bed5a766781c508d2dc506cc811a3030a34ed3385f`,
-  collect
-  `1fbcd860abba32188237321dc7a635b09d3c59ab77216f32bf8bcfdf81c7fa36`,
-  discard
-  `78eb4c325d09cc4ebb71c98288ca4fffd687a5dfad12c3ed4b4ac24f4e4f1b3b`,
-  worktree spawn
-  `126d6e6190d4e003c7ffcf201eee48e44176755ba36c3c365c1881a1651e4356`,
-  collect
-  `19f0ab4e0121c8647296ce63abbc395c34e6165464d63996ae1648d6a4cdef21`,
-  and discard
-  `42e9b15a4c11f897a8e5e703611445a971f01bda2198c9d52cbb6e5339979066`.
-- Both 50-step state-machine seeds passed in both modes. Aggregate hashes were
-  `29325a69c49bcc2fb33f3a25273f3153a0ef2f38bfdbfa932c2d52c57237afae`
-  for clone and
-  `26518aecc560308027389f49d86691a032d1f0c0c96597eef28d3e6530a1a7cc`
-  for worktree.
-- The exact-tree package gate passed during wrapup: source and wheel archives
-  built, installed into isolated CPython 3.12.3 environments, both CLI/module
-  entry points reported `0.1.0a1`, and `Apache-2.0`, `Requires-Python >=3.11`,
-  public imports, and canonical license hash passed. Artifact hashes were
-  wheel
-  `4633ac18fd8ac3ad1965b381bd4d4cc265916c9db89d47a212b8c0d749b7ffb3`
-  and source
-  `2c3aae9f9c648b87235d5d49d0d470f0df16ec9e99284e3af108cc4c5339151f`.
-- Shell syntax, CLI smoke, out-of-checkout Python parsing, the repository
-  Markdown link audit, and `git diff --check` passed. These successes do not
-  clear the six independently reproduced blockers.
+- Clone and worktree hardening each reported 57 defined, 56 exercised passes,
+  one conditional reftable skip (this Git 2.43.0 lacks reftable), and zero
+  failures. Result hashes were `789d37c0bb851bf112d0e546a204c07eb7f3317297ce065c533139debca22f85`
+  for clone and `fbee03118148b28184aac5a21937a87c3187161618967b3b27765ce3a6d762c5` for worktree.
+- All 12 bounded random-kill runs passed: two seeds each for spawn, collect,
+  and discard in both modes; every selected process was killed and every
+  return code was `-9`. Result hashes were clone spawn
+  `2778ec1fbcd35ff47bed54bb281f4dedca422a1bb04e7fabf79a1e0c4dcee67a`, collect
+  `1fb782b9e4466793f806a6b71914bec0c6c34f7f429488ff3442439d45e71291`, discard
+  `8c5422843c0390ee392cc6887e590db8e1456129ef62a3740565f8c49f45cd85`, worktree spawn
+  `67a19415c54e92c6e0e021762a8779acd3063331168f100d3da749625502e3ed`, collect
+  `ab53b647f8c9869f6a831a0beb1861b76f30a220afb394b8613efc505e0440bd`, and discard
+  `9800e854f9b3b5782558b161ec9057e3cd3629c9b35e88fbc21454d4d09bdfd1`.
+- Both 50-step state-machine seeds passed in both modes. Result hashes were
+  `9486ba4b8dd5d3879d6f1a6f494dedbb30855ee667018f23295b04c5e18c99f4` for clone and
+  `ee43c36d29372ba7b32a73781611fb738bdd43b6345d843f38d405cd43ef7462` for worktree.
+- An earlier identical hardening and campaign pass on the tree before the
+  error-label correction also passed everywhere (56/56 per mode, 12/12
+  random-kill, 4/4 state-machine); it is superseded by the runs above.
 
 ## Hosted evidence boundary
 
-GitHub Actions run 33278590221 passed all seven blocking jobs at committed
-revision `354d16bc662f15f65dded911d3c26729bf5804aa`; scheduled randomized run
-33638194991 later passed at that same revision. The executable tree there is
-the Phase 5 tree from `a2ae7793`; the later commit changes completion records
-only. Neither hosted run includes the local Phase 6–7 tree, so neither may be
-used as its release proof.
-
-The wrapup checkpoint is pushed to preserve the current work and no-go record;
-its CI is not release evidence and need not be awaited before closing this
-session. Release completion still requires a later repaired product revision,
-all seven blocking jobs—including Ubuntu, macOS, exact Git 2.29.0, and both
-hardening modes—and a recorded no-open-finding fresh review. Any final
-evidence-only commit must itself be pushed and receive green blocking CI before
-Phase 7 is called complete.
+GitHub Actions has run only on `354d16bc` (Phase 5 executable tree) and the
+`c9728a0` checkpoint. Neither is release evidence for this tree. Release
+completion still requires pushing the repaired revision, all seven blocking
+jobs on that exact SHA (Ubuntu, macOS, exact Git 2.29.0, both hardening
+modes), and a recorded no-open-finding fresh review.
 
 ## Remaining exact sequence
 
-1. Execute Step 7.5j: inventory dangling symbolic clone-private refs as raw
-   names/targets and protect them at authorization and quarantine boundaries.
-2. Execute Step 7.5k: reserve a generated task branch against any raw direct or
-   symbolic occupant before worktree publication.
-3. Execute Step 7.5l: treat dangling workspace-state, request-index, and worker
-   record paths as occupied without consuming IDs or replacing paths.
-4. Execute Step 7.5m: pass the selected workspace lexically through the CLI to
-   the lifecycle check.
-5. Execute Step 7.5n: remove `GIT_CONFIG` from every child Git environment.
-6. Execute Step 7.5o: use the stored accepted rewrite policy for unchanged
-   repeated collection.
-7. For each Step, start from the recorded independent reproducer, add a class
-   regression, run the smallest affected module, and do not stack an unproved
-   change. Then restart all local release gates and exact Git 2.29.0 coverage.
-8. Give a new fresh reviewer the original review bundle, both no-go records,
-   and the coverage map but no implementation narrative. Release requires a
-   no-open-finding verdict.
-9. Push the repaired revision, wait for every blocking job on that exact SHA,
-   record hosted evidence in a documentation-only commit, wait for that exact
-   revision's CI, verify `main == origin/main`, and stop at Phase 7 completion.
+1. Commit and push the reviewed tree; wait for every blocking job on that
+   SHA; record hosted evidence in a documentation-only commit; wait for that
+   revision's CI; verify `main == origin/main`; stop at Phase 7 completion.
 
 ## Preserved local residue
 
 Ignored Python bytecode directories and `tests/campaign/hardening-results.json`
-predate this qualification and are not session-owned. Do not remove them as
-cleanup. Temporary probes and generated qualification artifacts created by the
-current session live under `/tmp`; they are intentionally outside Git and were
-left for the next session because they contain the independent reproductions
-and exact package/campaign evidence needed to resume.
+predate this qualification and are not session-owned. The nine
+`/tmp/clonegrown_probe_*.py` reproducers and the earlier `/tmp/clonegrown-*`
+qualification artifacts are intentionally outside Git. This session's gate
+outputs live under the session scratchpad and are not needed to resume.
 
 The remaining unsupported boundaries are native Windows, Git LFS, genuine
 disk or inode exhaustion, and network or distributed filesystems. No current

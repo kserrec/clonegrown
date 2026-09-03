@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,7 +19,7 @@ from clonegrown.state import (
     VerifiedWorkspace, WorkspaceState, request_path, worker_record_path,
     workspace_lock as state_workspace_lock,
 )
-from support import commit, make_repo, run_cli, run_git
+from support import commit, git_out, make_repo, run_cli, run_git
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,6 +83,18 @@ class AllocationTests(unittest.TestCase):
             "operation lock file": lambda: (self.ws / ".cws" / "locks" / f"{next_id}.lock").write_text("", encoding="utf-8"),
             "base ref": lambda: run_git(self.repo, "update-ref", state.base_ref(next_id), "HEAD"),
             "worker refs": lambda: run_git(self.repo, "update-ref", state.summary_ref(next_id), "HEAD"),
+            "base ref file": lambda: ((self.repo / ".git" / state.base_ref(next_id)).parent.mkdir(parents=True, exist_ok=True),
+                                      (self.repo / ".git" / state.base_ref(next_id)).write_bytes(b"not a ref\n")),
+            "base ref name occupied by a non-regular file": lambda: (
+                (self.repo / ".git" / state.base_ref(next_id)).parent.mkdir(parents=True, exist_ok=True),
+                (self.repo / ".git" / state.base_ref(next_id)).mkdir(),
+                (self.repo / ".git" / state.base_ref(next_id) / "child").write_bytes(b"x\n")),
+            "fifo base ref": lambda: (
+                (self.repo / ".git" / state.base_ref(next_id)).parent.mkdir(parents=True, exist_ok=True),
+                os.mkfifo(self.repo / ".git" / state.base_ref(next_id))),
+            "dangling symbolic worker refs": lambda: run_git(
+                self.repo, "symbolic-ref", f"refs/cws/{state.workspace_id}/workers/{next_id}/branch-owner",
+                "refs/heads/absent-owner-target"),
         }
         for label, plant in targets.items():
             with self.subTest(target=label):
@@ -89,8 +102,12 @@ class AllocationTests(unittest.TestCase):
                 try:
                     with self.assertRaisesRegex(ClonegrownError, "counter is stale") as caught:
                         spawn(self.ws, "HEAD", f"collide {label}", strong=False)
-                    self.assertIn(label, str(caught.exception))
+                    expected = {"fifo base ref": "non-regular file"}.get(label, label.replace("dangling symbolic ", ""))
+                    self.assertIn(expected, str(caught.exception))
                     self.assertEqual(self.state()["next_id"], next_id)
+                    if not label.startswith(("base ref", "fifo base ref")):  # the plant itself; otherwise no pin
+                        self.assertNotEqual(run_git(self.repo, "rev-parse", "--verify", state.base_ref(next_id),
+                                                    check=False).returncode, 0)
                 finally:
                     # Remove the planted evidence so the next target is tested alone.
                     for path in (worker_record_path(self.ws, next_id), self.ws / ".cws" / "locks" / f"{next_id}.lock"):
@@ -100,9 +117,88 @@ class AllocationTests(unittest.TestCase):
                                       self.ws / ".cws" / "quarantine" / f"{next_id}-deadbeef"):
                         if directory.exists():
                             directory.rmdir()
+                    pin_file = self.repo / ".git" / state.base_ref(next_id)
+                    if pin_file.is_dir():
+                        shutil.rmtree(pin_file)
+                    elif os.path.lexists(pin_file) and not pin_file.is_file():
+                        pin_file.unlink()  # a FIFO must go before Git is asked to open the name
                     run_git(self.repo, "update-ref", "-d", state.base_ref(next_id), check=False)
+                    if os.path.lexists(pin_file):
+                        pin_file.unlink()
                     run_git(self.repo, "update-ref", "-d", state.summary_ref(next_id), check=False)
+                    run_git(self.repo, "symbolic-ref", "--delete",
+                            f"refs/cws/{state.workspace_id}/workers/{next_id}/branch-owner", check=False)
         self.assertEqual(spawn(self.ws, "HEAD", "clean", strong=False)["id"], next_id)
+
+    def test_generated_branch_occupancy_is_worktree_allocation_evidence(self) -> None:
+        """A worktree worker's branch lives in canonical: any raw occupant of the generated
+        name (direct, live symbolic, or dangling symbolic) refuses allocation before the ID is
+        consumed. A clone's branch lives in its own refs, so canonical occupancy is not evidence."""
+        state = WorkspaceState.load(self.ws)
+        next_id = int(state.next_id)
+        branch = state.worker_branch(next_id, "occupied")
+        ref = f"refs/heads/{branch}"
+        plants = {
+            "task branch": lambda: run_git(self.repo, "update-ref", ref, "HEAD"),
+            "symbolic task branch": lambda: run_git(self.repo, "symbolic-ref", ref, "refs/heads/absent"),
+            "task branch name occupied by a non-regular file": lambda: (
+                (self.repo / ".git" / ref).mkdir(parents=True), (self.repo / ".git" / ref / "child").write_bytes(b"x\n")),
+            "task branch file": lambda: (self.repo / ".git" / ref).write_bytes(b"not a ref\n"),
+        }
+        for label, plant in plants.items():
+            with self.subTest(target=label):
+                plant()
+                try:
+                    with self.assertRaisesRegex(ClonegrownError, "counter is stale") as caught:
+                        spawn(self.ws, "HEAD", "occupied", strong=False, mode="worktree")
+                    self.assertIn(label, str(caught.exception))
+                    self.assertEqual(self.state()["next_id"], next_id)
+                    self.assertFalse(worker_record_path(self.ws, next_id).exists())
+                finally:
+                    planted = self.repo / ".git" / ref
+                    if planted.is_dir():
+                        shutil.rmtree(planted)
+                    else:
+                        run_git(self.repo, "update-ref", "--no-deref", "-d", ref, check=False)
+                        if os.path.lexists(planted):
+                            planted.unlink()
+        run_git(self.repo, "symbolic-ref", ref, "refs/heads/absent")
+        self.assertEqual(spawn(self.ws, "HEAD", "occupied", strong=False, mode="clone")["id"], next_id)
+        self.assertEqual(git_out(self.repo, "symbolic-ref", ref), "refs/heads/absent")
+
+    def test_symbolic_ref_to_a_fifo_at_the_next_names_is_evidence_without_git(self) -> None:
+        """A loose symbolic ref is read raw: allocation never asks Git to follow a chain that ends
+        at a FIFO, whether the ref sits at the next ID's base-pin name or at the generated branch."""
+        import signal
+        fifo = self.repo / ".git" / "refs" / "zz-fifo"
+        os.mkfifo(fifo)
+        for which in ("base pin", "task branch"):
+            state = WorkspaceState.load(self.ws)
+            next_id = int(state.next_id)
+            name = state.base_ref(next_id) if which == "base pin" else f"refs/heads/{state.worker_branch(next_id, 'next task')}"
+            loose = self.repo / ".git" / name
+            loose.parent.mkdir(parents=True, exist_ok=True)
+            loose.write_bytes(b"ref: refs/zz-fifo\n")
+
+            def alarm(*_: object) -> None:
+                raise AssertionError("a Git command blocked on the planted FIFO")
+            previous = signal.signal(signal.SIGALRM, alarm)
+            signal.alarm(45)
+            try:
+                with self.subTest(name=which):
+                    for mode in ("worktree", "clone"):
+                        with self.assertRaisesRegex(ClonegrownError, "symbolic|task branch|base ref"):
+                            spawn(self.ws, "HEAD", "next task", strong=False, mode=mode)
+                        if which == "base pin" or mode == "worktree":
+                            self.assertEqual(self.state()["next_id"], next_id)  # evidence: nothing consumed
+                        # A clone spawn does not use the canonical branch name, so it is refused later
+                        # by the enumeration guard; that leaves the documented ID gap.
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous)
+            self.assertEqual(loose.read_bytes(), b"ref: refs/zz-fifo\n")
+            loose.unlink()
+        fifo.unlink()
 
     def test_interrupted_allocation_leaves_an_observable_gap_and_the_old_record_intact(self) -> None:
         first = spawn(self.ws, "HEAD", "first", strong=False)
@@ -362,8 +458,7 @@ class AllocationTests(unittest.TestCase):
         original_repair = lifecycle.repair_worktree
         replaced = False
 
-        def replace_before_repair(canonical: Path, path: Path, *,
-                                  git_dir_fd: int | None = None) -> None:
+        def replace_before_repair(canonical: Path, path: Path, *, git_dir_fd=None, **kwargs) -> None:
             nonlocal replaced
             if not replaced:
                 self.repo.rename(original_repo)

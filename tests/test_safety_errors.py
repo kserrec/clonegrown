@@ -290,6 +290,89 @@ class SafetyErrorTests(unittest.TestCase):
         self.assertEqual(list(external.iterdir()), [])
         self.assertFalse(workspace.exists())
 
+    def test_dangling_control_file_links_are_occupants_not_absence(self) -> None:
+        """A dangling symbolic link at a workspace-state, request-index, or worker-record
+        name is an existing object nobody authenticated. Init and spawn refuse it without
+        replacing it, consuming an ID, advancing next_id, or creating a worker."""
+        # Workspace state: init must not write through or replace the link.
+        repo = make_repo(self.root, "dangling-state-repo")
+        workspace = self.root / "dangling-state-dev"
+        control = workspace / ".cws"
+        control.mkdir(parents=True)
+        state_target = self.root / "missing-foreign-state"
+        os.symlink(state_target, control / "state.json")
+        with self.assertRaisesRegex(ClonegrownError, "workspace state file is unsafe"):
+            init_workspace(repo, workspace)
+        self.assertTrue((control / "state.json").is_symlink())
+        self.assertEqual(os.readlink(control / "state.json"), str(state_target))
+        self.assertFalse(os.path.lexists(state_target))
+        self.assertFalse(os.path.lexists(repo / ".git" / "cws"))
+
+        # Request index: the dangling link is inspected as an index, never treated as "new".
+        from clonegrown.state import request_path
+        index = request_path(self.ws, "dangling-index")
+        index_target = self.root / "missing-foreign-index"
+        os.symlink(index_target, index)
+        next_id = int(WorkspaceState.load(self.ws).next_id)
+        with self.assertRaisesRegex(ClonegrownError, "not a regular non-symlink file"):
+            spawn(self.ws, "HEAD", "request reuse", request_id="dangling-index")
+        self.assertTrue(index.is_symlink())
+        self.assertFalse(os.path.lexists(index_target))
+        self.assertEqual(int(WorkspaceState.load(self.ws).next_id), next_id)
+        self.assertEqual(status(self.ws)["workers"], [])
+        index.unlink()
+
+        # Worker record: allocation evidence, so the ID is not consumed.
+        record = worker_record_path(self.ws, next_id)
+        record_target = self.root / "missing-foreign-record"
+        os.symlink(record_target, record)
+        with self.assertRaisesRegex(ClonegrownError, "already has a record"):
+            spawn(self.ws, "HEAD", "dangling record")
+        self.assertTrue(record.is_symlink())
+        self.assertFalse(os.path.lexists(record_target))
+        self.assertEqual(int(WorkspaceState.load(self.ws).next_id), next_id)
+        self.assertFalse(os.path.lexists(self.ws / str(next_id)))
+        self.assertNotEqual(
+            run_git(self.repo, "rev-parse", "--verify", WorkspaceState.load(self.ws).base_ref(next_id),
+                    check=False).returncode, 0)
+        # Any other operation names it as an unauthenticated object, not an unknown worker.
+        with self.assertRaisesRegex(ClonegrownError, "not a regular non-symlink file"):
+            release(self.ws, next_id)
+        self.assertFalse(os.path.lexists(worker_lock_path(self.ws, next_id)))  # nothing was created for it
+        record.unlink()
+        self.assertEqual(spawn(self.ws, "HEAD", "after cleanup")["id"], next_id)
+
+    def test_atomic_json_never_replaces_a_non_regular_occupant(self) -> None:
+        """Every durable-metadata write shares one preflight: only an absent name or a
+        regular file is replaced; a symbolic link (dangling or live), directory, or FIFO
+        under the name is left byte-for-byte as it was."""
+        from clonegrown.core import atomic_json
+        base = self.root / "atomic-json"
+        base.mkdir()
+        live_target = base / "live-target.json"
+        live_target.write_text("{}", encoding="utf-8")
+        occupants = {
+            "dangling link": lambda p: os.symlink(base / "missing", p),
+            "live link": lambda p: os.symlink(live_target, p),
+            "directory": lambda p: p.mkdir(),
+            "fifo": lambda p: os.mkfifo(p),
+        }
+        for label, plant in occupants.items():
+            with self.subTest(occupant=label):
+                path = base / f"{label.replace(' ', '-')}.json"
+                plant(path)
+                before = os.lstat(path)
+                with self.assertRaisesRegex(ClonegrownError, "not a regular non-symlink file"):
+                    atomic_json(path, {"written": True})
+                after = os.lstat(path)
+                self.assertEqual((before.st_mode, before.st_ino), (after.st_mode, after.st_ino))
+                self.assertEqual(sorted(p.name for p in base.iterdir() if p.name.startswith(path.name + ".")), [])
+        self.assertEqual(live_target.read_text(encoding="utf-8"), "{}")
+        regular = base / "regular.json"
+        regular.write_text("old", encoding="utf-8")
+        atomic_json(regular, {"written": True})
+        self.assertEqual(json.loads(regular.read_text(encoding="utf-8")), {"written": True})
+
     def test_init_real_directories_remains_idempotent(self) -> None:
         before = (self.ws / ".cws" / "state.json").read_bytes()
         first = init_workspace(self.repo, self.ws)

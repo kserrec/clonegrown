@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .core import ClonegrownError, git, load_json, process_alive
-from .repository import is_symbolic_ref, ref_points_at, resolve_ref
+from .repository import is_foreign_ref, loose_ref_occupant, raw_ref_inventory, ref_points_at, resolve_ref
 from .state import (
     WorkerRecord, WorkerStatus, WorkspaceState, branch_owner_ref, request_path, worker_lock_path, worker_record_path,
     worker_slot, ws_paths,
@@ -51,15 +51,36 @@ class NamespaceRefs:
         self._worker = re.compile(r"workers/(0|[1-9][0-9]*)/(result|branch-owner|results/[0-9a-f]{%d})$" % hex_len)
         self.values: dict[str, str] = {}
         self.symbolic: list[str] = []
-        listing = git(canonical, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", f"{self.prefix}/").stdout
-        for line in listing.splitlines():
-            parts = line.split(" ", 2)
-            if len(parts) < 2 or not parts[0]:
-                continue
-            if len(parts) == 3 and parts[2]:
-                self.symbolic.append(parts[0])
-                continue
-            self.values[parts[0]] = parts[1]
+        self.malformed: list[str] = []
+        # The raw inventory sees a dangling symbolic ref that for-each-ref omits; a
+        # repository without a raw walk (refs not stored as files) falls back to Git's listing.
+        inventory = raw_ref_inventory(canonical, include_empty_directories=True, prefix=self.prefix)
+        if inventory is not None:
+            for ref, value in sorted(inventory.items()):
+                if ref != self.prefix and not ref.startswith(f"{self.prefix}/"):
+                    continue  # the namespace root itself is inspected too: a symlink there redirects everything
+                if value == "empty-directory":
+                    # Ordinary Git residue at a container name; an occupant only at a ref-shaped name.
+                    if self.owner_id(ref) is not None:
+                        self.malformed.append(ref)
+                    continue
+                if value.startswith("symref:") or value.startswith("link:"):
+                    self.symbolic.append(ref)
+                elif len(value) in (40, 64) and all(c in "0123456789abcdef" for c in value):
+                    self.values[ref] = value
+                else:
+                    self.malformed.append(ref)  # unparseable, unreadable, or special file under our name
+        else:
+            listing = git(canonical, "for-each-ref", "--format=%(refname) %(objectname) %(symref)",
+                          f"{self.prefix}/").stdout
+            for line in listing.splitlines():
+                parts = line.split(" ", 2)
+                if len(parts) < 2 or not parts[0]:
+                    continue
+                if len(parts) == 3 and parts[2]:
+                    self.symbolic.append(parts[0])
+                    continue
+                self.values[parts[0]] = parts[1]
         self.bases: dict[int, str] = {}
         self.by_worker: dict[int, dict[str, str]] = {}
         self.unrecognized: list[str] = []
@@ -76,6 +97,13 @@ class NamespaceRefs:
 
     def ids(self) -> set[int]:
         return set(self.bases) | set(self.by_worker)
+
+    def owner_id(self, ref: str) -> int | None:
+        """The worker a namespace ref name belongs to, by shape alone, or None."""
+        rest = ref[len(self.prefix) + 1:] if ref.startswith(f"{self.prefix}/") else ""
+        base = self._BASE.fullmatch(rest)
+        worker = self._worker.fullmatch(rest)
+        return int(base.group(1)) if base else int(worker.group(1)) if worker else None
 
 
 # --- per-worker audit -------------------------------------------------------------
@@ -130,23 +158,39 @@ def audit_worker(ws: Path, state: WorkspaceState, canonical: Path, worker: Worke
     # under the name (dangling ones never appear in the listing) is foreign, not missing.
     pin = refs.bases.get(worker_id)
     pin_ref = state.base_ref(worker_id)
-    if pin is None and pin_ref not in refs.symbolic and is_symbolic_ref(canonical, pin_ref):
+    pin_occupant = _unlisted_occupant(canonical, refs, pin_ref)
+    if pin is None and pin_occupant == "symbolic":
         issue("namespace-ref-symbolic", ref=pin_ref, error="dangling symbolic ref under this worker's base pin name")
-    elif status in WorkerStatus.SPAWNING and pin is None and pin_ref not in refs.symbolic:
+    elif pin is None and pin_occupant == "foreign":
+        issue("orphan-namespace-ref", ref=pin_ref,
+              error="a non-regular file or directory sits at this worker's base pin name; it is never used or deleted")
+    elif (status in WorkerStatus.SPAWNING and pin is None and pin_ref not in refs.symbolic
+          and pin_ref not in refs.malformed):
         issue("base-ref-missing", ref=pin_ref)
     elif status in _PIN_DROPPED and pin is not None:
         issue("base-ref-stale", ref=pin_ref, value=pin)
 
     # Collected and normally discarded results remain in custody indefinitely:
     # the immutable ref is authoritative and the summary is its repairable pointer.
-    if status in {WorkerStatus.COLLECTED, WorkerStatus.DISCARDED}:
+    normal_deletion_in_progress = (status == WorkerStatus.DISCARDING
+                                   and worker.discard_intent != WorkerStatus.ABANDONED and worker.result_ref)
+    broken_with_result = status == WorkerStatus.BROKEN and bool(worker.result_ref)
+    if (status in {WorkerStatus.COLLECTED, WorkerStatus.DISCARDED} or normal_deletion_in_progress
+            or broken_with_result):
         if not ref_points_at(canonical, worker.result_ref, worker.result_sha):
             issue("result-ref-missing", ref=str(worker.result_ref), value=str(worker.result_sha))
         summary = owned_refs.get("result")
         summary_ref = state.summary_ref(worker_id)
-        if summary is None and summary_ref not in refs.symbolic and is_symbolic_ref(canonical, summary_ref):
+        summary_occupant = _unlisted_occupant(canonical, refs, summary_ref)
+        if (normal_deletion_in_progress or broken_with_result) and summary is None and summary_occupant is None:
+            pass  # a deletion in progress may already have cleaned its summary pointer; broken keeps only the result
+        elif summary is None and summary_occupant == "symbolic":
             issue("namespace-ref-symbolic", ref=summary_ref, error="dangling symbolic ref under this worker's summary name")
-        elif summary != worker.result_sha and summary_ref not in refs.symbolic:
+        elif summary is None and summary_occupant == "foreign":
+            issue("orphan-namespace-ref", ref=summary_ref,
+                  error="a non-regular file or directory sits at this worker's summary name; it is never used or deleted")
+        elif (summary != worker.result_sha and summary_ref not in refs.symbolic
+              and summary_ref not in refs.malformed):
             issue("summary-ref-mismatch", ref=summary_ref, value=summary)
     for name, value in owned_refs.items():
         if name.startswith("results/") and value != worker.result_sha and value != worker.candidate_sha:
@@ -154,13 +198,35 @@ def audit_worker(ws: Path, state: WorkspaceState, canonical: Path, worker: Worke
 
     # Worktree workers: branch, ownership ref, admin directory.
     if worker.is_worktree and status in _LIVE_ON_DISK:
-        if resolve_ref(canonical, f"refs/heads/{worker.branch}") is None:
-            issue("task-branch-missing", ref=f"refs/heads/{worker.branch}")
+        branch_ref = f"refs/heads/{worker.branch}"
+        if is_foreign_ref(canonical, branch_ref):
+            issue("task-branch-foreign", ref=branch_ref,
+                  error="the task branch name holds a symbolic ref or foreign ref file; it is never deleted by cleanup")
+        elif resolve_ref(canonical, branch_ref) is None:
+            issue("task-branch-missing", ref=branch_ref)
         if "branch-owner" not in owned_refs:
             issue("branch-owner-ref-missing", ref=branch_owner_ref(str(state.workspace_id), worker_id))
         if worker.worktree_admin and not os.path.lexists(worker.worktree_admin):
             issue("worktree-admin-missing", path=str(worker.worktree_admin))
     return issues
+
+
+def _unlisted_occupant(canonical: Path, refs: NamespaceRefs, ref: str) -> str | None:
+    """What sits at an owned name the raw listing did not classify: ``symbolic``, ``foreign``, or None.
+
+    The listing already holds symbolic refs and malformed files; this fallback
+    covers a name the raw walk could not list as itself (a non-empty directory,
+    a name under a foreign container, or a repository without a raw walk) and
+    asks ``lstat`` before Git, so a FIFO is named without being opened.
+    """
+    if ref in refs.symbolic or ref in refs.malformed:
+        return None
+    occupant = loose_ref_occupant(canonical, ref)
+    if occupant == "link":
+        return "symbolic"
+    if occupant == "special":
+        return "foreign"
+    return "symbolic" if is_foreign_ref(canonical, ref) else None
 
 
 # --- workspace-level audit ----------------------------------------------------------
@@ -193,8 +259,19 @@ def audit_request_indexes(ws: Path, state: WorkspaceState, records: dict[int, Wo
 def audit_namespace(state: WorkspaceState, refs: NamespaceRefs, known_ids: set[int]) -> list[Issue]:
     issues: list[Issue] = []
     for ref in refs.symbolic:
-        issues.append({"ref": ref, "issue": "namespace-ref-symbolic",
-                       "error": "a symbolic ref under Clonegrown's namespace is never written through or deleted"})
+        issue: Issue = {"ref": ref, "issue": "namespace-ref-symbolic",
+                        "error": "a symbolic ref under Clonegrown's namespace is never written through or deleted"}
+        owner = refs.owner_id(ref)
+        if owner is not None:
+            issue["id"] = owner  # attributed by name shape so the worker's own view shows it
+        issues.append(issue)
+    for ref in refs.malformed:
+        issue: Issue = {"ref": ref, "issue": "orphan-namespace-ref",
+                        "error": "the loose file under this name does not hold a ref; it is never used or deleted"}
+        owner = refs.owner_id(ref)
+        if owner is not None:
+            issue["id"] = owner
+        issues.append(issue)
     for ref in refs.unrecognized:
         issues.append({"ref": ref, "issue": "orphan-namespace-ref", "error": "unrecognized ref shape"})
     for worker_id in sorted(refs.ids() - known_ids):
