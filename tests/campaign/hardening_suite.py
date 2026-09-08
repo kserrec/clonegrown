@@ -858,11 +858,14 @@ def t_detached_canonical_and_no_remote():
 
 def t_path_bound_config_warning():
     b, c, w, _ = mkcase('path-config')
-    git(c, 'config', 'agent.path', str(c)+'/tool')
+    # The filter matches the resolved canonical path literally. Temporary
+    # roots can use a symlink spelling, such as /tmp versus /private/tmp.
+    canonical_tool = str(c.resolve() / 'tool')
+    git(c, 'config', 'agent.path', canonical_tool)
     m = spawn(w, request='r')
     r = Path(m['path'])
     if WORKTREE:
-        assert_true(git(r, 'config', 'agent.path').stdout.strip() == str(c)+'/tool' and has_sharing_warning(m))
+        assert_true(git(r, 'config', 'agent.path').stdout.strip() == canonical_tool and has_sharing_warning(m))
         return result(warnings=m['compatibility_warnings'], shared=True)
     assert_true(git(r, 'config', 'agent.path', check=False).returncode != 0)
     assert_true(any('path-bound' in x for x in m['compatibility_warnings']))

@@ -134,10 +134,10 @@ config key. Read failures abort rather than pretending configuration is empty.
 
 The local canonical-source remote takes the first free `cws-source` name and
 an invalid push URL as an accident guard. A remote lacking effective local
-configuration is refused. Config keys containing canonical's literal path
-in any value are omitted with a warning; this is a substring check, not a
-containment analysis. A copied `core.hooksPath` can still refer outside the
-worker. Absolute paths warn, but tilde and relative traversal can resolve
+configuration is refused. Config keys containing canonical's resolved path
+in any value are omitted with a warning. This substring check does not recognize
+alternate symlink spellings or analyze containment. A copied `core.hooksPath`
+can still refer outside the worker. Absolute paths warn, but tilde and relative traversal can resolve
 outside without that warning. Strong mode does not change hook behavior.
 
 Auxiliary refs are enumerated with their object IDs, fetched together through
