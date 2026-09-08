@@ -33,6 +33,7 @@ def setup(seed: int):
     case_root = ROOT / f'seed-{seed}'
     shutil.rmtree(case_root, ignore_errors=True)
     case_root.mkdir(parents=True)
+    case_root = case_root.resolve()
     origin = case_root / 'origin.git'
     git(case_root, 'init', '--bare', origin)
     canonical = case_root / 'canonical'

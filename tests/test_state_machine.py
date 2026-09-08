@@ -16,7 +16,12 @@ class PrivateRefModelTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        for name, value in [('ROOT', Path(temporary.name)), ('WORKTREE', False)]:
+        root = Path(temporary.name)
+        real_root = root / 'real'
+        real_root.mkdir()
+        alias_root = root / 'alias'
+        alias_root.symlink_to(real_root, target_is_directory=True)
+        for name, value in [('ROOT', alias_root), ('WORKTREE', False)]:
             patcher = patch.object(campaign, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)

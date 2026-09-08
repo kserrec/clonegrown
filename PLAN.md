@@ -39,8 +39,9 @@ Release qualification requires all nine CI jobs to pass on the latest revision.
   (500 total), and interruption seeds 10–11 for spawn/collect/discard in both
   modes (12 runs). All eight campaign jobs also passed from a clean checkout of
   `ed0afb0`, with that revision recorded in every result. No selected seed failed
-  or remained pending. Subsequent changes affect only a config test fixture
-  and documentation; runtime and randomized campaign code remain identical.
+  or remained pending. Subsequent corrections normalize test fixture paths
+  and clarify documentation; runtime code, seeded transitions, and preservation
+  assertions are unchanged. The model tests use a symlinked root on Linux too.
 - Step 7.3: the one fresh cold review found four reproduced defects: unchecked
   moved-base-pin cleanup, symbolic-ref substitution between preflight and
   mutation, direct FIFO namespace enumeration on Git 2.29, and unvalidated
