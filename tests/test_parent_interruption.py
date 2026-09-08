@@ -93,7 +93,10 @@ class ParentInterruptionTests(unittest.TestCase):
         child_pid: int | None = None
         finished = False
         try:
-            child = self.read_json(control / "started.json")
+            # Discard performs many custody reads before branch cleanup. Each
+            # read starts this Python wrapper; allow bounded setup time without
+            # turning the intended parent-death checkpoint into a speed test.
+            child = self.read_json(control / "started.json", timeout=60)
             child_pid = int(child["pid"])
             before = self.process_state(child_pid)
             self.assertIsNotNone(before)
@@ -277,7 +280,7 @@ class ParentInterruptionTests(unittest.TestCase):
         self.assertEqual(self.ref(after["result_ref"]), sha)
         self.assert_clean_audit()
 
-    def test_branch_cleanup_child_finishes_after_parent_death(self) -> None:
+    def test_unprepared_branch_cleanup_preserves_refs_after_parent_death(self) -> None:
         worker, sha = self.collected_worktree("branch cleanup")
         process = self.interrupt(
             "update-ref", "discard", str(worker["id"]), "--workspace", str(self.workspace),
@@ -288,8 +291,11 @@ class ParentInterruptionTests(unittest.TestCase):
         self.assertEqual(before["status"], "discarding")
         self.assertFalse(Path(worker["path"]).exists())
         self.assertFalse(Path(worker["worktree_admin"]).exists())
-        self.assertIsNone(self.ref(f"refs/heads/{worker['branch']}"))
-        self.assertIsNone(self.ref(state.branch_owner_ref(worker["id"])))
+        # The wrapper pauses before Git starts. The parent has sent only the
+        # transaction's start command and cannot authorize its commit before
+        # preparation is acknowledged; EOF leaves both refs intact.
+        self.assertEqual(self.ref(f"refs/heads/{worker['branch']}"), sha)
+        self.assertEqual(self.ref(state.branch_owner_ref(worker["id"])), worker["base_sha"])
         self.assertEqual(self.ref(before["result_ref"]), sha)
 
         self.assertIn("discard-finished", self.recovery_actions(worker["id"]))
@@ -297,6 +303,8 @@ class ParentInterruptionTests(unittest.TestCase):
         self.assertEqual(after["status"], "discarded")
         self.assertNotIn("worktree_admin", after)
         self.assertNotIn("branch_cleanup_sha", after)
+        self.assertIsNone(self.ref(f"refs/heads/{worker['branch']}"))
+        self.assertIsNone(self.ref(state.branch_owner_ref(worker["id"])))
         self.assertEqual(self.ref(after["result_ref"]), sha)
         self.assert_clean_audit()
 

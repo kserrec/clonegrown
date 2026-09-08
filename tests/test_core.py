@@ -15,6 +15,7 @@ from unittest.mock import patch
 from clonegrown import cli
 import clonegrown.core as core
 from clonegrown import ClonegrownError
+from clonegrown.core import CommandFailure
 from clonegrown.lifecycle import init_workspace
 from clonegrown.repository import prepared_ref_transaction
 from support import make_repo, run_git
@@ -85,6 +86,26 @@ os.execv(%r, [%r, *sys.argv[1:]])
             if key.startswith("GIT_") and key != "GIT_TERMINAL_PROMPT":
                 self.assertIsNone(observed[key], key)
         self.assertEqual(observed["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_preexisting_ref_lock_never_counts_as_a_prepared_transaction(self) -> None:
+        """The context body runs only after this child reports ``prepare: ok``.
+
+        In particular, Git 2.29's pseudo-terminal transport must not mistake a
+        stale participating ``.lock`` file for a lock acquired by its child.
+        """
+        branch = run_git(self.repo, "symbolic-ref", "HEAD").stdout.strip()
+        head = run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        lock = self.repo / ".git" / f"{branch}.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_bytes(b"pre-existing lock\n")
+        entered: list[bool] = []
+
+        with self.assertRaises(CommandFailure):
+            with prepared_ref_transaction(self.repo, [f"verify {branch} {head}"]):
+                entered.append(True)
+
+        self.assertEqual(entered, [])
+        self.assertEqual(lock.read_bytes(), b"pre-existing lock\n")
 
     def test_every_git_variable_is_stripped_except_the_identity_allowlist(self) -> None:
         """The class rule: any ``GIT_*`` name, including ones Git has not invented yet, is

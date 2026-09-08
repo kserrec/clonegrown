@@ -248,5 +248,23 @@ class CloneConfigPlanTests(unittest.TestCase):
         self.assertEqual(config_path.read_bytes(), config_before)
 
 
+class RefOccupantLayoutTests(unittest.TestCase):
+
+    def test_files_layout_still_sees_a_non_directory_container(self) -> None:
+        import os
+        import tempfile
+        from clonegrown.repository import loose_ref_occupant
+        with tempfile.TemporaryDirectory() as td:
+            git_dir = Path(td)
+            (git_dir / "refs" / "heads").mkdir(parents=True)
+            (git_dir / "refs" / "cws").write_bytes(b"junk\n")  # a plain file where a container belongs
+            fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                self.assertEqual(loose_ref_occupant(Path("."), "refs/cws/ws/bases/1", git_dir_fd=fd), "special")
+                self.assertIsNone(loose_ref_occupant(Path("."), "refs/heads/agent/ws/1-task", git_dir_fd=fd))
+            finally:
+                os.close(fd)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -129,6 +129,7 @@ class WorkerRecordValidationTests(unittest.TestCase):
             "ready": 1.0, "collected": 2.0, "discarded": 4.0,
             "candidate_sha": self.base_sha,
             "candidate_ref": self.state.result_ref(self.worker_id, self.base_sha),
+            "summary_published": 2.0,
             "result_sha": self.base_sha,
             "result_ref": self.state.result_ref(self.worker_id, self.base_sha),
             "discard_intent": "discarded", "discard_previous": "collected", "discard_started": 3.0,
@@ -138,12 +139,16 @@ class WorkerRecordValidationTests(unittest.TestCase):
         forbidden = {
             **{spawning: list(values) for spawning in WorkerStatus.SPAWNING},
             WorkerStatus.READY: ["collected", "discarded", "candidate_sha", "candidate_ref", "result_sha",
-                                 "result_ref", "quarantine_path", "quarantine_started", "quarantine_error"],
+                                 "result_ref", "summary_published", "quarantine_path", "quarantine_started",
+                                 "quarantine_error"],
             WorkerStatus.COLLECTING: ["collected", "discarded", "result_sha", "result_ref", "quarantine_path"],
-            WorkerStatus.COLLECTED: ["discarded", "candidate_sha", "candidate_ref", "quarantine_path"],
-            WorkerStatus.DISCARDING: ["discarded", "candidate_sha", "candidate_ref"],
-            WorkerStatus.DISCARDED: ["candidate_sha", "candidate_ref", "quarantine_path", "quarantine_error"],
-            WorkerStatus.ABANDONED: ["candidate_sha", "candidate_ref", "quarantine_path", "quarantine_error"],
+            WorkerStatus.COLLECTED: ["discarded", "candidate_sha", "candidate_ref", "summary_published",
+                                     "quarantine_path"],
+            WorkerStatus.DISCARDING: ["discarded", "candidate_sha", "candidate_ref", "summary_published"],
+            WorkerStatus.DISCARDED: ["candidate_sha", "candidate_ref", "summary_published", "quarantine_path",
+                                     "quarantine_error"],
+            WorkerStatus.ABANDONED: ["candidate_sha", "candidate_ref", "summary_published", "quarantine_path",
+                                     "quarantine_error"],
             WorkerStatus.SPAWN_FAILED: list(values),
         }
         for target, names in forbidden.items():
@@ -175,6 +180,7 @@ class WorkerRecordValidationTests(unittest.TestCase):
             ("ready", {"created": "yesterday"}, "created is malformed"),
             ("ready", {"created": None}, "created timestamp is missing"),
             ("ready", {"ready": True}, "ready is malformed"),
+            ("collecting", {"summary_published": "afterward"}, "summary_published is malformed"),
             ("ready", {"request_id": 7}, "request ID is malformed"),
             ("ready", {"owner_start": "fingerprint"}, "owner fingerprint without an owner process"),
             ("ready", {"error": ["not", "text"]}, "error is malformed"),
@@ -197,6 +203,7 @@ class WorkerRecordValidationTests(unittest.TestCase):
             ("collecting", {"candidate_sha": "0" * 40}, "candidate_ref does not name its commit"),
             ("collecting", {"candidate_ref": other_ref}, "candidate_ref does not name its commit"),
             ("broken", {"candidate_sha": self.base_sha}, "must be recorded together"),
+            ("broken", {"summary_published": 2.0}, "checkpoint without a candidate"),
             ("collecting", {"owner_pid": -3}, "owner_pid is malformed"),
             ("collected", {"result_ref": other_ref}, "result_ref does not name its commit"),
             ("collected", {"result_ref": f"refs/heads/{self.ready['branch']}"}, "result_ref does not name its commit"),
@@ -224,6 +231,16 @@ class WorkerRecordValidationTests(unittest.TestCase):
                 data = self.valid_record(target)
                 data.update(corruption)
                 self.assert_refused(data, fragment)
+
+    def test_summary_publication_checkpoint_is_optional_while_collecting_and_cleared_with_candidate(self) -> None:
+        data = self.valid_record(WorkerStatus.COLLECTING)
+        data["summary_published"] = 2.0
+        record = self.validate(data)
+        self.assertEqual(record.summary_published, 2.0)
+        record.clear_candidate()
+        self.assertIsNone(record.candidate_sha)
+        self.assertIsNone(record.candidate_ref)
+        self.assertIsNone(record.summary_published)
 
     def test_a_failed_spawn_can_be_abandoned_without_a_ready_time(self) -> None:
         data = self.valid_record("spawn_failed")

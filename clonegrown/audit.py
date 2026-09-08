@@ -36,11 +36,12 @@ def _short(text: str) -> str:
 # --- the ref namespace -----------------------------------------------------------
 
 class NamespaceRefs:
-    """Every ref under ``refs/cws/<workspace_id>/``, parsed by worker id.
+    """Every enumerable ref under ``refs/cws/<workspace_id>/``, parsed by worker id.
 
     A symbolic ref under one of our names is never ours: it is listed as
     symbolic, excluded from every per-worker view, and reported, so no
-    write can be redirected through it onto the branch it names.
+    write can be redirected through it onto the branch it names. Per-worker
+    checks also inspect the exact names derived from each durable record.
     """
 
     _BASE = re.compile(r"bases/(0|[1-9][0-9]*)$")
@@ -66,7 +67,7 @@ class NamespaceRefs:
                     continue
                 if value.startswith("symref:") or value.startswith("link:"):
                     self.symbolic.append(ref)
-                elif len(value) in (40, 64) and all(c in "0123456789abcdef" for c in value):
+                elif len(value) == hex_len and all(c in "0123456789abcdef" for c in value):
                     self.values[ref] = value
                 else:
                     self.malformed.append(ref)  # unparseable, unreadable, or special file under our name
@@ -193,19 +194,104 @@ def audit_worker(ws: Path, state: WorkspaceState, canonical: Path, worker: Worke
               and summary_ref not in refs.malformed):
             issue("summary-ref-mismatch", ref=summary_ref, value=summary)
     for name, value in owned_refs.items():
-        if name.startswith("results/") and value != worker.result_sha and value != worker.candidate_sha:
-            issue("candidate-ref-retained", ref=f"{state.ref_prefix}/workers/{worker_id}/{name}", value=value)
+        if name.startswith("results/"):
+            full_ref = f"{state.ref_prefix}/workers/{worker_id}/{name}"
+            if name != f"results/{value}":
+                issue(
+                    "orphan-namespace-ref", ref=full_ref, value=value,
+                    error="the content-addressed result ref name does not match its object ID; it is never used or deleted",
+                )
+            elif value != worker.result_sha and value != worker.candidate_sha:
+                issue("candidate-ref-retained", ref=full_ref, value=value)
 
-    # Worktree workers: branch, ownership ref, admin directory.
+    # A collecting record is the durable source of its exact content-addressed
+    # candidate name. Reftable's logical inventory cannot see a physical object
+    # planted at that path, so probe the recorded name directly before recovery
+    # can act on it. Listed symbolic/malformed refs are reported once by the
+    # workspace-level inventory; this catches the otherwise unlisted occupant.
+    if status == WorkerStatus.COLLECTING and worker.candidate_ref is not None:
+        candidate_ref = str(worker.candidate_ref)
+        candidate_name = f"results/{worker.candidate_sha}"
+        if candidate_name not in owned_refs:
+            candidate_occupant = _unlisted_occupant(canonical, refs, candidate_ref)
+            if candidate_occupant == "symbolic":
+                issue(
+                    "namespace-ref-symbolic", ref=candidate_ref,
+                    error="a symbolic ref or filesystem symlink occupies this worker's candidate name",
+                )
+            elif candidate_occupant == "foreign":
+                issue(
+                    "orphan-namespace-ref", ref=candidate_ref,
+                    error=("a non-regular, directory, or backend-foreign file occupies this worker's "
+                           "candidate name; it is never used or deleted"),
+                )
+
+    # Every worker-shaped ownership name is reserved even where a branch owner is not
+    # expected. On a backend whose listing hides dangling symbolic refs, ask about the
+    # derivable name directly for every mode and lifecycle state.
+    # A worker that has not durably recorded this attempt's post-summary checkpoint owns no summary
+    # yet: anything symbolic, foreign, or inconsistent at that name is a planted occupant, whichever
+    # ref backend hides it from listings. The provenance marker plus exact collecting candidate,
+    # immutable result, and summary are the one legitimate pre-collected summary state.
+    if status not in {WorkerStatus.COLLECTED, WorkerStatus.DISCARDED} and not normal_deletion_in_progress \
+            and not broken_with_result:
+        summary_ref = state.summary_ref(worker_id)
+        summary_value = owned_refs.get("result")
+        collecting_summary_checkpoint = (
+            status == WorkerStatus.COLLECTING
+            and worker.candidate_sha is not None
+            and worker.summary_published is not None
+            and summary_value == worker.candidate_sha
+            and owned_refs.get(f"results/{worker.candidate_sha}") == worker.candidate_sha
+        )
+        if summary_value is not None and not collecting_summary_checkpoint:
+            issue(
+                "orphan-namespace-ref", ref=summary_ref, value=summary_value,
+                error=("only a durably proven, exact collecting summary checkpoint may own a summary before "
+                       "collection; this ref is never used or deleted"),
+            )
+        elif summary_value is None:
+            occupant = _unlisted_occupant(canonical, refs, summary_ref)
+            if occupant == "symbolic":
+                issue("namespace-ref-symbolic", ref=summary_ref,
+                      error="dangling symbolic ref under this worker's summary name")
+            elif occupant == "foreign":
+                issue("orphan-namespace-ref", ref=summary_ref,
+                      error="a non-regular file or directory sits at this worker's summary name; it is never used or deleted")
+            elif (status == WorkerStatus.COLLECTING and worker.summary_published is not None
+                  and summary_ref not in refs.symbolic and summary_ref not in refs.malformed):
+                issue(
+                    "summary-ref-mismatch", ref=summary_ref, value=None,
+                    error="the durably published collecting summary is missing",
+                )
     if worker.is_worktree and status in _LIVE_ON_DISK:
-        branch_ref = f"refs/heads/{worker.branch}"
+        branch_ref = worker.task_ref
         if is_foreign_ref(canonical, branch_ref):
             issue("task-branch-foreign", ref=branch_ref,
                   error="the task branch name holds a symbolic ref or foreign ref file; it is never deleted by cleanup")
         elif resolve_ref(canonical, branch_ref) is None:
             issue("task-branch-missing", ref=branch_ref)
-        if "branch-owner" not in owned_refs:
-            issue("branch-owner-ref-missing", ref=branch_owner_ref(str(state.workspace_id), worker_id))
+    owner_ref = branch_owner_ref(str(state.workspace_id), worker_id)
+    owner_value = owned_refs.get("branch-owner")
+    owner_allowed = worker.is_worktree and status not in WorkerStatus.TOMBSTONE
+    owner_valid = owner_allowed and owner_value == worker.base_sha
+    if owner_value is not None and not owner_valid:
+        issue(
+            "orphan-namespace-ref", ref=owner_ref, value=owner_value,
+            error=("a branch ownership ref is valid only for a nonterminal worktree worker "
+                   "and only at that worker's assigned base; it is never used or deleted"),
+        )
+    if owner_value is None:
+        owner_occupant = _unlisted_occupant(canonical, refs, owner_ref)
+        if owner_occupant == "symbolic":
+            issue("namespace-ref-symbolic", ref=owner_ref,
+                  error="dangling symbolic ref under this worker's ownership name")
+        elif owner_occupant == "foreign":
+            issue("orphan-namespace-ref", ref=owner_ref,
+                  error="a non-regular file or directory sits at this worker's ownership name; it is never used or deleted")
+    if worker.is_worktree and status in _LIVE_ON_DISK and not owner_valid:
+        issue("branch-owner-ref-missing", ref=owner_ref)
+    if worker.is_worktree and status in _LIVE_ON_DISK:
         if worker.worktree_admin and not os.path.lexists(worker.worktree_admin):
             issue("worktree-admin-missing", path=str(worker.worktree_admin))
     return issues

@@ -16,6 +16,7 @@ from typing import Any, Callable
 from .core import (
     PROTOCOL_NAME, ClonegrownError, atomic_json, atomic_json_create, failpoint, git, git_bytes, git_common_dir,
     git_dir, git_path, lexical_abs, load_json, object_format, operation_checkpoint, public_exception_text, repo_root,
+    require_files_ref_backend,
 )
 from .repository import (
     absent_marker, delete_ref, git_at_git_dir, is_ancestor, is_foreign_ref, is_symbolic_ref, loose_ref_occupant,
@@ -70,6 +71,7 @@ def verify_worker(state: WorkspaceState, worker: WorkerRecord, require_exists: b
             raise ClonegrownError(f"{label} is not a directory")
     if repo_root(repo) != repo.resolve():
         raise ClonegrownError("worker repository root changed")
+    require_files_ref_backend(repo)
     private, common = git_dir(repo), git_common_dir(repo)
     if not worker.is_worktree:
         if private != common:
@@ -77,7 +79,7 @@ def verify_worker(state: WorkspaceState, worker: WorkerRecord, require_exists: b
     else:
         # The worker's HEAD resolves through this shared name: a symbolic ref, symlink, or FIFO
         # planted there would redirect or block every Git command below. Refuse before running one.
-        if is_foreign_ref(repo, f"refs/heads/{worker.branch}"):
+        if is_foreign_ref(repo, worker.task_ref):
             raise ClonegrownError(
                 "the task branch name holds a symbolic ref or foreign ref file; it is reported by status "
                 "as task-branch-foreign and is never written through, replaced, or deleted")
@@ -133,7 +135,7 @@ def snapshot_worker(state: WorkspaceState, worker: WorkerRecord, require_ancestr
     if operations:
         raise ClonegrownError("worker has an in-progress Git operation: " + ", ".join(operations))
     sym = git(repo, "symbolic-ref", "-q", "HEAD", check=False)
-    branch_ref = f"refs/heads/{worker.branch}"
+    branch_ref = worker.task_ref
     if sym.returncode or sym.stdout.strip() != branch_ref:
         raise ClonegrownError("worker HEAD is detached or not on its assigned task branch")
     head = git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -163,7 +165,7 @@ def describe_divergence(state: WorkspaceState, worker: WorkerRecord) -> str | No
     if head != worker.base_sha:
         reasons.append(f"HEAD moved from the recorded base to {head or 'no commit'}")
     sym = git(repo, "symbolic-ref", "-q", "HEAD", check=False)
-    if sym.returncode or sym.stdout.strip() != f"refs/heads/{worker.branch}":
+    if sym.returncode or sym.stdout.strip() != worker.task_ref:
         reasons.append("HEAD is detached or not on the assigned task branch")
     return "; ".join(reasons) or None
 
@@ -241,31 +243,6 @@ def inspect_clone_private_ref_changes(worker: WorkerRecord, repo: Path | None = 
 
 
 # --- deletion through quarantine ------------------------------------------------
-
-def _status_paths(listing: bytes) -> list[bytes]:
-    """Paths named by a NUL-delimited ``status --porcelain=v2 -z`` listing.
-
-    Ordinary, untracked, and ignored entries end in their path; a rename or
-    copy entry (``2``) is followed by one extra NUL-terminated original path.
-    """
-    paths: list[bytes] = []
-    tokens = listing.split(b"\0")
-    index = 0
-    while index < len(tokens):
-        entry = tokens[index]
-        index += 1
-        if not entry:
-            continue
-        kind = entry[:1]
-        if kind in (b"?", b"!"):
-            paths.append(entry[2:])
-        elif kind == b"1" or kind == b"u":
-            paths.append(entry.split(b" ", 8 if kind == b"1" else 10)[-1])
-        elif kind == b"2":
-            paths.append(entry.split(b" ", 9)[-1])
-            index += 1  # the original path of the rename
-    return paths
-
 
 def custody_fingerprint(repo: Path, *, include_git_refs: bool = False) -> dict[str, Any]:
     """What the worker holds right now, without reading contents.
@@ -699,12 +676,22 @@ def allocation_evidence(ws: Path, state: WorkspaceState, canonical: Path, worker
     elif pin_occupant is not None or (inventory is not None and state.base_ref(worker_id) in inventory):
         found.append("base ref file")  # not a ref Git can read, but a file at the name nobody wrote for us
     worker_prefix = f"{state.ref_prefix}/workers/{worker_id}/"
-    if inventory is None:  # no raw walk (refs not stored as files): Git's own resolvable listing
+    if inventory is None:
+        # No raw walk (refs not stored as files): Git's own listing omits a dangling symbolic
+        # ref, so every worker-shaped name Clonegrown can derive for this ID is also asked
+        # about directly. A dangling symbolic ref at a content-addressed results/<sha> name
+        # cannot be enumerated on such a backend; it is still refused when written to.
         listing = (git(canonical, "for-each-ref", worker_prefix, check=False)
                    if git_dir_fd is None else
                    git_at_git_dir(canonical, git_dir_fd, "for-each-ref", worker_prefix, check=False))
+        derivable = (state.summary_ref(worker_id), branch_owner_ref(str(state.workspace_id), worker_id))
         if listing.stdout.strip():
             found.append("worker refs")
+        elif any(loose_ref_occupant(canonical, name, git_dir_fd=git_dir_fd) is not None
+                 for name in derivable):
+            found.append("worker ref file")
+        elif any(is_symbolic_ref(canonical, name, git_dir_fd=git_dir_fd) for name in derivable):
+            found.append("symbolic worker refs")
     elif any(ref.startswith(worker_prefix) for ref in inventory):
         found.append("worker refs")  # direct, live symbolic, or dangling symbolic: all occupants
     return found
@@ -912,25 +899,42 @@ def allocate_spawn(ws: Path, base: str, task: str, strong: bool, request_id: str
 
 # --- removing a worktree worker's footprint in canonical ---------------------
 
-def _admin_belongs_to(admin: Path, worker: WorkerRecord) -> bool:
+def _read_regular_at(name: str, *, dir_fd: int | None) -> bytes | None:
+    """The bytes of a regular, non-symlink file named relative to ``dir_fd`` (or absolutely), else None."""
+    try:
+        if not stat.S_ISREG(os.lstat(name, dir_fd=dir_fd).st_mode):
+            return None
+        fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
+        with os.fdopen(fd, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _admin_belongs_to(admin: Path, worker: WorkerRecord, *, dir_fd: int | None = None,
+                      relative: str | None = None) -> bool:
     """Does this admin directory identify as ``worker``?
 
     Git recycles admin names (``app``, ``app1``, ...) as soon as one is freed,
     so the path a record holds may later belong to a different worker. The
     marker written at provisioning is authoritative; before it exists, Git's
-    own ``gitdir`` back-pointer must point into this worker.
+    own ``gitdir`` back-pointer must point into this worker. With ``dir_fd``
+    the directory is read through the held canonical descriptor as
+    ``relative`` (``worktrees/<name>``); ``admin`` then serves only to anchor
+    a relative back-pointer lexically.
     """
-    marker = admin / f"{PROTOCOL_NAME}-worker.json"
-    if marker.is_file():
+    base = relative if dir_fd is not None else str(admin)
+    marker = _read_regular_at(f"{base}/{PROTOCOL_NAME}-worker.json", dir_fd=dir_fd)
+    if marker is not None:
         try:
-            data = json.loads(marker.read_text(encoding="utf-8"))
+            data = json.loads(marker.decode("utf-8"))
         except Exception:
             return False
         return data.get("worker_id") == worker.id and data.get("worker_token") == worker.worker_token
-    try:
-        target = _pointer_target(admin, _read_pointer(admin / "gitdir"))
-    except Exception:
+    pointer = _read_regular_at(f"{base}/gitdir", dir_fd=dir_fd)
+    if pointer is None:
         return False
+    target = _pointer_target(admin, os.fsdecode(pointer).strip())
     owned = {lexical_abs(worker.repo / ".git")}
     if worker.stage_root:
         owned.add(lexical_abs(Path(worker.stage_root) / worker.repo.name / ".git"))
@@ -960,12 +964,13 @@ def repair_owned_worktree(canonical: Path, worker: WorkerRecord, repo: Path, *,
     admin = _pointer_target(repo, text[len("gitdir:"):].strip())
     if admin.parent != git_common_dir(canonical) / "worktrees":
         raise ClonegrownError("worktree worker's .git pointer names a path outside the canonical worktrees directory")
-    anchored_admin = (Path("/dev/fd") / str(git_dir_fd) / "worktrees" / admin.name
-                      if git_dir_fd is not None else admin)
-    if not os.path.lexists(anchored_admin):
+    relative = f"worktrees/{admin.name}"
+    try:
+        os.lstat(relative if git_dir_fd is not None else str(admin), dir_fd=git_dir_fd)
+    except FileNotFoundError:
         raise AdminDirectoryMissing(
             f"worktree worker's admin directory {admin} is missing (pruned?); Git cannot inspect this checkout")
-    if not _admin_belongs_to(anchored_admin, worker):
+    if not _admin_belongs_to(admin, worker, dir_fd=git_dir_fd, relative=relative):
         raise ClonegrownError("worktree worker's .git pointer names an admin directory that is not this worker's")
     repair_worktree(canonical, repo, git_dir_fd=git_dir_fd,
                     ref_prefixes=workspace_ref_prefixes(str(worker.workspace_id)))
@@ -1057,22 +1062,22 @@ def remove_worktree_admin(canonical: Path, admin: Path, worker: WorkerRecord, *,
     admin = lexical_abs(admin)
     if admin.parent != git_common_dir(canonical) / "worktrees":
         raise ClonegrownError("refusing to delete a path outside the worktrees directory")
-    target = (Path("/dev/fd") / str(git_dir_fd) / "worktrees" / admin.name
-              if git_dir_fd is not None else admin)
+    relative = f"worktrees/{admin.name}"
+    target = relative if git_dir_fd is not None else str(admin)
     try:
-        mode = os.lstat(target).st_mode
+        mode = os.lstat(target, dir_fd=git_dir_fd).st_mode
     except FileNotFoundError:
         return True
     if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
         raise ClonegrownError("worktree admin path is not a directory")
-    if not _admin_belongs_to(target, worker):
+    if not _admin_belongs_to(admin, worker, dir_fd=git_dir_fd, relative=relative):
         return False
     try:
-        shutil.rmtree(target)
+        shutil.rmtree(target, dir_fd=git_dir_fd)  # addressed through the held descriptor, never a pathname
     except OSError as exc:
         raise ClonegrownError(f"could not remove worktree admin directory: {exc}") from exc
     try:
-        os.lstat(target)
+        os.lstat(target, dir_fd=git_dir_fd)
     except FileNotFoundError:
         return True
     raise ClonegrownError(f"worktree admin directory still present after deletion: {admin}")
@@ -1143,6 +1148,12 @@ def _release_task_branch(canonical: Path, worker: WorkerRecord,
         else:
             worker.branch_cleanup_left = None
         worker.branch_cleanup_sha = None
+        return
+    if owner_sha != worker.base_sha:
+        # The create-only transaction wrote the assigned base into this ref. A later
+        # direct value is not our ownership proof and must not be used or deleted.
+        worker.branch_cleanup_left = (
+            "task branch retained: its ownership ref no longer points at this worker's assigned base")
         return
     if worker.branch_cleanup_sha is None:
         # Never recorded (an interrupted spawn's cleanup): record the tip now, or its absence.

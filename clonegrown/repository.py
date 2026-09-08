@@ -6,8 +6,11 @@ workers or records. The spawn transaction calls them in a fixed order.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import os
+import pty
+import select
 import stat
 import re
 import secrets
@@ -18,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import subprocess
+import time
 
 from . import core as core_module
 from .core import PROTOCOL_NAME, CommandFailure, ClonegrownError, git, git_common_dir, git_dir, git_path, lexical_abs
@@ -437,11 +441,15 @@ def git_at_git_dir(canonical: Path, git_dir_fd: int, *args: str | Path,
                    check: bool = True, input: str | None = None,
                    sensitive: tuple[str | Path, ...] = (),
                    env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Run Git against an already-open canonical Git directory, never its pathname occupant."""
-    descriptor_path = Path("/dev/fd") / str(git_dir_fd)
+    """Run Git against an already-open canonical Git directory, never its pathname occupant.
+
+    The child changes directory to the descriptor and names the Git directory
+    as ``.``; every path argument Clonegrown passes is absolute.
+    """
     return git(
-        canonical.parent, f"--git-dir={descriptor_path}", *args, check=check,
+        canonical.parent, "--git-dir=.", *args, check=check,
         input=input, sensitive=sensitive, pass_fds=(git_dir_fd,), env_extra=env_extra,
+        chdir_fd=git_dir_fd,
     )
 
 
@@ -483,17 +491,70 @@ def is_ancestor(repo: Path, base_sha: str, tip_sha: str, *, git_dir_fd: int | No
 
 
 def _ref_transaction(repo: Path, lines: list[str], *,
-                     git_dir_fd: int | None = None) -> subprocess.CompletedProcess[str]:
-    """Run one atomic ``git update-ref --stdin`` transaction; all updates apply or none do.
+                     git_dir_fd: int | None = None) -> None:
+    """Commit all updates or none, checking raw ref types before and under Git's locks."""
+    refs = [line.split(" ", 2)[1] for line in lines]
+    for ref in refs:
+        _refuse_symbolic(repo, ref, git_dir_fd=git_dir_fd)
+    with prepared_ref_transaction(repo, lines, git_dir_fd=git_dir_fd):
+        for ref in refs:
+            _refuse_symbolic(repo, ref, git_dir_fd=git_dir_fd)
 
-    Every update is ``no-deref``: a symbolic ref planted under a name we own
-    must never redirect the write onto the branch it points at.
+
+class _PtyOutput:
+    """Line reader for Git 2.29's transaction acknowledgements on a pseudo-terminal.
+
+    Git 2.29 does not flush these lines to a pipe, but its stdio stream is line
+    buffered when stdout is a terminal. The master reports ``EIO`` rather than
+    EOF after the slave closes on Linux; both mean the complete output was read.
     """
-    script = "start\n" + "".join(f"option no-deref\n{line}\n" for line in lines) + "prepare\ncommit\n"
-    return _repository_git(
-        repo, "update-ref", "--stdin", check=False, input=script,
-        git_dir_fd=git_dir_fd,
-    )
+
+    def __init__(self, descriptor: int) -> None:
+        self.descriptor = descriptor
+        self.buffer = bytearray()
+
+    def readline(self) -> str:
+        deadline = time.monotonic() + 60
+        while b"\n" not in self.buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ClonegrownError("timed out waiting for git update-ref transaction output")
+            readable, _, _ = select.select([self.descriptor], [], [], remaining)
+            if not readable:
+                raise ClonegrownError("timed out waiting for git update-ref transaction output")
+            try:
+                chunk = os.read(self.descriptor, 4096)
+            except OSError as exc:
+                if exc.errno != errno.EIO:
+                    raise
+                break
+            if not chunk:
+                break
+            self.buffer.extend(chunk)
+        newline = self.buffer.find(b"\n")
+        end = len(self.buffer) if newline < 0 else newline + 1
+        line = bytes(self.buffer[:end])
+        del self.buffer[:end]
+        return line.decode("utf-8", "surrogateescape")
+
+    def read(self) -> str:
+        content = bytearray(self.buffer)
+        self.buffer.clear()
+        while True:
+            try:
+                chunk = os.read(self.descriptor, 4096)
+            except OSError as exc:
+                if exc.errno != errno.EIO:
+                    raise
+                break
+            if not chunk:
+                break
+            content.extend(chunk)
+        return bytes(content).decode("utf-8", "surrogateescape")
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):
+            os.close(self.descriptor)
 
 
 @contextlib.contextmanager
@@ -506,26 +567,45 @@ def prepared_ref_transaction(repo: Path, lines: list[str], *,
     its prepared state lets the caller check raw ref types while Git holds every
     participating ref lock. Exiting normally commits; any exception aborts.
     """
-    git_args = ([f"--git-dir=/dev/fd/{git_dir_fd}"] if git_dir_fd is not None else [])
+    git_args = (["--git-dir=."] if git_dir_fd is not None else [])
     git_args += ["update-ref", "--stdin"]
     argv = [str(core_module.GIT_BIN), *git_args]
     cwd = repo.parent if git_dir_fd is not None else repo
     pass_fds = (git_dir_fd,) if git_dir_fd is not None else ()
+    pty_master: int | None = None
+    pty_slave: int | None = None
+    if not _update_ref_acknowledges_promptly():
+        try:
+            pty_master, pty_slave = pty.openpty()
+        except OSError as exc:
+            raise CommandFailure(
+                returncode=None, operation="git update-ref", command=argv, cwd=cwd,
+                stdout=None, stderr=str(exc), start_error=exc,
+            ) from exc
     try:
         process = subprocess.Popen(
             argv, cwd=cwd, text=True, errors="surrogateescape", bufsize=1,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE, stdout=pty_slave if pty_slave is not None else subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=core_module.clean_git_env(), pass_fds=pass_fds,
+            preexec_fn=core_module.child_chdir(git_dir_fd),
         )
     except OSError as exc:
+        if pty_master is not None:
+            os.close(pty_master)
+        if pty_slave is not None:
+            os.close(pty_slave)
         raise CommandFailure(
             returncode=None, operation="git update-ref", command=argv, cwd=cwd,
             stdout=None, stderr=str(exc), start_error=exc,
         ) from exc
+    if pty_slave is not None:
+        os.close(pty_slave)
 
     assert process.stdin is not None
-    assert process.stdout is not None
     assert process.stderr is not None
+    output = _PtyOutput(pty_master) if pty_master is not None else process.stdout
+    assert output is not None
     transcript: list[str] = []
     prepared = False
 
@@ -533,7 +613,7 @@ def prepared_ref_transaction(repo: Path, lines: list[str], *,
         try:
             process.stdin.write(command)
             process.stdin.flush()
-            response = process.stdout.readline()
+            response = output.readline()
         except OSError as exc:
             raise ClonegrownError(f"git update-ref transaction I/O failed: {exc}") from exc
         transcript.append(response)
@@ -558,7 +638,7 @@ def prepared_ref_transaction(repo: Path, lines: list[str], *,
         with contextlib.suppress(OSError):
             process.stdin.close()
         returncode = process.wait()
-        stdout = "".join(transcript) + process.stdout.read()
+        stdout = "".join(transcript) + output.read()
         stderr = process.stderr.read()
         return returncode, stdout, stderr
 
@@ -589,37 +669,41 @@ def prepared_ref_transaction(repo: Path, lines: list[str], *,
             process.stdin.close()
         if process.poll() is None:
             process.wait()
-        process.stdout.close()
+        output.close()
         process.stderr.close()
 
 
-def _refuse_symbolic(repo: Path, ref: str, check: bool, *,
-                     git_dir_fd: int | None = None) -> bool:
+def _refuse_symbolic(repo: Path, ref: str, *, git_dir_fd: int | None = None) -> None:
     """A symbolic ref under one of our names is never ours: neither written through nor deleted."""
-    if not is_foreign_ref(repo, ref, git_dir_fd=git_dir_fd):
-        return False
-    if check:
+    if is_foreign_ref(repo, ref, git_dir_fd=git_dir_fd):
         raise ClonegrownError(
             f"refusing to touch a symbolic ref or foreign ref file in Clonegrown's namespace: {ref}")
-    return True
 
 
 def write_ref(repo: Path, ref: str, new_sha: str, old_sha: str | None = None,
               check: bool = True, *, git_dir_fd: int | None = None) -> bool:
     """Point ``ref`` itself at ``new_sha``; optional compare-and-swap. A symbolic ref is refused."""
-    if _refuse_symbolic(repo, ref, check, git_dir_fd=git_dir_fd):
+    line = f"update {ref} {new_sha}" + (f" {old_sha}" if old_sha is not None else "")
+    try:
+        _ref_transaction(repo, [line], git_dir_fd=git_dir_fd)
+    except ClonegrownError:
+        if check:
+            raise
         return False
-    args = ["update-ref", "--no-deref", ref, new_sha] + ([old_sha] if old_sha is not None else [])
-    return _repository_git(repo, *args, check=check, git_dir_fd=git_dir_fd).returncode == 0
+    return True
 
 
 def delete_ref(repo: Path, ref: str, old_sha: str | None = None,
                check: bool = True, *, git_dir_fd: int | None = None) -> bool:
     """Delete ``ref`` itself; optional compare-and-swap. A symbolic ref is refused."""
-    if _refuse_symbolic(repo, ref, check, git_dir_fd=git_dir_fd):
+    line = f"delete {ref}" + (f" {old_sha}" if old_sha is not None else "")
+    try:
+        _ref_transaction(repo, [line], git_dir_fd=git_dir_fd)
+    except ClonegrownError:
+        if check:
+            raise
         return False
-    args = ["update-ref", "--no-deref", "-d", ref] + ([old_sha] if old_sha is not None else [])
-    return _repository_git(repo, *args, check=check, git_dir_fd=git_dir_fd).returncode == 0
+    return True
 
 
 def loose_ref_occupant(repo: Path, ref: str, *, git_dir_fd: int | None = None) -> str | None:
@@ -681,7 +765,7 @@ def require_plain_worktree_heads(canonical: Path, *, git_dir_fd: int | None = No
     each registered linked worktree's ``HEAD`` through the shared ``refs/heads``
     name it points at, and the last two enumerate every ref; a symbolic ref
     whose chain ends at a FIFO would block them. The admin entries and every
-    symbolic ref below ``ref_prefixes`` (Clonegrown's own subtrees) are read
+    ref entry below ``ref_prefixes`` (Clonegrown's own subtrees) are read
     with ``lstat`` and plain file reads only, never with Git.
     """
     nofollow = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -741,11 +825,15 @@ def require_plain_worktree_heads(canonical: Path, *, git_dir_fd: int | None = No
                 raise ForeignWorktreeHead(
                     f"linked worktree {name} has HEAD on {target}, which leads to a symlink or non-regular "
                     "file; Git would block resolving it. Remove that occupant by hand, then retry")
-        # Clonegrown's own subtrees: a symbolic ref there whose chain ends at a FIFO would block any
-        # enumeration (fetch, clone, for-each-ref); it is read raw and refused by name instead.
+        # Refuse direct special entries as well as symbolic chains before commands
+        # enumerate refs: older Git opens a loose FIFO even without a symbolic link.
         for prefix in ref_prefixes:
             listing = raw_ref_inventory(canonical, git_dir_fd=git_dir_fd, prefix=prefix, walk_only=True) or {}
             for ref, value in sorted(listing.items()):
+                if value in ("special", "unreadable") or value.startswith("link:"):
+                    raise ForeignWorktreeHead(
+                        f"{ref} is a symlink or non-regular ref entry; Git could block enumerating it. "
+                        "Remove that occupant by hand, then retry")
                 if value.startswith("symref:") and symbolic_chain_ends_foreign(
                         canonical, value[len("symref:"):], git_dir_fd=git_dir_fd):
                     raise ForeignWorktreeHead(
@@ -833,6 +921,25 @@ def is_symbolic_ref(repo: Path, ref: str, *, git_dir_fd: int | None = None) -> b
     ).returncode == 0
 
 
+_ACKNOWLEDGES: bool | None = None
+
+
+def _update_ref_acknowledges_promptly() -> bool:
+    """Git 2.30 flushes each ``update-ref --stdin`` transaction acknowledgement; 2.29 does not."""
+    global _ACKNOWLEDGES
+    if _ACKNOWLEDGES is None:
+        _ACKNOWLEDGES = _git_version() >= (2, 30)
+    return _ACKNOWLEDGES
+
+
+def _git_version() -> tuple[int, int]:
+    version = git(Path("."), "--version", check=False).stdout.strip().split()
+    try:
+        return tuple(int(x) for x in version[-1].split(".")[:2])  # type: ignore[return-value]
+    except (ValueError, IndexError):
+        return (0, 0)
+
+
 _NO_RECURSE: bool | None = None
 
 
@@ -840,12 +947,7 @@ def _symbolic_ref_supports_no_recurse() -> bool:
     """Git 2.40 added ``symbolic-ref --no-recurse``; older Git resolves the whole chain."""
     global _NO_RECURSE
     if _NO_RECURSE is None:
-        version = git(Path("."), "--version", check=False).stdout.strip().split()
-        try:
-            parts = tuple(int(x) for x in version[-1].split(".")[:2])
-        except (ValueError, IndexError):
-            parts = (0, 0)
-        _NO_RECURSE = parts >= (2, 40)
+        _NO_RECURSE = _git_version() >= (2, 40)
     return _NO_RECURSE
 
 
@@ -937,11 +1039,13 @@ def raw_ref_inventory(repo: Path, *, git_dir_fd: int | None = None,
             raise ClonegrownError(f"cannot open the refs directory of {repo}: {exc}") from exc
         if refs_fd is not None:
             _walk_loose_refs(refs_fd, root, walked)
-        # Git's own enumeration follows every symbolic ref it meets; if one below this subtree
-        # leads to a FIFO it would block, so the raw walk alone stands and Git is not asked.
+        # Git's own enumeration follows every symbolic ref it meets and, before 2.43, opens
+        # every loose entry; if anything below this subtree is a FIFO, a symlink, or a
+        # symbolic ref leading to one, Git could block, so the raw walk alone stands.
         enumeration_blocks = any(
-            value.startswith("symref:") and symbolic_chain_ends_foreign(
-                repo, value[len("symref:"):], git_dir_fd=git_dir_fd)
+            value in ("special", "unreadable") or value.startswith("link:")
+            or (value.startswith("symref:") and symbolic_chain_ends_foreign(
+                repo, value[len("symref:"):], git_dir_fd=git_dir_fd))
             for value in walked.values())
     finally:
         if own_fd is not None:
@@ -1076,9 +1180,17 @@ def resolve_ref(repo: Path, ref: str, *, git_dir_fd: int | None = None) -> str |
     return got.stdout.strip() if got.returncode == 0 and got.stdout.strip() else None
 
 
+class _ObserveSummary:
+    pass
+
+
+_OBSERVE_SUMMARY = _ObserveSummary()
+
+
 @contextlib.contextmanager
 def result_ref_transaction(repo: Path, result_ref: str, summary_ref: str,
                            candidate: str, *, update_summary: bool,
+                           expected_summary: str | None | _ObserveSummary = _OBSERVE_SUMMARY,
                            git_dir_fd: int | None = None) -> Iterator[None]:
     """Lock, value-check, and raw-type-check a result/summary pair atomically."""
     for ref in (result_ref, summary_ref):
@@ -1089,8 +1201,16 @@ def result_ref_transaction(repo: Path, result_ref: str, summary_ref: str,
     lines = [f"verify {result_ref} {candidate}"]
     if update_summary:
         current_summary = resolve_ref(repo, summary_ref, git_dir_fd=git_dir_fd)
-        expected_summary = current_summary or absent_marker(candidate)
-        lines.append(f"update {summary_ref} {candidate} {expected_summary}")
+        if expected_summary is _OBSERVE_SUMMARY:
+            old_summary = current_summary
+        else:
+            if current_summary != expected_summary:
+                raise ClonegrownError(
+                    f"conflicting summary ref already exists at {summary_ref}; expected "
+                    f"{expected_summary or 'absence'}, found {current_summary or 'absence'}"
+                )
+            old_summary = expected_summary
+        lines.append(f"update {summary_ref} {candidate} {old_summary or absent_marker(candidate)}")
     else:
         lines.append(f"verify {summary_ref} {candidate}")
     with prepared_ref_transaction(repo, lines, git_dir_fd=git_dir_fd):
@@ -1162,14 +1282,15 @@ def release_task_branch(canonical: Path, branch: str, owner_ref: str, owner_sha:
             return f"task branch retained: checked out at {', '.join(elsewhere)}"
         lines.append(f"delete refs/heads/{branch} {expected_sha}")
     lines.append(f"delete {owner_ref} {owner_sha}")
-    outcome = _ref_transaction(canonical, lines, git_dir_fd=git_dir_fd)
-    if outcome.returncode == 0:
+    try:
+        _ref_transaction(canonical, lines, git_dir_fd=git_dir_fd)
         return None
-    if ours and resolve_ref(
-            canonical, f"refs/heads/{branch}", git_dir_fd=git_dir_fd) != expected_sha:
-        return (f"task branch retained: expected {expected_sha}, found "
-                f"{resolve_ref(canonical, f'refs/heads/{branch}', git_dir_fd=git_dir_fd) or 'no branch'}")
-    return f"task branch retained: ownership ref changed ({outcome.stderr.strip()})"
+    except ClonegrownError as exc:
+        if ours and resolve_ref(
+                canonical, f"refs/heads/{branch}", git_dir_fd=git_dir_fd) != expected_sha:
+            return (f"task branch retained: expected {expected_sha}, found "
+                    f"{resolve_ref(canonical, f'refs/heads/{branch}', git_dir_fd=git_dir_fd) or 'no branch'}")
+        return f"task branch retained: ownership ref changed ({exc})"
 
 
 # --- linked worktrees --------------------------------------------------------

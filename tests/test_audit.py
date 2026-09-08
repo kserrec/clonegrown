@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
+import clonegrown.recovery as recovery_module
 from clonegrown import ClonegrownError, collect, discard, recover, release, spawn, status
 from clonegrown import lifecycle, repository
 from clonegrown.state import WorkerRecord, WorkspaceState, request_path, worker_record_path
@@ -260,12 +261,13 @@ class AuditTests(unittest.TestCase):
         wt = spawn(self.ws, "HEAD", "packed worktree", strong=False, mode="worktree")
         run_git(self.repo, "pack-refs", "--all")
         state = WorkspaceState.load(self.ws)
-        fifo = self.repo / ".git" / "refs" / "zz-fifo"
+        fifo = self.repo / ".git" / state.ref_prefix / "zz-fifo"  # an owned name: a top-level FIFO is Git's own boundary
+        fifo.parent.mkdir(parents=True, exist_ok=True)
         os.mkfifo(fifo)
         planted = state.summary_ref(int(state.next_id))
         loose = self.repo / ".git" / planted
         loose.parent.mkdir(parents=True, exist_ok=True)
-        loose.write_bytes(b"ref: refs/zz-fifo\n")
+        loose.write_bytes(f"ref: {state.ref_prefix}/zz-fifo\n".encode())
 
         def alarm(*_: object) -> None:
             raise AssertionError("a Git command blocked on the planted FIFO")
@@ -350,7 +352,8 @@ class AuditTests(unittest.TestCase):
         other = spawn(self.ws, "HEAD", "other", strong=False)
         commit(Path(other["path"]), "work.txt")
         state = WorkspaceState.load(self.ws)
-        fifo = self.repo / ".git" / "refs" / "zz-fifo"
+        fifo = self.repo / ".git" / state.ref_prefix / "zz-fifo"  # an owned name: a top-level FIFO is Git's own boundary
+        fifo.parent.mkdir(parents=True, exist_ok=True)
         os.mkfifo(fifo)
         for which in ("summary", "next pin", "result"):
             state = WorkspaceState.load(self.ws)  # refused spawns consume IDs: plant at the *current* next pin
@@ -360,7 +363,7 @@ class AuditTests(unittest.TestCase):
                 loose = self.repo / ".git" / name
                 run_git(self.repo, "update-ref", "--no-deref", "-d", name, check=False)
                 loose.parent.mkdir(parents=True, exist_ok=True)
-                loose.write_bytes(b"ref: refs/zz-fifo\n")
+                loose.write_bytes(f"ref: {state.ref_prefix}/zz-fifo\n".encode())
 
                 def alarm(*_: object) -> None:
                     raise AssertionError("a Git command blocked on the planted FIFO")
@@ -382,14 +385,12 @@ class AuditTests(unittest.TestCase):
                 finally:
                     signal.alarm(0)
                     signal.signal(signal.SIGALRM, previous)
-                self.assertEqual(loose.read_bytes(), b"ref: refs/zz-fifo\n")
+                self.assertEqual(loose.read_bytes(), f"ref: {state.ref_prefix}/zz-fifo\n".encode())
                 loose.unlink()
                 if name in (state.summary_ref(worker["id"]), collected["result_ref"]):
                     run_git(self.repo, "update-ref", name, collected["result_sha"])
         fifo.unlink()
 
-    def record_status(self, worker_id: int) -> str:
-        return json.loads(worker_record_path(self.ws, worker_id).read_text(encoding="utf-8"))["status"]
 
     def issues(self) -> list[tuple[str, int | None]]:
         return sorted(((i["issue"], i.get("id")) for i in status(self.ws)["issues"]),
@@ -421,7 +422,214 @@ class AuditTests(unittest.TestCase):
         commit(Path(worker["path"]), "w.txt")
         return collect(self.ws, worker["id"])
 
+    def assert_preexisting_exact_summary_is_not_adopted(
+            self, repo: Path, ws: Path, mode: str) -> None:
+        """An exact result is reusable, but a mutable summary needs durable publication proof."""
+        worker = spawn(ws, "HEAD", f"preexisting exact summary {mode}", strong=False, mode=mode)
+        worker_repo = Path(worker["path"])
+        candidate = commit(worker_repo, f"preexisting-{mode}.txt")
+        state = WorkspaceState.load(ws)
+        result_ref = state.result_ref(worker["id"], candidate)
+        summary_ref = state.summary_ref(worker["id"])
+        run_git(
+            repo, "fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance",
+            str(worker_repo), candidate,
+        )
+        run_git(repo, "update-ref", result_ref, candidate)
+        run_git(repo, "update-ref", summary_ref, candidate)
+        ready_issues = {
+            (item.get("ref"), item["issue"])
+            for item in status(ws)["issues"] if item.get("id") == worker["id"]
+        }
+        self.assertIn((summary_ref, "orphan-namespace-ref"), ready_issues)
+
+        interrupted = subprocess.run(
+            [sys.executable, "-m", "clonegrown", "collect", str(worker["id"]), "--workspace", str(ws)],
+            cwd=repo,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(ROOT),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "CLONEGROWN_TEST_MODE": "1",
+                "CLONEGROWN_TEST_FAILPOINT": "collect.before_fetch",
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(interrupted.returncode, 88, interrupted.stderr)
+        checkpoint = json.loads(worker_record_path(ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(checkpoint["status"], "collecting")
+        self.assertEqual(checkpoint["candidate_sha"], candidate)
+        self.assertNotIn("summary_published", checkpoint)
+        collecting_issues = {
+            (item.get("ref"), item["issue"])
+            for item in status(ws)["issues"] if item.get("id") == worker["id"]
+        }
+        self.assertIn((summary_ref, "orphan-namespace-ref"), collecting_issues)
+
+        actions = {item.get("action") for item in recover(ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-summary-ref-conflict", actions)
+        held = json.loads(worker_record_path(ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(held["status"], "collecting")
+        self.assertEqual(held["candidate_ref"], result_ref)
+        self.assertNotIn("summary_published", held)
+        self.assertEqual(git_out(repo, "rev-parse", result_ref), candidate)
+        self.assertEqual(git_out(repo, "rev-parse", summary_ref), candidate)
+        self.assertIn(
+            (summary_ref, "orphan-namespace-ref"),
+            {(item.get("ref"), item["issue"])
+             for item in status(ws)["issues"] if item.get("id") == worker["id"]},
+        )
+
+        run_git(repo, "update-ref", "-d", summary_ref, candidate)
+        actions = {item.get("action") for item in recover(ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-finished", actions)
+        settled = json.loads(worker_record_path(ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(settled["status"], "collected")
+        self.assertEqual(settled["result_sha"], candidate)
+        self.assertNotIn("summary_published", settled)
+
+    def prepare_recovery_candidate(
+            self, repo: Path, ws: Path, mode: str, task: str) -> tuple[dict, str, WorkspaceState, str, str]:
+        """Leave a dead collecting checkpoint whose exact candidate is available in canonical."""
+        worker = spawn(ws, "HEAD", task, strong=False, mode=mode)
+        worker_repo = Path(worker["path"])
+        candidate = commit(worker_repo, f"{task.replace(' ', '-')}.txt")
+        interrupted = subprocess.run(
+            [sys.executable, "-m", "clonegrown", "collect", str(worker["id"]), "--workspace", str(ws)],
+            cwd=repo,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(ROOT),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "CLONEGROWN_TEST_MODE": "1",
+                "CLONEGROWN_TEST_FAILPOINT": "collect.before_fetch",
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(interrupted.returncode, 88, interrupted.stderr)
+        state = WorkspaceState.load(ws)
+        result_ref = state.result_ref(worker["id"], candidate)
+        summary_ref = state.summary_ref(worker["id"])
+        run_git(
+            repo, "fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance",
+            str(worker_repo), candidate,
+        )
+        run_git(repo, "update-ref", result_ref, candidate)
+        return worker, candidate, state, result_ref, summary_ref
+
+    def assert_recovery_preflight_races_retain_candidate(
+            self, repo: Path, ws: Path, mode: str) -> None:
+        """A conflict created between recovery's observations cannot erase its derivation."""
+        worker, candidate, _, result_ref, summary_ref = self.prepare_recovery_candidate(
+            repo, ws, mode, f"summary preflight race {mode}",
+        )
+        original = recovery_module.result_ref_transaction
+
+        @contextmanager
+        def plant_exact_summary(*args, **kwargs):
+            self.assertNotEqual(
+                run_git(repo, "rev-parse", "--verify", "-q", summary_ref, check=False).returncode, 0,
+            )
+            run_git(repo, "update-ref", summary_ref, candidate)
+            with original(*args, **kwargs):
+                yield
+
+        with mock.patch.object(recovery_module, "result_ref_transaction", plant_exact_summary):
+            actions = {item.get("action") for item in recover(ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-summary-ref-conflict", actions)
+        held = json.loads(worker_record_path(ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(held["status"], "collecting")
+        self.assertEqual(held["candidate_ref"], result_ref)
+        self.assertIn(
+            (summary_ref, "orphan-namespace-ref"),
+            {(item.get("ref"), item["issue"])
+             for item in status(ws)["issues"] if item.get("id") == worker["id"]},
+        )
+        run_git(repo, "update-ref", "-d", summary_ref, candidate)
+        actions = {item.get("action") for item in recover(ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-finished", actions)
+
+        worker, candidate, _, result_ref, _ = self.prepare_recovery_candidate(
+            repo, ws, mode, f"candidate preflight race {mode}",
+        )
+        physical = repo / ".git" / result_ref
+
+        @contextmanager
+        def plant_candidate_symlink(*args, **kwargs):
+            run_git(repo, "update-ref", "--no-deref", "-d", result_ref, candidate)
+            physical.parent.mkdir(parents=True, exist_ok=True)
+            physical.symlink_to("foreign-target")
+            with original(*args, **kwargs):
+                yield
+
+        with mock.patch.object(recovery_module, "result_ref_transaction", plant_candidate_symlink):
+            actions = {item.get("action") for item in recover(ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-candidate-ref-conflict", actions)
+        held = json.loads(worker_record_path(ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(held["status"], "collecting")
+        self.assertEqual(held["candidate_ref"], result_ref)
+        self.assertTrue(physical.is_symlink())
+        self.assertIn(
+            (result_ref, "namespace-ref-symbolic"),
+            {(item.get("ref"), item["issue"])
+             for item in status(ws)["issues"] if item.get("id") == worker["id"]},
+        )
+        physical.unlink()
+        actions = {item.get("action") for item in recover(ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-finished", actions)
+
+    def assert_missing_published_summary_is_reported(
+            self, repo: Path, ws: Path, mode: str) -> None:
+        """A durable publication marker makes a truly absent summary an audit issue."""
+        worker = spawn(ws, "HEAD", f"missing published summary {mode}", strong=False, mode=mode)
+        candidate = commit(Path(worker["path"]), f"missing-published-{mode}.txt")
+        state = WorkspaceState.load(ws)
+        summary_ref = state.summary_ref(worker["id"])
+        interrupted = subprocess.run(
+            [sys.executable, "-m", "clonegrown", "collect", str(worker["id"]), "--workspace", str(ws)],
+            cwd=repo,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(ROOT),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "CLONEGROWN_TEST_MODE": "1",
+                "CLONEGROWN_TEST_FAILPOINT": "collect.after_summary",
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(interrupted.returncode, 88, interrupted.stderr)
+        checkpoint = json.loads(worker_record_path(ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(checkpoint["status"], "collecting")
+        self.assertIsInstance(checkpoint.get("summary_published"), (int, float))
+        run_git(repo, "update-ref", "-d", summary_ref, candidate)
+        self.assertIn(
+            (summary_ref, "summary-ref-mismatch"),
+            {(item.get("ref"), item["issue"])
+             for item in status(ws)["issues"] if item.get("id") == worker["id"]},
+        )
+        actions = {item.get("action") for item in recover(ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-finished", actions)
+        settled = json.loads(worker_record_path(ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(settled["status"], "collected")
+        self.assertEqual(git_out(repo, "rev-parse", summary_ref), candidate)
+
     # --- a clean workspace has no issues, in both modes ----------------------------
+
+    def test_recovery_preflight_races_retain_candidate(self) -> None:
+        for mode in ("clone", "worktree"):
+            with self.subTest(mode=mode):
+                self.assert_recovery_preflight_races_retain_candidate(self.repo, self.ws, mode)
+
+    def test_missing_published_summary_is_reported_while_collecting(self) -> None:
+        for mode in ("clone", "worktree"):
+            with self.subTest(mode=mode):
+                self.assert_missing_published_summary_is_reported(self.repo, self.ws, mode)
 
     def test_clean_lifecycle_reports_nothing(self) -> None:
         for mode in ("clone", "worktree"):
@@ -451,7 +659,9 @@ class AuditTests(unittest.TestCase):
         marker.write_text("{}", encoding="utf-8")
         run_git(self.repo, "update-ref", "-d", result["result_ref"])
         run_git(self.repo, "update-ref", self.state.summary_ref(worker["id"]), "HEAD")
-        run_git(self.repo, "update-ref", self.state.result_ref(worker["id"], "a" * 40), "HEAD")  # a retained candidate
+        retained = git_out(self.repo, "rev-parse", "HEAD")
+        retained_ref = self.state.result_ref(worker["id"], retained)
+        run_git(self.repo, "update-ref", retained_ref, retained)  # a correctly content-addressed retained candidate
         run_git(self.repo, "update-ref", self.state.base_ref(worker["id"]), worker["base_sha"])  # a stale pin
         codes = {i["issue"] for i in self.assert_status_is_pure() if i.get("id") == worker["id"]}
         self.assertEqual(codes, {"worker-authentication-failed", "result-ref-missing", "summary-ref-mismatch",
@@ -464,7 +674,7 @@ class AuditTests(unittest.TestCase):
         first = {r.get("action") for r in recover(self.ws) if r.get("id") == worker["id"]}
         self.assertIn("collected-result-restored", first)
         self.assertEqual(run_git(self.repo, "rev-parse", result["result_ref"]).stdout.strip(), result["result_sha"])
-        self.assertEqual(run_git(self.repo, "rev-parse", "--verify", self.state.result_ref(worker["id"], "a" * 40)).returncode, 0)
+        self.assertEqual(run_git(self.repo, "rev-parse", "--verify", retained_ref).returncode, 0)
         self.assertEqual(self.record_status(worker["id"]), "collected")
 
     def test_collect_refuses_a_conflicting_content_addressed_result_ref(self) -> None:
@@ -480,6 +690,90 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(git_out(self.repo, "rev-parse", result_ref), planted)
         record = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
         self.assertEqual(record["status"], "ready")
+
+    def test_content_addressed_result_name_must_match_its_direct_value(self) -> None:
+        worker = self.collected("wrong result alias")
+        accepted = next(item for item in status(self.ws)["workers"] if item["id"] == worker["id"])
+        wrong_sha = "f" * len(accepted["result_sha"])
+        self.assertNotEqual(wrong_sha, accepted["result_sha"])
+        wrong_ref = self.state.result_ref(worker["id"], wrong_sha)
+        run_git(self.repo, "update-ref", wrong_ref, accepted["result_sha"])
+
+        matching = [
+            item for item in self.assert_status_is_pure()
+            if item.get("id") == worker["id"] and item.get("ref") == wrong_ref
+        ]
+        self.assertEqual([item["issue"] for item in matching], ["orphan-namespace-ref"])
+        self.assertEqual(git_out(self.repo, "rev-parse", wrong_ref), accepted["result_sha"])
+        recover(self.ws)
+        self.assertEqual(git_out(self.repo, "rev-parse", wrong_ref), accepted["result_sha"])
+
+    def test_uncollected_worker_cannot_own_a_direct_summary_ref(self) -> None:
+        worker = self.ready("unexpected direct summary")
+        candidate = commit(Path(worker["path"]), "unexpected-summary-work.txt")
+        summary = self.state.summary_ref(worker["id"])
+        run_git(self.repo, "fetch", "--no-tags", str(worker["path"]), candidate)
+        run_git(self.repo, "update-ref", summary, candidate)
+
+        matching = [
+            item for item in self.assert_status_is_pure()
+            if item.get("id") == worker["id"] and item.get("ref") == summary
+        ]
+        self.assertEqual([item["issue"] for item in matching], ["orphan-namespace-ref"])
+        with self.assertRaisesRegex(ClonegrownError, "conflicting summary ref|update-ref transaction"):
+            collect(self.ws, worker["id"])
+        self.assertEqual(self.record_status(worker["id"]), "ready")
+        self.assertEqual(git_out(self.repo, "rev-parse", summary), candidate)
+        recover(self.ws)
+        self.assertEqual(git_out(self.repo, "rev-parse", summary), candidate)
+
+    def test_interrupted_collect_never_adopts_a_preexisting_exact_summary(self) -> None:
+        for mode in ("clone", "worktree"):
+            with self.subTest(mode=mode):
+                self.assert_preexisting_exact_summary_is_not_adopted(self.repo, self.ws, mode)
+
+    def test_raw_namespace_values_use_the_workspace_object_format_width(self) -> None:
+        """Wrong-width base, summary, and owner values are malformed, never owned refs.
+
+        The live worktree also reports that its valid ownership proof is missing.
+        """
+        from clonegrown import init_workspace
+        for object_format, correct_width, wrong_width in (("sha1", 40, 64), ("sha256", 64, 40)):
+            with self.subTest(object_format=object_format):
+                repo = self.root / f"format-{object_format}"
+                repo.mkdir()
+                created = run_git(
+                    repo, "init", "-q", f"--object-format={object_format}", "-b", "trunk", check=False,
+                )
+                if created.returncode != 0:
+                    self.skipTest(f"this Git cannot create {object_format} repositories")
+                commit(repo, "README.md", object_format + "\n")
+                ws = self.root / f"format-{object_format}-ws"
+                init_workspace(repo, ws)
+                state = WorkspaceState.load(ws)
+                worker = spawn(ws, "HEAD", f"wrong {object_format} width", strong=False, mode="worktree")
+                self.assertEqual(len(worker["base_sha"]), correct_width)
+                refs = (
+                    state.base_ref(worker["id"]),
+                    state.summary_ref(worker["id"]),
+                    state.branch_owner_ref(worker["id"]),
+                )
+                run_git(repo, "update-ref", "--no-deref", "-d", refs[2])
+                for ref in refs:
+                    path = repo / ".git" / ref
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(("a" * wrong_width + "\n").encode("ascii"))
+
+                reports = status(ws)["issues"]
+                orphans = {item.get("ref") for item in reports if item["issue"] == "orphan-namespace-ref"}
+                self.assertTrue(set(refs) <= orphans)
+                self.assertIn(
+                    (refs[2], "branch-owner-ref-missing"),
+                    {(item.get("ref"), item["issue"]) for item in reports},
+                )
+                recover(ws)
+                for ref in refs:
+                    self.assertEqual((repo / ".git" / ref).read_bytes(), ("a" * wrong_width + "\n").encode("ascii"))
 
     def test_collect_reuses_an_exact_result_ref_but_loses_a_create_race_safely(self) -> None:
         existing = self.ready("existing exact result")
@@ -539,7 +833,15 @@ class AuditTests(unittest.TestCase):
         self.assertTrue(planted)
         self.assertEqual(git_out(self.repo, "symbolic-ref", result_ref), target_ref)
         record = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
-        self.assertEqual(record["status"], "ready")
+        self.assertEqual(record["status"], "collecting")
+        self.assertEqual(record["candidate_ref"], result_ref)
+        self.assertIn(
+            (result_ref, "namespace-ref-symbolic"),
+            {(item.get("ref"), item["issue"]) for item in status(self.ws)["issues"]},
+        )
+        run_git(self.repo, "symbolic-ref", "--delete", result_ref)
+        actions = {item.get("action") for item in recover(self.ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-finished", actions)
 
     def test_collect_refuses_a_symbolic_result_ref_planted_before_exact_reuse(self) -> None:
         worker = self.ready("symbolic exact reuse race")
@@ -564,7 +866,15 @@ class AuditTests(unittest.TestCase):
         self.assertTrue(planted)
         self.assertEqual(git_out(self.repo, "symbolic-ref", result_ref), target_ref)
         record = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
-        self.assertEqual(record["status"], "ready")
+        self.assertEqual(record["status"], "collecting")
+        self.assertEqual(record["candidate_ref"], result_ref)
+        self.assertIn(
+            (result_ref, "namespace-ref-symbolic"),
+            {(item.get("ref"), item["issue"]) for item in status(self.ws)["issues"]},
+        )
+        run_git(self.repo, "symbolic-ref", "--delete", result_ref)
+        actions = {item.get("action") for item in recover(self.ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-finished", actions)
 
     def test_collect_recovery_never_overwrites_a_result_ref_conflict(self) -> None:
         worker = self.ready("recovery result conflict")
@@ -591,6 +901,117 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(git_out(self.repo, "rev-parse", record["candidate_ref"]), planted)
         after = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
         self.assertEqual(after["status"], "ready")
+
+    def test_collect_recovery_never_advances_when_ref_transaction_cannot_prepare(self) -> None:
+        """Pre-existing participating Git locks refuse recovery before its durable record write.
+
+        This is specifically a regression for Git 2.29's pseudo-terminal acknowledgement
+        path: stale lock files must never be mistaken for this child's prepared transaction.
+        """
+        worker = self.ready("stale transaction locks")
+        candidate = commit(Path(worker["path"]), "stale-locks.txt")
+        interrupted = self.cli_process(
+            "collect", str(worker["id"]),
+            env={"CLONEGROWN_TEST_FAILPOINT": "collect.after_fetch"},
+        )
+        self.assertEqual(interrupted.returncode, 88, interrupted.stderr)
+        before = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(before["status"], "collecting")
+        self.assertEqual(before["candidate_sha"], candidate)
+        summary = self.state.summary_ref(worker["id"])
+        locks = []
+        for ref in (before["candidate_ref"], summary):
+            lock = self.repo / ".git" / f"{ref}.lock"
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            lock.write_bytes(b"pre-existing lock\n")
+            locks.append(lock)
+
+        actions = {item.get("action") for item in recover(self.ws) if item.get("id") == worker["id"]}
+
+        self.assertIn("collect-reset-ready", actions)
+        after = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(after["status"], "ready")
+        self.assertIsNone(after.get("result_ref"))
+        self.assertIsNone(after.get("result_sha"))
+        self.assertIsNone(after.get("candidate_ref"))
+        self.assertNotEqual(run_git(self.repo, "rev-parse", "--verify", summary, check=False).returncode, 0)
+        self.assertTrue(all(lock.read_bytes() == b"pre-existing lock\n" for lock in locks))
+        worker_issues = [item for item in status(self.ws)["issues"] if item.get("id") == worker["id"]]
+        self.assertIn("candidate-ref-retained", {item["issue"] for item in worker_issues})
+        self.assertNotIn("summary-ref-mismatch", {item["issue"] for item in worker_issues})
+
+    def test_collect_recovery_never_rolls_back_a_published_checkpoint_when_prepare_fails(self) -> None:
+        """A durable summary publication remains collecting across an unrelated prepare failure."""
+        worker = self.ready("published checkpoint transaction locks")
+        candidate = commit(Path(worker["path"]), "published-stale-locks.txt")
+        interrupted = self.cli_process(
+            "collect", str(worker["id"]),
+            env={"CLONEGROWN_TEST_FAILPOINT": "collect.after_summary"},
+        )
+        self.assertEqual(interrupted.returncode, 88, interrupted.stderr)
+        before = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(before["status"], "collecting")
+        self.assertIsInstance(before.get("summary_published"), (int, float))
+        locks = []
+        for ref in (before["candidate_ref"], self.state.summary_ref(worker["id"])):
+            lock = self.repo / ".git" / f"{ref}.lock"
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            lock.write_bytes(b"pre-existing lock\n")
+            locks.append(lock)
+
+        actions = {item.get("action") for item in recover(self.ws) if item.get("id") == worker["id"]}
+
+        self.assertIn("recovery-failed", actions)
+        held = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(held["status"], "collecting")
+        self.assertEqual(held["candidate_ref"], before["candidate_ref"])
+        self.assertEqual(held["candidate_sha"], candidate)
+        self.assertEqual(held["summary_published"], before["summary_published"])
+        self.assertTrue(all(lock.read_bytes() == b"pre-existing lock\n" for lock in locks))
+
+        for lock in locks:
+            lock.unlink()
+        actions = {item.get("action") for item in recover(self.ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-finished", actions)
+        self.assertEqual(self.record_status(worker["id"]), "collected")
+
+    def test_collect_failure_after_summary_retains_a_recoverable_checkpoint(self) -> None:
+        """A failure after the direct summary commits cannot roll back past that checkpoint."""
+        worker = self.ready("post-summary transaction failure")
+        candidate = commit(Path(worker["path"]), "post-summary.txt")
+        result_ref = self.state.result_ref(worker["id"], candidate)
+        lock = self.repo / ".git" / f"{result_ref}.lock"
+        planted = False
+
+        def plant_stale_lock(point: str) -> None:
+            nonlocal planted
+            if point == "collect.after_summary" and not planted:
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                lock.write_bytes(b"foreign stale lock\n")
+                planted = True
+
+        with mock.patch.object(lifecycle, "failpoint", plant_stale_lock):
+            with self.assertRaisesRegex(ClonegrownError, "update-ref transaction"):
+                collect(self.ws, worker["id"])
+
+        self.assertTrue(planted)
+        checkpoint = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(checkpoint["status"], "collecting")
+        self.assertEqual(checkpoint["candidate_sha"], candidate)
+        self.assertEqual(checkpoint["candidate_ref"], result_ref)
+        self.assertIsInstance(checkpoint.get("summary_published"), (int, float))
+        self.assertEqual(git_out(self.repo, "rev-parse", self.state.summary_ref(worker["id"])), candidate)
+        self.assertEqual(lock.read_bytes(), b"foreign stale lock\n")
+        checkpoint_issues = [item for item in status(self.ws)["issues"] if item.get("id") == worker["id"]]
+        self.assertNotIn("orphan-namespace-ref", {item["issue"] for item in checkpoint_issues})
+
+        lock.unlink()
+        actions = {item.get("action") for item in recover(self.ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-finished", actions)
+        settled = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(settled["status"], "collected")
+        self.assertEqual(settled["result_sha"], candidate)
+        self.assertEqual(self.issues(), [])
 
     def test_collect_refuses_a_result_ref_moved_before_finalization(self) -> None:
         worker = self.ready("late result race")
@@ -649,7 +1070,14 @@ class AuditTests(unittest.TestCase):
             ).returncode,
             0,
         )
-        self.assertEqual(self.record_status(worker["id"]), "ready")
+        self.assertEqual(self.record_status(worker["id"]), "collecting")
+        self.assertIn(
+            (result_ref, "namespace-ref-symbolic"),
+            {(item.get("ref"), item["issue"]) for item in status(self.ws)["issues"]},
+        )
+        run_git(self.repo, "symbolic-ref", "--delete", result_ref)
+        actions = {item.get("action") for item in recover(self.ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-finished", actions)
 
     def test_collect_refuses_a_direct_result_move_after_locked_summary_commit(self) -> None:
         worker = self.ready("locked direct finalization")
@@ -677,7 +1105,13 @@ class AuditTests(unittest.TestCase):
                 collect(self.ws, worker["id"])
         self.assertTrue(moved)
         self.assertEqual(git_out(self.repo, "rev-parse", result_ref), planted)
-        self.assertEqual(self.record_status(worker["id"]), "ready")
+        self.assertEqual(self.record_status(worker["id"]), "collecting")
+        conflicts = {(item.get("ref"), item["issue"]) for item in status(self.ws)["issues"]}
+        self.assertIn((result_ref, "orphan-namespace-ref"), conflicts)
+        self.assertIn((self.state.summary_ref(worker["id"]), "orphan-namespace-ref"), conflicts)
+        run_git(self.repo, "update-ref", "-d", result_ref, planted)
+        actions = {item.get("action") for item in recover(self.ws) if item.get("id") == worker["id"]}
+        self.assertIn("collect-finished", actions)
 
     def test_result_ref_locks_cover_the_collected_metadata_write(self) -> None:
         worker = self.ready("locked metadata finalization")
@@ -798,6 +1232,42 @@ class AuditTests(unittest.TestCase):
         self.assertIn("ready-marked-broken", actions)
         self.assertTrue(Path(other["path"]).is_dir())
 
+    def test_direct_branch_owner_requires_a_nonterminal_worktree_and_its_base(self) -> None:
+        clone = self.ready("clone cannot own branch", "clone")
+        clone_owner = self.state.branch_owner_ref(clone["id"])
+        run_git(self.repo, "update-ref", clone_owner, clone["base_sha"])
+        self.assertIn((clone_owner, "orphan-namespace-ref"),
+                      {(item.get("ref"), item["issue"]) for item in status(self.ws)["issues"]})
+        release(self.ws, clone["id"])
+        discard(self.ws, clone["id"], abandon=True)
+        self.assertEqual(git_out(self.repo, "rev-parse", clone_owner), clone["base_sha"])
+        self.assertIn((clone_owner, "orphan-namespace-ref"),
+                      {(item.get("ref"), item["issue"]) for item in status(self.ws)["issues"]})
+
+        worktree = self.ready("changed owner is foreign", "worktree")
+        worktree_owner = self.state.branch_owner_ref(worktree["id"])
+        other = commit(self.repo, "other-owner.txt")
+        run_git(self.repo, "update-ref", worktree_owner, other)
+        issue_pairs = {(item.get("ref"), item["issue"]) for item in status(self.ws)["issues"]}
+        self.assertIn((worktree_owner, "orphan-namespace-ref"), issue_pairs)
+        self.assertIn((worktree_owner, "branch-owner-ref-missing"), issue_pairs)
+        branch_ref = f"refs/heads/{worktree['branch']}"
+        branch_before = git_out(self.repo, "rev-parse", branch_ref)
+        release(self.ws, worktree["id"])
+        with self.assertRaisesRegex(ClonegrownError, "canonical cleanup is incomplete"):
+            discard(self.ws, worktree["id"], abandon=True)
+        self.assertEqual(git_out(self.repo, "rev-parse", worktree_owner), other)
+        self.assertEqual(git_out(self.repo, "rev-parse", branch_ref), branch_before)
+        self.assertEqual(self.record_status(worktree["id"]), "discarding")
+
+        terminal = self.ready("terminal owner", "worktree")
+        terminal_owner = self.state.branch_owner_ref(terminal["id"])
+        release(self.ws, terminal["id"])
+        discard(self.ws, terminal["id"], abandon=True)
+        run_git(self.repo, "update-ref", terminal_owner, terminal["base_sha"])
+        self.assertIn((terminal_owner, "orphan-namespace-ref"),
+                      {(item.get("ref"), item["issue"]) for item in status(self.ws)["issues"]})
+
     def test_stage_residue_and_missing_base_pin(self) -> None:
         worker = self.ready("stage")
         record = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
@@ -835,6 +1305,11 @@ class AuditTests(unittest.TestCase):
         sha = commit(Path(worker["path"]), "f.txt")
         p = self.cli_process("collect", str(worker["id"]), env={"CLONEGROWN_TEST_FAILPOINT": "collect.after_summary"})
         self.assertEqual(p.returncode, 88, p.stderr)
+        checkpoint = json.loads(worker_record_path(self.ws, worker["id"]).read_text(encoding="utf-8"))
+        self.assertIsInstance(checkpoint.get("summary_published"), (int, float))
+        before = [item for item in status(self.ws)["issues"] if item.get("id") == worker["id"]]
+        self.assertIn("owner-process-dead", {item["issue"] for item in before})
+        self.assertNotIn("orphan-namespace-ref", {item["issue"] for item in before})
         actions = {r.get("action") for r in recover(self.ws) if r.get("id") == worker["id"]}
         self.assertIn("collect-finished", actions)
         self.assertEqual(self.issues(), [])
