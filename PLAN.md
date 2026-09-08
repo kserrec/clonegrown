@@ -2,8 +2,10 @@
 
 This is the September 7–8, 2026 stabilization pass. Current product
 behavior is documented in [README.md](README.md) and
-[ARCHITECTURE.md](ARCHITECTURE.md). This candidate is not release-qualified
-until the hosted checks pass. Local qualification is complete.
+[ARCHITECTURE.md](ARCHITECTURE.md). Implementation and local qualification are
+complete. The live hosted qualification record is
+[pull request #1's checks](https://github.com/kserrec/clonegrown/pull/1/checks).
+Release qualification requires all nine CI jobs to pass on the latest revision.
 
 ## Completed phases
 
@@ -31,10 +33,14 @@ until the hosted checks pass. Local qualification is complete.
   on Linux. Each run defines 304 tests: Git 2.55 passes all; older Git passes
   301 and skips three reftable capability fixtures. Both hardening modes pass
   on all three Git versions: 57 each on Git 2.55; 56 passes and one reftable
-  skip each on older Git. Hosted Linux/macOS checks remain required.
+  skip each on older Git. Hosted CI verifies Linux/macOS unit/destructive and
+  hardening suites, package smoke checks, and exact Git 2.29 from clean checkouts.
 - Step 7.2: passed clone/worktree state-machine seeds 9–13, 50 steps each
   (500 total), and interruption seeds 10–11 for spawn/collect/discard in both
-  modes (12 runs). No selected seed failed or remained pending.
+  modes (12 runs). All eight campaign jobs also passed from a clean checkout of
+  `ed0afb0`, with that revision recorded in every result. No selected seed failed
+  or remained pending. Subsequent changes affect only a config test fixture
+  and documentation; runtime and randomized campaign code remain identical.
 - Step 7.3: the one fresh cold review found four reproduced defects: unchecked
   moved-base-pin cleanup, symbolic-ref substitution between preflight and
   mutation, direct FIFO namespace enumeration on Git 2.29, and unvalidated
@@ -52,8 +58,8 @@ is part of this pass. Existing untracked `uv.lock` is outside the change.
 
 Local working notes and logs live under `/tmp/clonegrown-*`; final local logs
 and results are in `/tmp/clonegrown-final4`. These are temporary execution
-evidence, not additional maintained project documents. Hosted checks from a
-clean checkout of the `simplification-stabilization` review branch remain the
-final release gate. Skipped fixtures and stopped earlier matrices are not
-passes; the final local run used the uncommitted candidate with a source hash
-manifest, not a clean committed checkout.
+evidence, not additional maintained project documents. The published
+`simplification-stabilization` branch and linked PR checks identify the current
+candidate. Skipped fixtures and stopped or superseded runs are not passes.
+The complete local matrix used a source hash manifest; committed-checkout
+campaign results are in `/tmp/clonegrown-committed-campaigns`.
