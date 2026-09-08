@@ -252,6 +252,16 @@ class _Recovery:
     def _recover_collecting(self) -> None:
         worker = self.worker
         candidate, ref = worker.candidate_sha, worker.candidate_ref
+        # Reftable does not inventory physical files at logical ref paths. Keep the
+        # candidate metadata that derives this exact name until a symbolic ref or
+        # foreign filesystem occupant is removed; clearing it would make the
+        # preserved occupant invisible to every later status pass.
+        if candidate and ref and is_foreign_ref(self.canonical, str(ref)):
+            worker.collection_error = "the recorded candidate ref is occupied by a foreign object"
+            worker.collection_failed = time.time()
+            self.save()
+            self.report("collect-candidate-ref-conflict")
+            return
         # The collecting checkpoint precedes the fetch. If the parent dies
         # after the Git child transfers the object but before the create-only
         # ref transaction, recovery may finish that represented publication.
@@ -281,11 +291,28 @@ class _Recovery:
             # worker-side judgement can be lied to by an object planted in the worker's store.
             can_finish = False
         if can_finish:
+            summary = self.state.summary_ref(self.worker_id)
+            observed_summary = resolve_ref(self.canonical, summary)
+            if observed_summary not in (None, candidate):
+                can_finish = False
+            elif observed_summary == candidate and worker.summary_published is None:
+                # Candidate/result/summary equality does not establish who wrote the
+                # mutable summary. A summary that predates collect has exactly this
+                # shape after a hard exit before the transaction. Only the durable
+                # post-transaction marker lets recovery adopt it automatically.
+                worker.collection_error = (
+                    "the exact summary ref has no durable proof that this collection attempt published it"
+                )
+                worker.collection_failed = time.time()
+                self.save()
+                self.report("collect-summary-ref-conflict")
+                return
+        if can_finish:
             entered = False
             try:
                 with result_ref_transaction(
-                    self.canonical, str(ref), self.state.summary_ref(self.worker_id),
-                    str(candidate), update_summary=True,
+                    self.canonical, str(ref), summary, str(candidate), update_summary=True,
+                    expected_summary=observed_summary,
                 ):
                     entered = True
                     worker.status = WorkerStatus.COLLECTED
@@ -296,6 +323,32 @@ class _Recovery:
                     self.save()
             except ClonegrownError:
                 if entered:
+                    raise
+                # The transaction repeats both ref observations before it
+                # yields.  If another writer changed either name in that
+                # interval, do not erase the candidate metadata that makes a
+                # retained conflict recoverable and visible.
+                if is_foreign_ref(self.canonical, str(ref)):
+                    worker.collection_error = "the recorded candidate ref is occupied by a foreign object"
+                    worker.collection_failed = time.time()
+                    self.save()
+                    self.report("collect-candidate-ref-conflict")
+                    return
+                summary_after_failure = resolve_ref(self.canonical, summary)
+                if summary_after_failure == candidate and worker.summary_published is None:
+                    worker.collection_error = (
+                        "the exact summary ref has no durable proof that this collection attempt published it"
+                    )
+                    worker.collection_failed = time.time()
+                    self.save()
+                    self.report("collect-summary-ref-conflict")
+                    return
+                if worker.summary_published is not None:
+                    # Once publication is durable, even an unrelated prepare
+                    # failure (for example a stale Git lock) cannot justify
+                    # rolling the record back to ready.  Let the outer
+                    # recovery boundary report the original failure while the
+                    # represented checkpoint remains intact for a retry.
                     raise
                 can_finish = False
             else:
@@ -390,7 +443,7 @@ class _Recovery:
         # must not relabel or destroy them. Only structural identity/branch loss is fatal.
         try:
             repo = verify_worker(self.state, self.worker)
-            branch = git(repo, "rev-parse", "--verify", f"refs/heads/{self.worker.branch}^{{commit}}", check=False)
+            branch = git(repo, "rev-parse", "--verify", f"{self.worker.task_ref}^{{commit}}", check=False)
             if branch.returncode:
                 raise ClonegrownError("assigned task branch is missing")
         except Exception as exc:

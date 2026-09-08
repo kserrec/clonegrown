@@ -11,7 +11,10 @@ from clonegrown import cli
 from clonegrown.state import worker_record_path
 from support import commit, git_out, make_repo, run_cli
 
-PRIVATE_FIELDS = {"canonical_token", "worker_token", "params_hash", "owner_pid", "owner_start", "stage_root"}
+PRIVATE_FIELDS = {
+    "canonical_token", "worker_token", "params_hash", "owner_pid", "owner_start", "stage_root",
+    "summary_published",
+}
 
 READY_WORKER_KEYS = {
     "id", "status", "mode", "strong", "task", "base", "base_sha", "branch", "path", "request_id",
@@ -121,6 +124,7 @@ class ClonegrownCliTests(unittest.TestCase):
 
     def test_output_contract(self) -> None:
         # The CLI's JSON is a documented contract, not whatever the record happens to hold.
+        self.assertEqual(cli.public_result({"summary_published": 1.0}), {})
         with tempfile.TemporaryDirectory() as td:
             root = Path(td).resolve()
             repo = make_repo(root)

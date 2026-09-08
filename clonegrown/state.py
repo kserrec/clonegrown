@@ -404,7 +404,8 @@ class VerifiedWorkspace:
         rename the canonical checkout and put a different repository at the same
         name before Git starts. Opening before the locked reload and matching the
         descriptor here lets callers address the already-authenticated repository
-        through ``/dev/fd`` even if its pathname changes afterward.
+        through the descriptor (Git children ``fchdir`` into it; file reads use
+        ``dir_fd``) even if its pathname changes afterward.
         """
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
@@ -415,8 +416,6 @@ class VerifiedWorkspace:
             opened = os.fstat(descriptor)
             if (opened.st_dev, opened.st_ino) != self.canonical_git_dir_identity:
                 raise ClonegrownError("canonical Git directory identity changed before descriptor binding")
-            if not Path("/dev/fd").is_dir():
-                raise ClonegrownError("this platform cannot bind Git to an open canonical directory")
             yield descriptor
         finally:
             os.close(descriptor)
@@ -502,6 +501,7 @@ class WorkerRecord:
     candidate_ref: str | None = None
     allow_rewrite: bool | None = None
     collect_started: float | None = None
+    summary_published: float | None = None      # this collect attempt committed the direct summary ref
     result_sha: str | None = None
     result_ref: str | None = None
     collected: float | None = None
@@ -557,6 +557,11 @@ class WorkerRecord:
         return Path(str(self.path))
 
     @property
+    def task_ref(self) -> str:
+        """The full Git name of the assigned task branch."""
+        return f"refs/heads/{self.branch}"
+
+    @property
     def is_worktree(self) -> bool:
         return self.mode == "worktree"
 
@@ -578,6 +583,7 @@ class WorkerRecord:
     def clear_candidate(self) -> None:
         self.candidate_sha = None
         self.candidate_ref = None
+        self.summary_published = None
 
     def validate(self, ws: Path, state: WorkspaceState, worker_id: int) -> None:
         """Validate durable metadata before it selects a path or a Git ref.
@@ -680,10 +686,12 @@ class WorkerRecord:
                 raise ClonegrownError(f"worker {sha_name} and {ref_name} must be recorded together")
             if sha is not None and ref != state.result_ref(worker_id, sha):
                 raise ClonegrownError(f"worker {ref_name} does not name its commit inside this workspace's namespace")
+        if self.summary_published is not None and self.candidate_sha is None:
+            raise ClonegrownError("worker summary publication checkpoint without a candidate")
         snapshot = self.collected_snapshot
         if snapshot is not None:
             if (not _is_commit_id(snapshot.get("head"), state.object_format)
-                    or snapshot.get("branch_ref") != f"refs/heads/{self.branch}"):
+                    or snapshot.get("branch_ref") != self.task_ref):
                 raise ClonegrownError("worker collected snapshot is malformed")
             if self.result_sha is not None and snapshot["head"] != self.result_sha:
                 raise ClonegrownError("worker collected snapshot does not match its result")
@@ -746,6 +754,7 @@ _FIELD_SHAPES: tuple[tuple[str, Callable[[Any], bool], str], ...] = (
     ("ready", _is_number, "a timestamp"),
     ("failed", _is_number, "a timestamp"),
     ("collect_started", _is_number, "a timestamp"),
+    ("summary_published", _is_number, "a timestamp"),
     ("collected", _is_number, "a timestamp"),
     ("collection_failed", _is_number, "a timestamp"),
     ("collection_recovered", _is_number, "a timestamp"),
@@ -778,11 +787,12 @@ _FIELD_SHAPES: tuple[tuple[str, Callable[[Any], bool], str], ...] = (
 )
 
 _CANDIDATE = frozenset({"candidate_sha", "candidate_ref"})
+_SUMMARY_CHECKPOINT = frozenset({"summary_published"})
 _RESULT = frozenset({"result_sha", "result_ref"})
 _DISCARD = frozenset({"discard_intent", "discard_previous", "discard_started"})
 _QUARANTINE = frozenset({"quarantine_path", "quarantine_started", "quarantine_snapshot", "quarantine_error"})
 _NOT_YET_PUBLISHED = (frozenset({"ready", "collected", "discarded", "lease_released"})
-                      | _CANDIDATE | _RESULT | _DISCARD | _QUARANTINE)
+                      | _CANDIDATE | _SUMMARY_CHECKPOINT | _RESULT | _DISCARD | _QUARANTINE)
 
 # Per status: (fields the lifecycle always writes before entering it, fields that
 # would select a path or ref this status has no right to). Fields not named are
@@ -792,14 +802,16 @@ _STATUS_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     WorkerStatus.CLONING: (frozenset(), _NOT_YET_PUBLISHED),
     WorkerStatus.CONFIGURING: (frozenset(), _NOT_YET_PUBLISHED),
     WorkerStatus.PUBLISHING: (frozenset(), _NOT_YET_PUBLISHED),
-    WorkerStatus.READY: (frozenset({"ready"}), frozenset({"collected", "discarded"}) | _CANDIDATE | _RESULT | _QUARANTINE),
+    WorkerStatus.READY: (frozenset({"ready"}), frozenset({"collected", "discarded"}) | _CANDIDATE
+                         | _SUMMARY_CHECKPOINT | _RESULT | _QUARANTINE),
     WorkerStatus.COLLECTING: (frozenset({"ready", "collect_started"}) | _CANDIDATE,
                               frozenset({"collected", "discarded"}) | _RESULT | _QUARANTINE),
-    WorkerStatus.COLLECTED: (frozenset({"ready", "collected"}) | _RESULT, frozenset({"discarded"}) | _CANDIDATE | _QUARANTINE),
-    WorkerStatus.DISCARDING: (_DISCARD, frozenset({"discarded"}) | _CANDIDATE),
+    WorkerStatus.COLLECTED: (frozenset({"ready", "collected"}) | _RESULT,
+                             frozenset({"discarded"}) | _CANDIDATE | _SUMMARY_CHECKPOINT | _QUARANTINE),
+    WorkerStatus.DISCARDING: (_DISCARD, frozenset({"discarded"}) | _CANDIDATE | _SUMMARY_CHECKPOINT),
     WorkerStatus.DISCARDED: (frozenset({"ready", "collected", "discarded"}) | _RESULT,
-                             _CANDIDATE | _QUARANTINE),
-    WorkerStatus.ABANDONED: (frozenset({"discarded"}), _CANDIDATE | _QUARANTINE),
+                             _CANDIDATE | _SUMMARY_CHECKPOINT | _QUARANTINE),
+    WorkerStatus.ABANDONED: (frozenset({"discarded"}), _CANDIDATE | _SUMMARY_CHECKPOINT | _QUARANTINE),
     WorkerStatus.SPAWN_FAILED: (frozenset({"failed", "error"}), _NOT_YET_PUBLISHED),
     WorkerStatus.BROKEN: (frozenset({"error"}), frozenset()),
 }

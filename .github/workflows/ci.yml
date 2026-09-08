@@ -37,6 +37,7 @@ jobs:
           clonegrown --version
           clonegrown --help
           python -m clonegrown --help
+          python -m pip uninstall -y clonegrown
 
   minimum-git:
     name: Exact minimum Git 2.29.0
@@ -88,7 +89,8 @@ jobs:
       fail-fast: false
       matrix:
         mode: [clone, worktree]
-    runs-on: ubuntu-latest
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -103,7 +105,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: hardening-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: hardening-${{ matrix.os }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/hardening-${{ matrix.mode }}.json
           if-no-files-found: error
           retention-days: 30

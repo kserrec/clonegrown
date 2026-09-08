@@ -30,6 +30,17 @@ GITHUB_FIELDS = (
 )
 
 
+def run(cmd, cwd=None, check=True, timeout=120):
+    """Run a bounded campaign command, retaining both output streams on failure."""
+    result = subprocess.run(
+        [str(part) for part in cmd], cwd=cwd, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+    )
+    if check and result.returncode:
+        raise RuntimeError(f'{cmd} rc={result.returncode}\n{result.stdout}\n{result.stderr}')
+    return result
+
+
 def command_output(arguments: Sequence[str | Path], cwd: Path | None = None) -> str | None:
     try:
         result = subprocess.run(

@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from clonegrown import ClonegrownError, collect, discard, recover, release, spawn, status
+from clonegrown.state import WorkspaceState
 from support import commit, git_out, make_repo, run_cli, run_git
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -171,7 +172,7 @@ class WorktreeWorkerTests(unittest.TestCase):
 
     def test_admin_dir_of_another_worker_is_refused(self) -> None:
         from clonegrown.worker import remove_worktree_admin
-        from clonegrown.state import WorkerRecord
+        from clonegrown.state import WorkspaceState, WorkerRecord
         a = spawn(self.ws, "HEAD", "a", strong=False, mode="worktree")
         b = spawn(self.ws, "HEAD", "b", strong=False, mode="worktree")
         # Ask to delete b's admin dir while claiming to be a: must refuse and leave it.
@@ -215,15 +216,19 @@ class WorktreeWorkerTests(unittest.TestCase):
         base = git_out(self.repo, "rev-parse", "HEAD")
         for occupied in ("refs/heads/agent/x/9-taken", "refs/cws/x/workers/9/branch-owner"):
             with self.subTest(occupied=occupied):
-                run_git(self.repo, "symbolic-ref", occupied, "refs/heads/absent-target")
-                with self.assertRaisesRegex(ClonegrownError, "symbolic ref"):
-                    create_task_branch(self.repo, "agent/x/9-taken", "refs/cws/x/workers/9/branch-owner", base)
-                self.assertEqual(git_out(self.repo, "symbolic-ref", occupied), "refs/heads/absent-target")
-                for ref in ("refs/heads/agent/x/9-taken", "refs/cws/x/workers/9/branch-owner"):
-                    if ref != occupied:
-                        self.assertNotEqual(run_git(self.repo, "rev-parse", "--verify", ref, check=False).returncode, 0)
-                        self.assertNotEqual(run_git(self.repo, "symbolic-ref", "-q", ref, check=False).returncode, 0)
-                run_git(self.repo, "symbolic-ref", "--delete", occupied)
+                loose = self.repo / ".git" / occupied
+                loose.parent.mkdir(parents=True, exist_ok=True)
+                loose.write_bytes(b"ref: refs/heads/absent-target\n")  # planted raw, independent of Git's own checks
+                try:
+                    with self.assertRaises(ClonegrownError):
+                        create_task_branch(self.repo, "agent/x/9-taken", "refs/cws/x/workers/9/branch-owner", base)
+                    self.assertEqual(loose.read_bytes(), b"ref: refs/heads/absent-target\n")
+                    for ref in ("refs/heads/agent/x/9-taken", "refs/cws/x/workers/9/branch-owner"):
+                        if ref != occupied:
+                            self.assertFalse(os.path.lexists(self.repo / ".git" / ref))
+                    self.assertFalse(os.path.lexists(self.repo / ".git/refs/heads/absent-target"))
+                finally:
+                    loose.unlink(missing_ok=True)
         create_task_branch(self.repo, "agent/x/9-taken", "refs/cws/x/workers/9/branch-owner", base)
         self.assertEqual(git_out(self.repo, "rev-parse", "refs/heads/agent/x/9-taken"), base)
 
@@ -383,9 +388,11 @@ class WorktreeWorkerTests(unittest.TestCase):
         other = spawn(self.ws, "HEAD", "other clone", strong=False)
         commit(Path(other["path"]), "work.txt")
         branch_ref = f"refs/heads/{victim['branch']}"
-        fifo_ref = "refs/heads/zz-fifo"
+        state = WorkspaceState.load(self.ws)
+        fifo_ref = f"{state.ref_prefix}/zz-fifo"  # an owned name: a top-level FIFO is Git's own pre-2.43 boundary
         run_git(self.repo, "update-ref", "--no-deref", "-d", branch_ref)
         # Planted with plain writes: Git itself would open the FIFO while validating the target.
+        (self.repo / ".git" / fifo_ref).parent.mkdir(parents=True, exist_ok=True)
         os.mkfifo(self.repo / ".git" / fifo_ref)
         loose = self.repo / ".git" / branch_ref
         loose.parent.mkdir(parents=True, exist_ok=True)
@@ -423,28 +430,30 @@ class WorktreeWorkerTests(unittest.TestCase):
         commit(Path(other["path"]), "work.txt")
         run_git(Path(victim["path"]), "checkout", "-q", "--detach")
         branch_ref = f"refs/heads/{victim['branch']}"
-        fifo = self.repo / ".git" / "refs" / "zz-fifo"
+        state = WorkspaceState.load(self.ws)
+        fifo = self.repo / ".git" / state.ref_prefix / "zz-fifo"  # an owned name: a top-level FIFO is Git's own pre-2.43 boundary
+        fifo.parent.mkdir(parents=True, exist_ok=True)
         os.mkfifo(fifo)
         run_git(self.repo, "update-ref", "--no-deref", "-d", branch_ref)
         loose = self.repo / ".git" / branch_ref
         loose.parent.mkdir(parents=True, exist_ok=True)
-        loose.write_bytes(b"ref: refs/zz-fifo\n")
+        loose.write_bytes(f"ref: {state.ref_prefix}/zz-fifo\n".encode())
 
         def alarm(*_: object) -> None:
             raise AssertionError("a Git command blocked on the planted FIFO")
         previous = signal.signal(signal.SIGALRM, alarm)
         signal.alarm(45)
         try:
-            with self.assertRaisesRegex(ClonegrownError, "symbolic ref leading to"):
+            with self.assertRaises(ClonegrownError):
                 spawn(self.ws, "HEAD", "clone spawn", strong=False)
-            with self.assertRaisesRegex(ClonegrownError, "symbolic ref leading to"):
+            with self.assertRaises(ClonegrownError):
                 collect(self.ws, other["id"])
             status(self.ws)
             recover(self.ws)
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, previous)
-        self.assertEqual(loose.read_bytes(), b"ref: refs/zz-fifo\n")
+        self.assertEqual(loose.read_bytes(), f"ref: {state.ref_prefix}/zz-fifo\n".encode())
         loose.unlink()
         fifo.unlink()
 

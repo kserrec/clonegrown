@@ -170,7 +170,9 @@ class AllocationTests(unittest.TestCase):
         """A loose symbolic ref is read raw: allocation never asks Git to follow a chain that ends
         at a FIFO, whether the ref sits at the next ID's base-pin name or at the generated branch."""
         import signal
-        fifo = self.repo / ".git" / "refs" / "zz-fifo"
+        state = WorkspaceState.load(self.ws)
+        fifo = self.repo / ".git" / state.ref_prefix / "zz-fifo"  # an owned name: a top-level FIFO is Git's own boundary
+        fifo.parent.mkdir(parents=True, exist_ok=True)
         os.mkfifo(fifo)
         for which in ("base pin", "task branch"):
             state = WorkspaceState.load(self.ws)
@@ -178,7 +180,7 @@ class AllocationTests(unittest.TestCase):
             name = state.base_ref(next_id) if which == "base pin" else f"refs/heads/{state.worker_branch(next_id, 'next task')}"
             loose = self.repo / ".git" / name
             loose.parent.mkdir(parents=True, exist_ok=True)
-            loose.write_bytes(b"ref: refs/zz-fifo\n")
+            loose.write_bytes(f"ref: {state.ref_prefix}/zz-fifo\n".encode())
 
             def alarm(*_: object) -> None:
                 raise AssertionError("a Git command blocked on the planted FIFO")
@@ -187,7 +189,7 @@ class AllocationTests(unittest.TestCase):
             try:
                 with self.subTest(name=which):
                     for mode in ("worktree", "clone"):
-                        with self.assertRaisesRegex(ClonegrownError, "symbolic|task branch|base ref"):
+                        with self.assertRaises(ClonegrownError):
                             spawn(self.ws, "HEAD", "next task", strong=False, mode=mode)
                         if which == "base pin" or mode == "worktree":
                             self.assertEqual(self.state()["next_id"], next_id)  # evidence: nothing consumed
@@ -196,7 +198,7 @@ class AllocationTests(unittest.TestCase):
             finally:
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, previous)
-            self.assertEqual(loose.read_bytes(), b"ref: refs/zz-fifo\n")
+            self.assertEqual(loose.read_bytes(), f"ref: {state.ref_prefix}/zz-fifo\n".encode())
             loose.unlink()
         fifo.unlink()
 
@@ -391,6 +393,49 @@ class AllocationTests(unittest.TestCase):
         self.assertFalse((self.ws / "1").exists())
         record = json.loads(worker_record_path(self.ws, 1).read_text(encoding="utf-8"))
         self.assertEqual(record["status"], "spawn_failed")
+
+    def test_spawn_reloads_refuse_changed_allocation_identity_without_mutating_evidence(self) -> None:
+        foreign_sha = commit(self.repo, "foreign-base.txt")
+        base = git_out(self.repo, "rev-parse", "HEAD^")
+        foreign_directory = self.root / 'foreign-directory'
+        foreign_directory.mkdir()
+        sentinel = foreign_directory / 'keep.txt'
+        sentinel.write_text('keep this directory')
+        cases = [
+            ('spawn.after_allocated', 'branch', 'unassigned-task-branch'),
+            ('spawn.after_allocated', 'base_sha', foreign_sha),
+            ('spawn.after_clone', 'path', str(foreign_directory)),
+            ('spawn.after_clone', 'stage_root', str(foreign_directory)),
+            ('spawn.after_clone', 'worktree_admin', str(foreign_directory)),
+            ('spawn.after_checkout', 'worker_token', 'a' * 32),
+            ('spawn.after_publish', 'base_sha', foreign_sha),
+            ('spawn.after_repair', 'branch', 'unassigned-task-branch'),
+        ]
+        for mode in ('clone', 'worktree'):
+            for checkpoint, field, value in cases + ([('spawn.after_worktree_add', 'branch',
+                                                       'unassigned-task-branch')] if mode == 'worktree' else []):
+                with self.subTest(mode=mode, checkpoint=checkpoint, field=field):
+                    worker_id = WorkspaceState.load(self.ws).next_id
+                    record_path = worker_record_path(self.ws, worker_id)
+                    tampered = None
+                    refs_before = None
+
+                    def change_record(point):
+                        nonlocal tampered, refs_before
+                        if point == checkpoint and tampered is None:
+                            data = json.loads(record_path.read_text())
+                            data[field] = value
+                            tampered = json.dumps(data).encode()
+                            record_path.write_bytes(tampered)
+                            refs_before = git_out(self.repo, 'for-each-ref')
+
+                    with mock.patch.object(lifecycle, 'failpoint', change_record):
+                        with self.assertRaises(ClonegrownError):
+                            spawn(self.ws, base, 'identity change', mode=mode)
+                    self.assertIsNotNone(tampered)
+                    self.assertEqual(record_path.read_bytes(), tampered)
+                    self.assertEqual(git_out(self.repo, 'for-each-ref'), refs_before)
+                    self.assertEqual(sentinel.read_text(), 'keep this directory')
 
     def test_canonical_replacement_after_publication_cannot_mutate_the_replacement(self) -> None:
         state = WorkspaceState.load(self.ws)

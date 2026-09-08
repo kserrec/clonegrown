@@ -56,34 +56,19 @@ GIT_BIN = _find_git()
 # storage, pathspec modes, helpers) and gains new ones over time; a denylist
 # closes only the names someone already thought of, while a custody decision
 # such as ancestry must not depend on which variable a hostile parent set.
-# User, system, and global config *files* still apply: only per-process
-# injection is stripped. Legacy denylist names are kept for documentation and
-# tests; they are all covered by the ``GIT_`` rule.
+# User, system, and global config files still apply: only per-process
+# injection is stripped.
 GIT_ENV_ALLOWED = {
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
     "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
 }
-GIT_ENV_EXACT = {
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
-    "GIT_PREFIX", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    "GIT_QUARANTINE_PATH", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE", "GIT_EXEC_PATH",
-    "GIT_TEMPLATE_DIR", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_ATTR_NOSYSTEM", "GIT_ATTR_SOURCE",
-    "GIT_ALLOW_PROTOCOL", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE",
-    "GIT_REF_FORMAT", "GIT_DEFAULT_HASH", "GIT_INDEX_VERSION",
-    "GIT_PROTOCOL_FROM_USER", "GIT_PROTOCOL", "GIT_SSH", "GIT_SSH_COMMAND",
-    "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXTERNAL_DIFF",
-    "GIT_DIFF_OPTS", "GIT_OPTIONAL_LOCKS", "GIT_FLUSH", "GIT_CONFIG_COUNT",
-}
-GIT_ENV_PREFIXES = ("GIT_",)
 
 
 def git_env_is_stripped(key: str) -> bool:
     """Whether ``clean_git_env`` removes ``key``: every ``GIT_*`` name outside the identity allowlist, plus ``SSH_ASKPASS``."""
     if key in GIT_ENV_ALLOWED:
         return False
-    return key in GIT_ENV_EXACT or key.startswith(GIT_ENV_PREFIXES)
+    return key == "SSH_ASKPASS" or key.startswith("GIT_")
 
 
 class ClonegrownError(RuntimeError):
@@ -104,13 +89,6 @@ class _OperationContext:
     work_preservation: str
     recovery: str
 
-    def checkpoint(self, *, stage: str, durable_state: str,
-                   work_preservation: str, recovery: str) -> None:
-        self.stage = stage
-        self.durable_state = durable_state
-        self.work_preservation = work_preservation
-        self.recovery = recovery
-
     def failure(self, cause: Exception) -> ClonegrownError:
         cause_text = public_exception_text(cause)
         error = ClonegrownError(
@@ -120,11 +98,8 @@ class _OperationContext:
             f"Recovery: {self.recovery}. Cause: {cause_text}"
         )
         # Useful to an in-process developer without expanding the public error hierarchy.
-        error.operation = self.operation  # type: ignore[attr-defined]
-        error.stage = self.stage  # type: ignore[attr-defined]
-        error.durable_state = self.durable_state  # type: ignore[attr-defined]
-        error.work_preservation = self.work_preservation  # type: ignore[attr-defined]
-        error.recovery = self.recovery  # type: ignore[attr-defined]
+        for name in ("operation", "stage", "durable_state", "work_preservation", "recovery"):
+            setattr(error, name, getattr(self, name))
         return error
 
 
@@ -168,12 +143,10 @@ def operation_checkpoint(*, stage: str, durable_state: str,
     """Replace the active public operation's safety statement, if there is one."""
     context = _CURRENT_OPERATION.get()
     if context is not None:
-        context.checkpoint(
-            stage=stage,
-            durable_state=durable_state,
-            work_preservation=work_preservation,
-            recovery=recovery,
-        )
+        context.stage = stage
+        context.durable_state = durable_state
+        context.work_preservation = work_preservation
+        context.recovery = recovery
 
 
 # --- processes ---------------------------------------------------------------
@@ -307,11 +280,29 @@ def clean_git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def child_chdir(directory_fd: int | None) -> Callable[[], None] | None:
+    """A pre-exec hook that moves the child into an already-open directory.
+
+    Addressing a directory by descriptor keeps the authenticated object even if
+    its pathname is renamed or replaced. Linux would also accept
+    ``/dev/fd/N/...`` paths, but macOS cannot traverse below ``/dev/fd/N``,
+    so the child changes directory with ``fchdir`` and names the directory as
+    ``.`` instead; this works on every supported POSIX platform.
+    """
+    if directory_fd is None:
+        return None
+
+    def hook() -> None:
+        os.fchdir(directory_fd)
+    return hook
+
+
 def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
         env: dict[str, str] | None = None, timeout: float | None = None,
         input: str | None = None, operation: str | None = None,
         sensitive: Iterable[str | Path] = (),
-        pass_fds: Iterable[int] = ()) -> subprocess.CompletedProcess[str]:
+        pass_fds: Iterable[int] = (),
+        chdir_fd: int | None = None) -> subprocess.CompletedProcess[str]:
     """Run a generic non-Git command with the caller's environment semantics."""
     argv = [str(x) for x in cmd]
     actual_env = env if env is not None else os.environ.copy()
@@ -320,7 +311,7 @@ def run(cmd: list[str | Path], cwd: Path | None = None, check: bool = True,
         # Paths in Git's output need not be UTF-8; surrogateescape keeps their bytes intact.
         p = subprocess.run(argv, cwd=cwd, text=True, errors="surrogateescape", stdout=subprocess.PIPE,
                            input=input, stderr=subprocess.PIPE, env=actual_env, timeout=timeout,
-                           pass_fds=tuple(pass_fds))
+                           pass_fds=tuple(pass_fds), preexec_fn=child_chdir(chdir_fd))
     except subprocess.TimeoutExpired as exc:
         raise CommandFailure(
             returncode=None, operation=label, command=argv, cwd=cwd,
@@ -344,15 +335,19 @@ def git(repo: Path, *args: str | Path, check: bool = True,
         timeout: float | None = None, input: str | None = None,
         sensitive: Iterable[str | Path] = (),
         pass_fds: Iterable[int] = (),
-        env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        env_extra: dict[str, str] | None = None,
+        chdir_fd: int | None = None) -> subprocess.CompletedProcess[str]:
     """Run the configured Git executable with a sanitized, noninteractive environment.
 
     ``env_extra`` adds Clonegrown's own settings on top of the sanitized
     environment; it is never a way to pass the caller's variables through.
+    ``chdir_fd`` moves the child into an already-open directory before Git
+    starts (see ``child_chdir``).
     """
     return run(
         [GIT_BIN, *args], cwd=repo, check=check, env=clean_git_env(env_extra), timeout=timeout,
         input=input, operation=_git_operation(args), sensitive=sensitive, pass_fds=pass_fds,
+        chdir_fd=chdir_fd,
     )
 
 
@@ -530,9 +525,28 @@ def object_format(path: Path) -> str:
     return p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else "sha1"
 
 
+def require_files_ref_backend(path: Path) -> None:
+    """Ask Git for its ref backend before relying on loose/packed ref custody.
+
+    Git before 2.45 echoes the unknown rev-parse option. Its local repository
+    extension is the compatibility fallback; absence means the files backend.
+    """
+    storage = git(path, "rev-parse", "--show-ref-format").stdout.strip()
+    if storage == "--show-ref-format":
+        configured = git(path, "config", "--local", "--get", "extensions.refStorage", check=False)
+        if configured.returncode not in (0, 1):
+            configured.check_returncode()
+        storage = configured.stdout.strip() if configured.returncode == 0 else "files"
+    if storage != "files":
+        raise ClonegrownError(
+            f"Clonegrown requires the files ref backend; {storage or 'unknown'} ref storage is unsupported"
+        )
+
+
 def validate_primary_repo(path: Path) -> Path:
     """Resolve ``path`` to the root of a non-bare, non-linked-worktree checkout."""
     root = repo_root(path)
+    require_files_ref_backend(root)
     if git(root, "rev-parse", "--is-bare-repository").stdout.strip() == "true":
         raise ClonegrownError("bare repositories are not supported as canonical working copies")
     if git_dir(root) != git_common_dir(root):

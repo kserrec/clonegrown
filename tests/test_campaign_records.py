@@ -602,6 +602,8 @@ class CampaignRecordTests(unittest.TestCase):
         self.assertEqual(yaml_direct_values(strategy, 6, "fail-fast"), ["false"])
         matrix = yaml_block(strategy, "      matrix:")
         self.assertEqual(yaml_direct_values(matrix, 8, "mode"), ["[clone, worktree]"])
+        self.assertEqual(yaml_direct_values(matrix, 8, "os"), ["[ubuntu-latest, macos-latest]"])
+        self.assertEqual(yaml_direct_values(job, 4, "runs-on"), ["${{ matrix.os }}"])
 
         campaign = yaml_block(job, "      - name: Adversarial suite (${{ matrix.mode }} workers)")
         self.assertEqual(yaml_direct_values(campaign, 8, "run"), ["python tests/campaign/hardening_suite.py"])
@@ -614,7 +616,7 @@ class CampaignRecordTests(unittest.TestCase):
         self.assertEqual(yaml_direct_values(upload, 8, "if"), ["${{ always() }}"])
         self.assertEqual(yaml_direct_values(upload, 8, "uses"), ["actions/upload-artifact@v7"])
         upload_with = yaml_block(upload, "        with:")
-        artifact_name = "hardening-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}"
+        artifact_name = "hardening-${{ matrix.os }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}"
         self.assertEqual(yaml_direct_values(upload_with, 10, "name"), [artifact_name])
         self.assertEqual(yaml_direct_values(upload_with, 10, "path"), [result_path])
         self.assertEqual(yaml_direct_values(upload_with, 10, "if-no-files-found"), ["error"])

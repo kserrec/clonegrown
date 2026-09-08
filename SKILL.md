@@ -6,258 +6,154 @@ description: Use Clonegrown to create, collect, recover, and remove per-task Git
 # Clonegrown
 
 Use Clonegrown when a task needs its own Git working directory and the
-repository owner has authorized this alpha tool. Clonegrown records spawn,
-collection, discard, and recovery. Collection can preserve a worker's clean
-committed tip under a canonical ref; it does not integrate that commit into a
-user branch.
+repository owner has authorized this alpha tool. It records worker lifecycle
+and preserves clean committed results in canonical. Collection does not
+integrate those results into a user branch. The current stabilization
+candidate's qualification is tracked in the source repository's `PLAN.md`.
 
-> **Do not use this tree for irreplaceable work until it is qualified.** The
-> 2026-09-02 cold review found six product defects: clone-private dangling
-> symbolic refs could escape discard custody; dangling symbolic task branches
-> and control-file names were not safely reserved; CLI workspace selection
-> could follow a symlink; `GIT_CONFIG` could reach child Git; and repeated
-> collection after an accepted history rewrite could fail. Eight later
-> reviews found that inherited `GIT_*` overrides or worker-local replace refs and
-> graft files could fake ancestry, that quarantine re-authorization skipped
-> ignored content, and that some foreign occupants of Clonegrown's ref names
-> (symbolic refs, symlinks, FIFOs, and chains between them) were not refused
-> or could still block Git. All are repaired with class regressions; a fresh
-> no-open-finding review and green hosted CI are still required. See `research/FINAL_COLD_REVIEW.md` and `PLAN.md` in the
-> source repository.
+Use the `clonegrown` command for lifecycle operations. Never manually reproduce
+its marker, ref, remote, or worktree-admin protocol, and never delete a worker
+or quarantine by hand. Do not inspect dotenv files when assessing ignored
+content; ask the user to handle those files without sharing their contents.
 
-A worker is either a **linked worktree** (`--worktree`, avoids copying a
-second object database but still has repository- and host-dependent checkout
-cost, and shares broad Git state with canonical) or a **local clone** (the CLI default, separate
-refs, stash, local config, and a default private `.git/hooks` location but may
-hard-link existing object files). `--strong` creates a clone with physically
-separate object files at spawn; it is not an operating-system sandbox.
+## Supported boundary
 
-Choose a worktree when repository history is very large, tasks are short, or
-workers are created and destroyed rapidly. Choose a clone when separate Git
-refs, local config, stash, and the default private hook location matter.
-Clone mode preserves ordered repository-local config occurrences, including
-the semantic difference between valueless and explicitly empty entries. It
-flattens effective repository-local includes without copying their directives,
-and anchors relative local fetch and push paths to canonical before installing
-them in a relocated worker. Absolute paths, URL schemes, and scp-like remotes
-are left unchanged.
-Clonegrown does not copy hook programs from canonical `.git/hooks`. It can copy
-a configured `core.hooksPath` value, not the programs it names; any copied value
-that resolves outside the worker remains shared. Absolute values receive a
-compatibility warning, but tilde-prefixed and traversal-heavy values can also
-resolve outside the worker without that warning. Treat every copied
-`core.hooksPath` as potentially shared until its resolved location is known.
-Choose `--strong` only when physical object independence at spawn justifies
-copying the object database; it does not change this hook behavior.
+Git 2.29.0+, Python 3.11+, Linux/macOS, and local POSIX filesystems are required.
+Both canonical and clone workers must use files-based refs; reftable is
+unsupported and refused. Native Windows, network/distributed filesystems,
+partial clones, initialized/recursive submodules, Git LFS, and long-running or
+credentialed/network filters are outside support. Ordinary clean/smudge filters
+need their external driver already installed. Clonegrown does not sandbox it.
 
-## Core rule
+The default worker is a local clone with separate refs, stash, local config,
+and default `.git/hooks`; object files may be hard-linked or borrowed through
+alternates. `--strong` gives physically independent object files at spawn,
+with extra copying cost. `--worktree` shares canonical refs, stash, config,
+hooks, and objects. None is an operating-system sandbox.
 
-Use the `clonegrown` command for lifecycle operations; do not manually
-reproduce its marker, ref, remote, collection, or worktree-admin protocol.
+Clone config preserves ordered local values and flattened includes; relative
+local remote paths are anchored to canonical. Private hook programs are not
+copied, but a copied `core.hooksPath` can still resolve outside the worker.
+Absolute values warn; tilde or relative traversal may not. Treat such hooks
+as shared until their resolved location is known. The invalid push URL on the
+canonical-source remote guards accidents only; never intentionally push there.
 
-Clonegrown normally discovers its workspace. Pass an explicit workspace only
-when auto-discovery fails or the user deliberately selected a nonstandard
-workspace path.
+## Workflow
 
-## Current alpha safety boundary
+1. Initialize from the canonical checkout if needed: `clonegrown init`.
+   The default workspace is the sibling `REPO-dev`. Discovery works from the
+   conventional canonical checkout, workspace, or worker. Use `--workspace`
+   for an explicitly selected nonstandard layout.
+2. Allocate with `clonegrown spawn "short task description"`. It starts at
+   pinned canonical `HEAD`; `--base` selects another commit/ref. Choose
+   `--worktree` when shared Git state is acceptable or `--strong` when physical
+   object independence matters. Report and use the returned worker path/ID.
+3. Work only in that worker, test, and commit the desired result. Do not assign
+   unrelated tasks to one worker or two tasks to its branch. In a worktree,
+   do not alter shared config, branches, or stash belonging to others.
+4. Stop writers and run `clonegrown collect ID`. This preserves a clean
+   committed tip. Use `--allow-rewrite` only for an authorized history rewrite.
+   Report the commit and immutable `result_ref`. Integration is a separate
+   explicit Git operation authorized by the user.
+5. After every agent, watcher, server, and other writer has stopped, run
+   `clonegrown release ID`. Release records your assertion; Clonegrown cannot
+   verify it. Collection does not itself require release.
+6. Run `clonegrown discard ID` to remove the collected worker. Stop on a
+   custody refusal and report what the user must decide. Do not bypass it
+   merely to finish cleanup.
+7. After interruption or uncertain durable state, run `clonegrown status`,
+   then `clonegrown recover` when reconciliation of recorded intent is
+   appropriate, then inspect status again. Recovery can finish an already
+   authorized deletion; it is not a read-only diagnostic.
 
-Before using this skill, account for these verified current limits:
+For retrying callers, a stable `--request-id` rejoins a matching in-flight
+spawn or returns the existing ready/collected/discarded outcome. Abandoned or
+spawn-failed outcomes can allocate anew; broken outcomes need resolution.
+Spawns without a request ID always create new workers.
 
-- Collection and drift checks omit Git-ignored paths. Discarding a collected
-  worker that holds ignored paths is refused until `--discard-ignored` is
-  given; the refusal lists a count and a few names. Do not pass that flag
-  unless the user has authorized destroying that ignored content.
-- Recovery of an interrupted spawn has three outcomes: an untouched worker
-  is promoted to `ready`, a changed one is preserved as `broken`, and one
-  that recovery cannot inspect because another worker's foreign ref blocks
-  Git is left untouched and reported as `recovery-failed` until that
-  occupant is removed.
-- Clone workers record a raw inventory of their non-task refs at publication,
-  symbolic refs included whether or not their targets exist. If a later
-  private ref or stash differs, collected-clone discard refuses until
-  `--discard-private-refs` is given; a clone with no verifiable baseline (an
-  older record, or refs not stored as files) fails closed the same way. Report
-  changed ref names and do not pass that flag without authorization. The check also omits
-  later local-config, hook, or other non-ref `.git` changes, so review any such
-  clone-private setup before deletion.
-- Every published worker holds a cooperative work lease from spawn until an
-  explicit `clonegrown release <worker-id>`. Discard, including `--abandon` and
-  `--force`, refuses a leased worker, and recovery never treats a dead process
-  as a release. The lease is a handoff protocol between cooperating callers,
-  not an operating-system sandbox: a process that ignores it, or keeps file
-  descriptors open, can still write after the final check. Stop every agent,
-  watcher, editor, server, and other process that can write to the worker
-  before releasing it.
-- Discard moves the worker to `.cws/quarantine/`, rechecks it, deletes it
-  with errors enabled, and proves it absent before recording it gone. If the
-  worker changed before deletion, it stays intact in quarantine. If authorized
-  recursive deletion had already begun when an error or interruption occurred,
-  only the remainder may survive. In either case `status` reports the retained
-  `quarantine_path` and `quarantine_error`; report that to the user rather than
-  deleting anything by hand. Running `clonegrown recover` reconciles the
-  recorded intent: it resumes a quarantined or durably authorized deletion,
-  while an untouched normal discard can be withdrawn for a fresh retry.
-- Recovery covers recorded lifecycle checkpoints, not every possible
-  filesystem interruption. A published worker whose spawn was interrupted is
-  promoted to `ready` if it is untouched and otherwise preserved in place as
-  `broken`, with `error` saying how it differs; it is deleted only by an
-  explicit release and `discard --abandon`. A worktree task branch is deleted
-  only when Clonegrown proves it created it and it has not moved; a retained
-  branch is reported, never forced. An interrupted collection is finished only
-  when its exact candidate can be published without replacing a ref and the
-  worker still matches; otherwise recovery returns it to `ready` and leaves
-  any conflicting ref untouched.
-- A collected worker is one-shot. An unchanged repeat collection is a no-op
-  judged by the rewrite policy the original collection recorded, so a repeat
-  after an accepted `--allow-rewrite` needs no option; new commits or a new
-  rewrite after collection are rejected under any option, and `--abandon` and
-  `claim` are refused for it. Spawn a new worker for new work.
-- Worktrees share broad Git state. Default clones can share existing object
-  files through hard links. Neither mode is an operating-system sandbox.
-- The clone's invalid canonical-source push URL is an accident guard, not a
-  security boundary.
-- Git command failures redact copied configuration values, remote URLs, and
-  URL userinfo from their displayed command, stdout, and stderr. Other Git
-  diagnostic text remains visible; this is targeted redaction rather than a
-  general secret scanner, so review error output before putting it in a public
-  channel.
-- Failure text also hides the private token component of Clonegrown's own
-  staging and quarantine paths, including quoted operating-system filenames.
-  Successful `status` output deliberately retains the full `quarantine_path`
-  as recovery evidence while hiding the separate `worker_token` field.
-- An `init`, `spawn`, `collect`, `discard`, or `recover` failure states its
-  operation stage, last known durable mutation, work-preservation confidence,
-  and required recovery or manual inspection. Treat `unverified` literally:
-  do not infer that a write, rename, publication, or deletion did or did not
-  happen. Follow the stated recovery action, then use `clonegrown status` to
-  audit the documented workspace and worker invariants. The CLI prints one
-  contextual error without a traceback;
-  command causes keep the targeted redaction above. Arbitrary exception text
-  receives the same URL-userinfo and Clonegrown-custody-token filtering but is
-  not generally secret-scanned. Process-control exceptions are deliberately
-  not converted.
+## Custody rules
 
-Do not run `clonegrown release` until every process you started in the worker
-has stopped; release is your statement that the worker is quiet. Do not run
-`discard --abandon` unless the user has explicitly authorized destroying all
-content in that uncollected worker. Do not run `discard --force` unless the
-user has explicitly authorized destroying the detected post-collection
-changes. Do not run `discard --discard-ignored` or
-`discard --discard-private-refs` unless the user has authorized destroying the
-named category. No flag overrides the lease. Never inspect dotenv files while
-assessing ignored content; ask the user to handle those files themselves.
+- No deletion flag overrides the lease. Recovery never interprets a dead
+  process as lease release. A released ready worker can be taken over with
+  `claim`; collected workers cannot be claimed or reused. An unchanged repeat
+  collection is a no-op using the recorded rewrite policy; later commits are
+  refused under any option. Spawn a new worker for new work.
+- `--abandon` authorizes all content of an uncollected worker, ignored content
+  included. It is refused for a collected worker. Failed unpublished spawn
+  residue has no releasable lease but still needs this acknowledgement.
+- `--force` authorizes detected changes after collection. It does not authorize
+  ignored content or changed clone-private refs. Obtain authorization for the
+  detected changes before using it.
+- `--discard-ignored` authorizes a collected worker's ignored paths. Collection
+  never inspects them. Report the bounded names from the refusal; obtain
+  authorization for their destruction without opening dotenv files.
+- `--discard-private-refs` authorizes changed clone-private refs, including
+  stash and dangling symbolic refs, or an older record without a verifiable
+  baseline. Report the affected names before seeking authorization. Pseudo-refs
+  such as `ORIG_HEAD`/`FETCH_HEAD`, local-config/hook edits, and other non-ref
+  `.git` changes are not protected by that baseline; review private setup
+  before deletion.
+- The deletion unit is the whole numbered slot, including files beside its
+  repository. Such siblings are fingerprinted but have no separate content
+  acknowledgement. Do not store unrelated work there.
+- The lease is cooperative. A process ignoring it can write after the final
+  check. The fingerprint records Git status and entry type/size/mtime outside
+  `.git`, plus clone refs; same-size/same-timestamp rewrites can evade it.
+  Do not use unattended cleanup for valuable work.
 
-## Workspace lifecycle
+## Recovery and reporting
 
-1. From the canonical Git checkout, initialize once if needed:
+An interrupted published spawn is promoted to ready only when untouched;
+changed work is preserved as broken. If a foreign ref prevents inspection,
+recovery reports failure and retains the worker. A broken worker needs
+inspection, explicit release where leased, and authorized abandonment; never
+infer that broken means disposable.
 
-   `clonegrown init`
+Interrupted collection completes only with valid candidate custody and an
+unchanged worker. An exact summary without durable proof that this attempt
+published it is retained as foreign, including after a crash between Git's
+summary commit and the provenance write. Report it for manual inspection;
+do not manufacture provenance or delete refs automatically to unblock it.
+Missing collected results can be restored only from available recorded objects
+into free names. No normal deletion proceeds without the preserved result.
 
-   By default this creates a sibling workspace named `<repo>-dev`.
+Discard first moves an authenticated worker into quarantine. Failed checks
+before deletion preserve the intact slot; interruption after deletion begins
+can leave a partial remainder. Report `quarantine_path`, `quarantine_error`,
+and whether deletion began. A new discard of an intact quarantine requires
+current authorization for every applicable category. A worktree whose admin
+entry was pruned needs ignored-content acknowledgement because enumeration is
+unavailable; an unreadable quarantined clone stays refused. Recovery may
+resume durably authorized deletion. Occupied slots, changed task branches,
+foreign refs, or conflicting admin identity require inspection, never forceful
+manual cleanup.
 
-2. Spawn a worker for the task:
+Status audits documented invariants without repairing records, refs, content,
+or Git indexes; acquiring its lock can recreate the missing control file.
+Inspect both `workers`/`drift` and `issues`. Recovery covers represented
+checkpoints, not every possible filesystem interruption. Worker records and
+collected results are retained indefinitely after discard; no prune or teardown
+command exists. Never infer that another clone can see a commit before explicit
+collection/synchronization.
 
-   `clonegrown spawn "<short task description>"`
+Failure text identifies the stage, durable state, preservation confidence,
+and recovery action. Treat `unverified` literally. Known config values, remote
+URLs, URL userinfo, and private custody tokens are redacted, but other text is
+not generally secret-scanned. Review errors before publishing them. Successful
+status intentionally exposes the full quarantine path for recovery.
 
-   The worker starts from canonical `HEAD` unless `--base <ref-or-sha>` is
-   supplied. Add `--worktree` for a linked worktree or `--strong` for a clone
-   with physically separate object files at spawn. Pass
-   `--request-id <stable-id>` only when a
-   caller may retry the same request. A matching retry rejoins an in-flight
-   request or returns its existing ready, collected, or discarded outcome;
-   `abandoned` and `spawn_failed` outcomes make the ID retryable and allocate
-   anew, while `broken` must be resolved first. A spawn without a request ID
-   creates a new worker.
+## Installation and handoff
 
-3. Work only inside the returned worker repository. Keep unrelated processes
-   out of it and retain the worker until all desired content is accounted for.
+Prefer ordinary `uv tool install git+https://github.com/kserrec/clonegrown.git`
+or `pipx install` for the executable. The optional source `install.sh` requires
+uv and installs the checkout plus this skill under both
+`~/.claude/skills/clonegrown/SKILL.md` and
+`~/.agents/skills/clonegrown/SKILL.md`. It keeps identical files, refuses
+unsafe/differing destinations, and retains completed work on failure. It does
+not migrate old custom installations or automatically remove skills. The user
+reviews old wrappers/skill files before moving them aside; never invent an
+ownership marker or overwrite a differing file to bypass refusal.
 
-4. Test the work and commit the desired result. Collection accepts a clean
-   committed tip; ignored content is outside its current snapshot.
-
-5. Stop every process that can write to the worker, then preserve the committed
-   tip:
-
-   `clonegrown collect <worker-id>`
-
-6. Report the preserved commit and result ref. Integration is a separate,
-   explicit Git operation chosen by the user; collection does not perform it.
-
-7. Once every process you started in the worker has stopped, release the
-   lease:
-
-   `clonegrown release <worker-id>`
-
-   Collection does not require release; release is the handoff that permits
-   deletion. A released worker that is still `ready` can be taken over again
-   with `clonegrown claim <worker-id>`; a collected worker cannot.
-
-8. Remove the collected worker:
-
-   `clonegrown discard <worker-id>`
-
-   If it refuses because of ignored paths, report them to the user; only with
-   their authorization add `--discard-ignored`. If it refuses because of
-   changes after collection, that is `--force`, separately authorized. If a
-   clone's private refs differ from its publication baseline, report the names
-   and add `--discard-private-refs` only with separate authorization.
-
-9. If an operation was interrupted or durable state is unclear, reconcile the
-   checkpoints Clonegrown can represent:
-
-   `clonegrown recover`
-
-   Then inspect:
-
-   `clonegrown status`
-
-## Hard invariants
-
-- Never delete a worker directory manually.
-- Never assume another clone can see a worker's commit before collection or
-  another explicit synchronization operation.
-- Never reuse a collected worker or use one worker for unrelated tasks.
-- Never intentionally assign two tasks the same worker branch.
-- Never intentionally push to the local canonical-source remote. Its invalid
-  push URL is only a best-effort guard against mistakes.
-- In a worktree worker, do not change shared Git config, delete branches, or
-  alter a stash you did not create.
-- Do not treat Clonegrown as an operating-system security boundary.
-
-## Target custody contract — intended; checkpoint not qualified
-
-The accepted protocol adds a durable cooperative work lease with an explicit
-release before deletion (`release`, `claim`), detects ignored paths and
-requires a separate `--discard-ignored` acknowledgement for a collected
-worker, detects changed clone-private refs (direct or symbolic, dangling
-included) and requires `--discard-private-refs`, quarantines an authenticated worker before checked
-deletion, keeps workers one-shot after collection, retains discarded result
-custody, and leaves integration explicit. The notice at the top records the
-repaired deviations and the review still required; do not treat this tree as
-qualified until that review is recorded.
-
-## Installation ownership
-
-The custom `install.sh` gives its source directory, command wrapper, Claude
-skill directory, and Codex skill directory versioned ownership evidence tied
-to one installation ID. It creates absent targets and updates only targets
-carrying that ID. It refuses unowned targets, direct symlinks, root/home
-targets, and overlapping replacement paths. Do not manufacture or copy an
-ownership marker to bypass a refusal.
-
-Installations made before these markers existed cannot be adopted
-automatically. The user must personally verify and move or remove each old
-target before a fresh custom install. A Python tool manager remains the
-CLI-only alternative. An owned custom update replaces the entire source and
-skill directories, including extra files placed inside them.
-
-## Result handoff
-
-When finishing, report at minimum:
-
-- worker ID and path;
-- branch and final commit SHA;
-- whether collection succeeded and the preserved result ref;
-- whether integration occurred as a separate operation;
-- whether the worker remains on disk;
-- test/result summary and any ignored-content or active-writer uncertainty.
+At handoff, report worker ID/path, branch/final commit, collection status and
+result ref, whether separate integration occurred, whether the worker remains,
+test results, and any ignored-content or writer uncertainty.

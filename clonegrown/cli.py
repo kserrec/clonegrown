@@ -31,7 +31,8 @@ _BOOKKEEPING_KEYS = {
     "owner_pid", "owner_start", "heartbeat", "stage_root",
     "worktree_admin", "branch_cleanup_sha", "pending_spawn_details",
     "clone_private_refs",
-    "candidate_sha", "candidate_ref", "collect_started", "collected_snapshot", "collection_race",
+    "candidate_sha", "candidate_ref", "collect_started", "summary_published", "collected_snapshot",
+    "collection_race",
     "discard_intent", "discard_previous", "discard_started", "quarantine_snapshot",
 }
 _TIMESTAMP_KEYS = {"created", "ready", "failed", "collected", "discarded", "collection_failed", "collection_recovered",
